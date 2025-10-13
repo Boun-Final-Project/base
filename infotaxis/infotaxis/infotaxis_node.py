@@ -255,7 +255,6 @@ class InfotaxisNode(Node):
         # Declare parameters
         self.declare_parameter('z_level', 5)
         self.declare_parameter('detection_threshold', 1.0)
-        self.declare_parameter('step_size', 0.5)
         self.declare_parameter('robot_namespace', '/PioneerP3DX')
         self.declare_parameter('use_ideal_plume', False)  # For testing with analytical model
 
