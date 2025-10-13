@@ -31,12 +31,24 @@ class SensorHandler:
             10
         )
 
-    def process_sensor_reading(self, msg: GasSensor):
+    def set_detection_threshold(self, threshold: float):
+        """
+        Set a new gas detection threshold.
+
+        Args:
+            threshold: New detection threshold in ppm
+        """
+        self.detection_threshold = threshold
+
+    def process_sensor_reading(self, msg: GasSensor) -> bool:
         """
         Process gas sensor reading and update detection state.
 
         Args:
             msg: GasSensor message
+
+        Returns:
+            True if gas is detected, False otherwise
         """
         self.latest_sensor_reading = msg.raw
 
@@ -55,6 +67,7 @@ class SensorHandler:
 
         # Publish visualization marker
         self.publish_detection_marker(msg.header)
+        return self.gas_detected
 
     def publish_detection_marker(self, header: Header):
         """
