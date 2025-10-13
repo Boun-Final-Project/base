@@ -274,7 +274,7 @@ class InfotaxisNode(Node):
         self.gas_detected : bool = False       # Current gas detection state
 
         # Throttle infotaxis updates to prevent moving too fast
-        self.declare_parameter('infotaxis_update_interval', 0.25)  # seconds between moves
+        self.declare_parameter('infotaxis_update_interval', 0.1)  # seconds between moves
         self.infotaxis_update_interval = self.get_parameter('infotaxis_update_interval').get_parameter_value().double_value
         self.last_infotaxis_time = self.get_clock().now()
 
