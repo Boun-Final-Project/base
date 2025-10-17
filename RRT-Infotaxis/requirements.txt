@@ -1,0 +1,11 @@
+# Core scientific computing
+numpy>=2.0.0
+matplotlib>=3.10.0
+
+# Jupyter notebook support
+jupyter>=1.0.0
+ipykernel>=6.30.0
+notebook>=7.4.0
+
+# Additional libraries for future implementation
+scipy>=1.13.0  # For statistical functions and optimization
