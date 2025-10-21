@@ -1,0 +1,113 @@
+Wind Visualizer - Quick Start Guide
+====================================
+
+DESCRIPTION
+-----------
+The wind_visualizer package retrieves the 3D occupancy map and wind field data
+from GADEN environment services, then publishes visualization markers showing
+wind vectors as colored arrows in RViz.
+
+INSTALLATION
+------------
+1. Build the package:
+   cd ~/ros2_ws
+   colcon build --packages-select wind_visualizer
+   source install/setup.bash
+
+RUNNING THE NODE
+----------------
+Option 1 - Direct execution:
+   ros2 run wind_visualizer wind_viz_node
+
+Option 2 - Using launch file:
+   ros2 launch wind_visualizer wind_visualizer.launch.py
+
+Option 3 - With custom parameters:
+   ros2 run wind_visualizer wind_viz_node --ros-args \
+       -p sampling_resolution:=0.5 \
+       -p arrow_scale:=0.3 \
+       -p update_rate:=1.0 \
+       -p min_wind_magnitude:=0.01
+
+PARAMETERS
+----------
+- sampling_resolution (float, default: 0.5)
+    Distance in meters between wind sampling points
+
+- arrow_scale (float, default: 0.3)
+    Multiplier for arrow size (larger = bigger arrows)
+
+- update_rate (float, default: 1.0)
+    Frequency in Hz for updating wind visualization
+
+- min_wind_magnitude (float, default: 0.01)
+    Minimum wind speed (m/s) to display (filters out very small vectors)
+
+VISUALIZATION IN RVIZ
+---------------------
+1. Launch RViz:
+   rviz2
+
+2. Set Fixed Frame to "map" in Global Options
+
+3. Add MarkerArray display:
+   - Click "Add" button
+   - Select "By topic" tab
+   - Find /wind_vectors and select MarkerArray
+   - Click OK
+
+4. You should see colored arrows:
+   - Blue arrows = Low wind speed
+   - Red arrows = High wind speed
+   - Arrow direction = Wind flow direction
+   - Arrow length = Wind magnitude
+
+TOPICS
+------
+Published:
+  /wind_vectors (visualization_msgs/MarkerArray)
+    - Wind vector visualization markers for RViz
+
+Services Used:
+  /gaden_environment/occupancyMap3D (gaden_msgs/srv/Occupancy)
+    - Retrieves 3D occupancy grid of environment
+
+  /wind_value (gaden_msgs/srv/WindPosition)
+    - Queries wind velocity components at specified positions
+
+EXAMPLE WORKFLOW
+----------------
+1. Start GADEN environment (ensure services are running):
+   ros2 service list | grep -E "(wind_value|occupancyMap3D)"
+
+2. Launch wind visualizer:
+   ros2 launch wind_visualizer wind_visualizer.launch.py
+
+3. Open RViz and configure MarkerArray display as above
+
+4. Adjust parameters if needed (requires node restart):
+   # For more sampling points (slower but more detailed)
+   ros2 run wind_visualizer wind_viz_node --ros-args -p sampling_resolution:=0.3
+
+   # For larger arrows (easier to see)
+   ros2 run wind_visualizer wind_viz_node --ros-args -p arrow_scale:=0.5
+
+   # For faster updates
+   ros2 run wind_visualizer wind_viz_node --ros-args -p update_rate:=2.0
+
+TROUBLESHOOTING
+---------------
+Issue: "Waiting for services..."
+Solution: Make sure GADEN environment is running and services are available
+
+Issue: No arrows visible in RViz
+Solution: Check that Fixed Frame is "map" and MarkerArray topic is /wind_vectors
+
+Issue: Too many/few arrows
+Solution: Adjust sampling_resolution parameter (smaller = more arrows)
+
+Issue: Arrows too small/large
+Solution: Adjust arrow_scale parameter
+
+Issue: Node crashes or errors
+Solution: Check that gaden_msgs package is installed and sourced
