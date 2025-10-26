@@ -13,6 +13,7 @@ from .particle_filter_optimized import ParticleFilterOptimized as ParticleFilter
 from .gaussian_plume import GaussianPlumeModel
 from .rrt import RRT
 from .unit_conversion import GasUnitConverter
+from .text_visualizer import TextVisualizer
 import numpy as np
 
 
@@ -30,6 +31,10 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('delta', 1)
         self.declare_parameter('xy_goal_tolerance', 0.3)  # XY distance tolerance in meters
         self.declare_parameter('robot_radius', 0.35)  # Robot footprint radius for collision checking
+        self.declare_parameter('sigma_threshold', 0.3)  # Std dev threshold for estimation convergence (scaled for small map)
+        self.declare_parameter('success_distance', 0.5)  # Distance threshold for source localization success (meters)
+        self.declare_parameter('zeta_1', 0.1)  # Gaussian dispersion parameter
+        self.declare_parameter('zeta_2', 0.1)  # Gaussian dispersion parameter
 
         # Sensor readings
         self.sensor_raw_value = None
@@ -40,6 +45,7 @@ class RRTInfotaxisNode(Node):
         self.is_moving = False
         self.goal_handle = None
         self.goal_position = None  # Store target goal position
+        self.search_complete = False  # Flag to indicate if source search is finished
 
         # Subscriptions
         self.pose_subscription = self.create_subscription(
@@ -62,6 +68,7 @@ class RRTInfotaxisNode(Node):
         self.best_path_pub = self.create_publisher(Marker, '/rrt_infotaxis/best_path', 10)
         self.estimated_source_pub = self.create_publisher(Marker, '/rrt_infotaxis/estimated_source', 10)
         self.current_pos_pub = self.create_publisher(Marker, '/rrt_infotaxis/current_position', 10)
+        self.text_info_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/source_info_text', 10)
 
         # Nav2 action client
         self.nav_to_pose_client = ActionClient(self, NavigateToPose, '/PioneerP3DX/navigate_to_pose')
@@ -85,11 +92,14 @@ class RRTInfotaxisNode(Node):
 
         self.gaussian_plume_model = GaussianPlumeModel(
             wind_velocity=self.get_parameter('wind_velocity').value,
-            wind_direction=self.get_parameter('wind_direction').value)
+            wind_direction=self.get_parameter('wind_direction').value,
+            zeta1=self.get_parameter('zeta_1').value,
+            zeta2=self.get_parameter('zeta_2').value
+        )
         self.binary_sensor_model = BinarySensorModel()
         self.particle_filter = ParticleFilter(
             num_particles=self.get_parameter('number_of_particles').value,
-            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 0.05)},
+            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 1)},
             binary_sensor_model=self.binary_sensor_model,
             dispersion_model=self.gaussian_plume_model
         )
@@ -101,6 +111,10 @@ class RRTInfotaxisNode(Node):
                        robot_radius=self.get_parameter('robot_radius').value)
         self.ppm_converter = GasUnitConverter()
         self.get_logger().info('RRT initialized')
+
+        # Initialize text visualizer
+        self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
+        self.get_logger().info('Text visualizer initialized')
 
         # Timer for taking steps (start after all components are initialized)
         self.timer = self.create_timer(0.2, self.take_step)
@@ -274,6 +288,47 @@ class RRTInfotaxisNode(Node):
 
         self.current_pos_pub.publish(marker)
 
+    def is_estimation_converged(self):
+        """Check if particle filter estimation has converged (std dev below threshold)."""
+        current_means, current_stds = self.particle_filter.get_estimate()
+        sigma_x = current_stds["x"]
+        sigma_y = current_stds["y"]
+
+        # Use maximum of x and y standard deviations
+        sigma_p = max(sigma_x, sigma_y)
+
+        sigma_threshold = self.get_parameter('sigma_threshold').value
+        converged = sigma_p < sigma_threshold
+
+        if converged:
+            self.get_logger().info(f'Estimation converged! σ_p = {sigma_p:.3f} < σ_t = {sigma_threshold:.3f}')
+
+        return converged
+
+    def is_source_reached(self):
+        """Check if robot reached the estimated source location."""
+        if self.current_position is None:
+            return False
+
+        # Get estimated source location
+        current_means, _ = self.particle_filter.get_estimate()
+        est_x = current_means["x"]
+        est_y = current_means["y"]
+
+        # Calculate distance to estimated source
+        dx = self.current_position[0] - est_x
+        dy = self.current_position[1] - est_y
+        distance = (dx**2 + dy**2)**0.5
+
+        success_distance = self.get_parameter('success_distance').value
+        reached = distance <= success_distance
+
+        if reached:
+            self.get_logger().info(f'Source reached! Distance = {distance:.3f}m <= {success_distance:.3f}m')
+            self.get_logger().info(f'Estimated source location: ({est_x:.2f}, {est_y:.2f})')
+
+        return reached
+
     def is_goal_reached(self):
         """Check if robot is close enough to goal (XY only)."""
         if self.goal_position is None or self.current_position is None:
@@ -351,6 +406,11 @@ class RRTInfotaxisNode(Node):
         self.goal_handle = None
 
     def take_step(self):
+        # Check if search is already complete
+        if self.search_complete:
+            self.get_logger().debug('Search complete, no further action needed')
+            return
+
         # Check if we have necessary data
         if self.sensor_raw_value is None or self.current_position is None:
             self.get_logger().debug('Waiting for sensor and position data...')
@@ -411,7 +471,39 @@ class RRTInfotaxisNode(Node):
         self.visualize_estimated_source(est_x, est_y)
         self.visualize_current_position(self.current_position)
 
+        # Visualize text info box
+        current_stds = self.particle_filter.get_estimate()[1]
+        sigma_p = max(current_stds["x"], current_stds["y"])
+        self.text_visualizer.publish_source_info(
+            timestamp=self.get_clock().now().to_msg(),
+            predicted_x=est_x,
+            predicted_y=est_y,
+            predicted_z=0.5,  # Assuming source at 0.5m height
+            std_dev=sigma_p,
+            search_complete=self.search_complete
+        )
+
         self.get_logger().info(f'[PLAN] Next position: {next_pos}, Estimated source: ({est_x:.2f}, {est_y:.2f}, {est_Q:.2f})')
+
+        # Check finishing conditions (Algorithm 1, line 22 in the paper)
+        # Paper only requires estimation convergence (σ_p < σ_t)
+        if self.is_estimation_converged():
+            self.get_logger().info('='*60)
+            self.get_logger().info('SOURCE SEARCH COMPLETED SUCCESSFULLY!')
+            self.get_logger().info(f'Final estimated source: ({est_x:.2f}, {est_y:.2f})')
+            self.get_logger().info(f'Final estimated release rate: {est_Q:.2f}')
+            self.get_logger().info(f'Robot position: ({self.current_position[0]:.2f}, {self.current_position[1]:.2f})')
+
+            # Calculate distance to estimated source for reference
+            if self.current_position is not None:
+                dx = self.current_position[0] - est_x
+                dy = self.current_position[1] - est_y
+                distance = (dx**2 + dy**2)**0.5
+                self.get_logger().info(f'Distance to estimated source: {distance:.2f}m')
+
+            self.get_logger().info('='*60)
+            self.search_complete = True
+            return
 
         # 3. MOVE: Send goal to Nav2
         self.get_logger().info(f'[MOVE] Sending navigation goal to ({next_pos[0]:.2f}, {next_pos[1]:.2f})')

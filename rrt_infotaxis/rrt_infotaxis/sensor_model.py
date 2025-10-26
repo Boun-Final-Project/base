@@ -78,8 +78,15 @@ class BinarySensorModel:
         # Use CDF of standard normal distribution
         beta = norm.cdf(delta_c / sigma_g)
 
+        # Apply minimum likelihood floor to prevent particle collapse
+        # This ensures particles are never completely rejected during RRT planning
+        MIN_LIKELIHOOD = 1e-10
+
         # Eq. 24
         if binary_value == 0:
-            return beta
+            prob = beta
         else:
-            return 1 - beta
+            prob = 1 - beta
+
+        # Clamp to avoid complete particle rejection
+        return max(MIN_LIKELIHOOD, min(1.0 - MIN_LIKELIHOOD, prob))
