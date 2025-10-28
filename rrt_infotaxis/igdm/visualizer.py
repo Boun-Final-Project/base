@@ -83,13 +83,21 @@ class StepVisualizer:
         occupancy_grid : OccupancyGrid, optional
             Occupancy grid for obstacle visualization
         """
+        # Get map dimensions from occupancy grid, default to 10x6 if not provided
+        if occupancy_grid is not None:
+            map_width = occupancy_grid.width
+            map_height = occupancy_grid.height
+        else:
+            map_width = 10.0
+            map_height = 6.0
+
         # Create figure with 3 subplots: trajectory, concentration field, and particles
         fig = plt.figure(figsize=(16, 5))
 
         # Plot 1: Trajectory and estimation
         ax1 = plt.subplot(1, 3, 1)
-        ax1.set_xlim(0, 10)
-        ax1.set_ylim(0, 6)
+        ax1.set_xlim(0, map_width)
+        ax1.set_ylim(0, map_height)
         ax1.set_aspect('equal')
         ax1.set_title(f'Step {step_num}: RRT-Infotaxis Trajectory', fontsize=12, fontweight='bold')
         ax1.set_xlabel('X (m)')
@@ -108,8 +116,8 @@ class StepVisualizer:
 
         # Plot 2: IGDM Concentration field (time-dependent)
         ax2 = plt.subplot(1, 3, 2)
-        ax2.set_xlim(0, 10)
-        ax2.set_ylim(0, 6)
+        ax2.set_xlim(0, map_width)
+        ax2.set_ylim(0, map_height)
         ax2.set_aspect('equal')
 
         # Show time-dependent dispersion in title
@@ -121,8 +129,11 @@ class StepVisualizer:
         ax2.set_xlabel('X (m)')
         ax2.set_ylabel('Y (m)')
 
-        x_grid = np.linspace(0, 10, 50)
-        y_grid = np.linspace(0, 6, 30)
+        # Scale grid resolution based on map size (maintain reasonable detail)
+        x_resolution = max(50, int(map_width * 5))
+        y_resolution = max(30, int(map_height * 5))
+        x_grid = np.linspace(0, map_width, x_resolution)
+        y_grid = np.linspace(0, map_height, y_resolution)
         X, Y = np.meshgrid(x_grid, y_grid)
 
         # Compute concentration field using actual IGDM model with time-dependent sigma
@@ -147,8 +158,8 @@ class StepVisualizer:
 
         # Plot 3: Particle filter visualization
         ax3 = plt.subplot(1, 3, 3)
-        ax3.set_xlim(0, 10)
-        ax3.set_ylim(0, 6)
+        ax3.set_xlim(0, map_width)
+        ax3.set_ylim(0, map_height)
         ax3.set_aspect('equal')
         ax3.set_title(f'Particle Positions (N={particle_filter.N if particle_filter else 0})',
                      fontsize=12, fontweight='bold')
