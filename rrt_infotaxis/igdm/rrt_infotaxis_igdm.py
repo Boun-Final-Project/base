@@ -64,7 +64,7 @@ class RRTInfotaxisIGDM:
         self.sensor = BinarySensorModel()
 
         self.particle_filter = ParticleFilter(
-            num_particles=200,  # Reduced for faster computation
+            num_particles=400,  # Reduced for faster computation
             search_bounds={'x': (0, self.room_width), 'y': (0, self.room_height), 'Q': (0, 2.0)},
             binary_sensor_model=self.sensor,
             dispersion_model=self.igdm
@@ -194,7 +194,8 @@ class RRTInfotaxisIGDM:
                 current_step=step_num,
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
-                d_success_thr=self.d_success_thr
+                d_success_thr=self.d_success_thr,
+                occupancy_grid=self.grid
             )
 
             self.search_complete = True
@@ -218,7 +219,8 @@ class RRTInfotaxisIGDM:
                 current_step=step_num,
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
-                d_success_thr=self.d_success_thr
+                d_success_thr=self.d_success_thr,
+                occupancy_grid=self.grid
             )
 
             self.search_complete = True
@@ -236,7 +238,8 @@ class RRTInfotaxisIGDM:
             current_step=step_num,
             particle_filter=self.particle_filter,
             distance_to_true=dist_to_true,
-            d_success_thr=self.d_success_thr
+            d_success_thr=self.d_success_thr,
+            occupancy_grid=self.grid
         )
 
         # ==== PLAN PHASE ====

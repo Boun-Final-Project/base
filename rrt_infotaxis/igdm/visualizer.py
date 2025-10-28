@@ -26,9 +26,34 @@ class StepVisualizer:
         self.step_count = 0
         self.igdm_model = igdm_model
 
+    def _plot_obstacles(self, ax, occupancy_grid):
+        """Helper method to plot obstacles on a subplot.
+
+        Parameters:
+        -----------
+        ax : matplotlib.axes.Axes
+            The axis to plot obstacles on
+        occupancy_grid : OccupancyGrid
+            The occupancy grid containing obstacle information
+        """
+        if occupancy_grid is None:
+            return
+
+        # Find all occupied cells and draw them
+        for gy in range(occupancy_grid.grid_height):
+            for gx in range(occupancy_grid.grid_width):
+                if occupancy_grid.grid[gy, gx] != 0:
+                    # Convert grid coordinates to world coordinates
+                    x = gx * occupancy_grid.resolution
+                    y = gy * occupancy_grid.resolution
+                    # Draw a filled rectangle for the cell
+                    rect = plt.Rectangle((x, y), occupancy_grid.resolution, occupancy_grid.resolution,
+                                       facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7)
+                    ax.add_patch(rect)
+
     def save_step(self, robot_pos, trajectory, est_source, est_std, true_source,
                   step_num, sigma_p, current_step=None, particle_filter=None,
-                  distance_to_true=None, d_success_thr=None):
+                  distance_to_true=None, d_success_thr=None, occupancy_grid=None):
         """Save a step visualization with particle filter visualization.
 
         Parameters:
@@ -55,6 +80,8 @@ class StepVisualizer:
             Current distance to true source location
         d_success_thr : float, optional
             Success distance threshold
+        occupancy_grid : OccupancyGrid, optional
+            Occupancy grid for obstacle visualization
         """
         # Create figure with 3 subplots: trajectory, concentration field, and particles
         fig = plt.figure(figsize=(16, 5))
@@ -67,6 +94,9 @@ class StepVisualizer:
         ax1.set_title(f'Step {step_num}: RRT-Infotaxis Trajectory', fontsize=12, fontweight='bold')
         ax1.set_xlabel('X (m)')
         ax1.set_ylabel('Y (m)')
+
+        # Plot obstacles first (so they appear behind other elements)
+        self._plot_obstacles(ax1, occupancy_grid)
 
         traj = np.array(trajectory)
         ax1.plot(traj[:, 0], traj[:, 1], 'b-o', linewidth=2, markersize=4, alpha=0.7, label='Robot path')
@@ -109,6 +139,10 @@ class StepVisualizer:
 
         im = ax2.contourf(X, Y, Z, levels=15, cmap='hot_r')
         cbar = plt.colorbar(im, ax=ax2, label='Concentration')
+
+        # Plot obstacles on concentration field
+        self._plot_obstacles(ax2, occupancy_grid)
+
         ax2.plot(true_source[0], true_source[1], 'r*', markersize=10)
 
         # Plot 3: Particle filter visualization
@@ -120,6 +154,9 @@ class StepVisualizer:
                      fontsize=12, fontweight='bold')
         ax3.set_xlabel('X (m)')
         ax3.set_ylabel('Y (m)')
+
+        # Plot obstacles first (so they appear behind particles)
+        self._plot_obstacles(ax3, occupancy_grid)
 
         if particle_filter is not None:
             # Extract particle positions (x, y) and weights

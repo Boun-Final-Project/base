@@ -81,3 +81,34 @@ class OccupancyGrid:
                     if self.grid[gy + dy, gx + dx] != 0:
                         return False
         return True
+
+    def add_rectangular_obstacle(self, x_min, x_max, y_min, y_max, value=1):
+        """Add a rectangular obstacle to the grid.
+
+        Parameters:
+        -----------
+        x_min : float
+            Minimum x coordinate of obstacle (world frame)
+        x_max : float
+            Maximum x coordinate of obstacle (world frame)
+        y_min : float
+            Minimum y coordinate of obstacle (world frame)
+        y_max : float
+            Maximum y coordinate of obstacle (world frame)
+        value : int
+            Grid value for the obstacle (default 1 = occupied)
+        """
+        gx_min, gy_min = self.world_to_grid(x_min, y_min)
+        gx_max, gy_max = self.world_to_grid(x_max, y_max)
+
+        # Ensure valid ranges
+        gx_min = max(0, min(gx_min, self.grid_width - 1))
+        gx_max = max(0, min(gx_max, self.grid_width - 1))
+        gy_min = max(0, min(gy_min, self.grid_height - 1))
+        gy_max = max(0, min(gy_max, self.grid_height - 1))
+
+        # Fill the obstacle region
+        for gx in range(min(gx_min, gx_max), max(gx_min, gx_max) + 1):
+            for gy in range(min(gy_min, gy_max), max(gy_min, gy_max) + 1):
+                if 0 <= gx < self.grid_width and 0 <= gy < self.grid_height:
+                    self.grid[gy, gx] = value
