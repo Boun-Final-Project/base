@@ -30,8 +30,8 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('wind_direction', 0)  # 0°=+X, 90°=+Y, 180°=-X, 270°=-Y
         self.declare_parameter('wind_velocity', 0.1)
         self.declare_parameter('number_of_particles', 1000)
-        self.declare_parameter('n_tn', 30)
-        self.declare_parameter('delta', 0.5)
+        self.declare_parameter('n_tn', 50)
+        self.declare_parameter('delta', 0.7)
         self.declare_parameter('xy_goal_tolerance', 0.3)  # XY distance tolerance in meters
         self.declare_parameter('robot_radius', 0.35)  # Robot footprint radius for collision checking
         self.declare_parameter('sigma_threshold', 0.30)  # Std dev threshold for estimation convergence (scaled for small map)

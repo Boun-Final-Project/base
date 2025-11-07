@@ -405,7 +405,7 @@ class ParticleFilterOptimized:
 
     def get_entropy(self):
         """Compute Shannon entropy of particle distribution."""
-        weights_safe = self.weights[self.weights > 1e-10]
+        weights_safe = self.weights[self.weights > 1e-15]
         entropy = -np.sum(weights_safe * np.log(weights_safe))
         return entropy
 
@@ -438,7 +438,7 @@ class ParticleFilterOptimized:
             return np.log(self.N)
 
         # Compute entropy from hypothetical weights
-        weights_safe = hypothetical_weights[hypothetical_weights > 1e-10]
+        weights_safe = hypothetical_weights[hypothetical_weights > 1e-15]
         entropy = -np.sum(weights_safe * np.log(weights_safe))
 
         return entropy
@@ -457,7 +457,7 @@ class ParticleFilterOptimized:
         sigma_g = self.sensor_model.alpha * predicted_concs + self.sensor_model.sigma_env
 
         # Handle division by zero
-        sigma_g = np.maximum(sigma_g, 1e-10)
+        sigma_g = np.maximum(sigma_g, 1e-15)
 
         # Vectorized CDF computation
         phi = scipy_norm.cdf(delta_c / sigma_g)
