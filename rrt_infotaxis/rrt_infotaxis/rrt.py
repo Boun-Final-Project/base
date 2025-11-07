@@ -126,12 +126,11 @@ class RRT:
             # Two outcomes: detection (1) and no detection (0)
             expected_entropy = 0.0
             for measurement in [0, 1]:
-                pf_copy = initial_particle_filter.copy()
-                probability_of_measurement = pf_copy.predict_measurement_probability(position, measurement)
-                # CRITICAL: skip_resample=True prevents entropy increase from stochastic MCMC/resampling
-                pf_copy.update(measurement, position, skip_resample=True)
-                new_entropy = pf_copy.get_entropy()
-                expected_entropy += probability_of_measurement * new_entropy
+                # Get probability of this measurement
+                probability_of_measurement = initial_particle_filter.predict_measurement_probability(position, measurement)
+                # Compute hypothetical entropy WITHOUT modifying filter state (Eq. 28-29 from paper)
+                hypothetical_entropy = initial_particle_filter.compute_hypothetical_entropy(measurement, position)
+                expected_entropy += probability_of_measurement * hypothetical_entropy
             information_gain = start_entropy - expected_entropy
             node.entropy_gain = information_gain
             discounted_gain = (self.discount_factor ** i) * information_gain

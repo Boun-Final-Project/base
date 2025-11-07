@@ -7,9 +7,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from nav2_msgs.action import NavigateToPose
 from .occupancy_grid import create_occupancy_map_from_service
-from .sensor_model import BinarySensorModel, DiscreteSensorModel
-# from .particle_filter import ParticleFilter
-from .particle_filter_optimized import ParticleFilterOptimized as ParticleFilter
+from .sensor_model import DiscreteSensorModel
+from .discrete_particle_filter import DiscreteParticleFilter
 from .gaussian_plume import GaussianPlumeModel
 from .rrt import RRT
 from .unit_conversion import GasUnitConverter
@@ -20,11 +19,11 @@ from datetime import datetime
 import os
 
 
-class RRTInfotaxisNode(Node):
-    """RRT Infotaxis node that receives occupancy map."""
+class DiscreteRRTInfotaxisNode(Node):
+    """RRT Infotaxis node with discrete multi-level sensor model."""
 
     def __init__(self):
-        super().__init__('rrt_infotaxis_node')
+        super().__init__('discrete_rrt_infotaxis_node')
 
         # Parameters
         self.declare_parameter('wind_direction', 0)  # 0°=+X, 90°=+Y, 180°=-X, 270°=-Y
@@ -34,11 +33,12 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('delta', 0.5)
         self.declare_parameter('xy_goal_tolerance', 0.3)  # XY distance tolerance in meters
         self.declare_parameter('robot_radius', 0.35)  # Robot footprint radius for collision checking
-        self.declare_parameter('sigma_threshold', 0.30)  # Std dev threshold for estimation convergence (scaled for small map)
+        self.declare_parameter('sigma_threshold', 0.30)  # Std dev threshold for estimation convergence
         self.declare_parameter('success_distance', 0.5)  # Distance threshold for source localization success (meters)
         self.declare_parameter('zeta_1', 0.1)  # Gaussian dispersion parameter
         self.declare_parameter('zeta_2', 0.1)  # Gaussian dispersion parameter
         self.declare_parameter('positive_weight', 0.5)  # Weight of information gain compared to travel cost
+        self.declare_parameter('num_discrete_levels', 6)  # Number of discrete sensor levels
 
         # Sensor readings
         self.sensor_raw_value = None
@@ -107,14 +107,18 @@ class RRTInfotaxisNode(Node):
             zeta1=self.get_parameter('zeta_1').value,
             zeta2=self.get_parameter('zeta_2').value
         )
-        self.sensor_model = BinarySensorModel()
-        self.particle_filter = ParticleFilter(
+
+        # Use discrete sensor model with configurable number of levels
+        num_levels = self.get_parameter('num_discrete_levels').value
+        self.sensor_model = DiscreteSensorModel(num_levels=num_levels)
+        self.particle_filter = DiscreteParticleFilter(
             num_particles=self.get_parameter('number_of_particles').value,
             search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0.001, 0.02)},
-            binary_sensor_model=self.sensor_model,
+            binary_sensor_model=self.sensor_model,  # Parameter name kept for API compatibility
             dispersion_model=self.gaussian_plume_model
         )
-        self.get_logger().info('Particle filter initialized')
+        self.get_logger().info(f'Discrete particle filter initialized with {num_levels} sensor levels')
+
         self.rrt = RRT(occupancy_grid=self.occupancy_map,
                        N_tn=self.get_parameter('n_tn').value,
                        R_range=self.get_parameter('n_tn').value * self.get_parameter('delta').value,
@@ -140,7 +144,7 @@ class RRTInfotaxisNode(Node):
 
         # Create log file with timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_filename = os.path.join(log_dir, f'entropy_log_{timestamp}.csv')
+        log_filename = os.path.join(log_dir, f'discrete_entropy_log_{timestamp}.csv')
 
         self.log_file = open(log_filename, 'w', newline='')
         self.csv_writer = csv.writer(self.log_file)
@@ -148,7 +152,7 @@ class RRTInfotaxisNode(Node):
         # Write header
         self.csv_writer.writerow([
             'step', 'elapsed_time', 'entropy', 'std_dev_x', 'std_dev_y', 'std_dev_Q',
-            'est_x', 'est_y', 'est_Q', 'sensor_value', 'binary_value', 'threshold',
+            'est_x', 'est_y', 'est_Q', 'sensor_value', 'discrete_level', 'max_threshold',
             'num_branches', 'best_utility', 'J1_entropy_gain', 'J2_travel_cost'
         ])
         self.log_file.flush()
@@ -452,11 +456,11 @@ class RRTInfotaxisNode(Node):
             self.get_logger().debug('Waiting for sensor and position data...')
             return
 
-        # Initialize sensor threshold with first measurement
+        # Initialize sensor thresholds with first measurement
         if not self.sensor_initialized:
-            self.sensor_model.initialize_threshold(self.ppm_converter.ppm_to_ug_m3(self.sensor_raw_value))
+            self.sensor_model.initialize_thresholds(self.ppm_converter.ppm_to_ug_m3(self.sensor_raw_value))
             self.sensor_initialized = True
-            self.get_logger().info(f'Binary sensor initialized with threshold: {self.sensor_model.threshold:.2f} μg/m³ ({self.sensor_raw_value:.4f} ppm)')
+            self.get_logger().info(f'Discrete sensor initialized with {self.sensor_model.num_levels} levels based on measurement: {self.sensor_raw_value:.4f} ppm')
             return
 
         # Check if robot is currently moving to a goal
@@ -482,12 +486,12 @@ class RRTInfotaxisNode(Node):
         current_measurement_ppm = self.sensor_raw_value
         current_measurement = self.ppm_converter.ppm_to_ug_m3(current_measurement_ppm)
 
-        # Update threshold adaptively, then compute binary measurement
-        self.sensor_model.update_threshold(current_measurement)
-        binary_measurement = self.sensor_model.get_binary_measurement(current_measurement)
+        # Update thresholds adaptively, then compute discrete measurement
+        self.sensor_model.update_thresholds(current_measurement)
+        discrete_measurement = self.sensor_model.get_discrete_measurement(current_measurement)
 
-        self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement:.0f} μg/m³, Binary: {binary_measurement}, Threshold: {self.sensor_model.threshold:.2f} μg/m³')
-        self.particle_filter.update(binary_measurement, self.current_position)
+        self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement:.0f} μg/m³, Discrete level: {discrete_measurement}/{self.sensor_model.num_levels-1}')
+        self.particle_filter.update(discrete_measurement, self.current_position)
 
         # Estimate source location
         current_means, current_stds = self.particle_filter.get_estimate()
@@ -521,8 +525,8 @@ class RRTInfotaxisNode(Node):
             std_dev=sigma_p,
             search_complete=self.search_complete,
             sensor_value=current_measurement,
-            binary_value=binary_measurement,
-            threshold=self.sensor_model.threshold if self.sensor_model.threshold is not None else 0,
+            binary_value=discrete_measurement,  # Shows discrete level (0 to num_levels-1)
+            threshold=self.sensor_model.thresholds[-1] if self.sensor_model.initialized else 0,  # Show max threshold
             # Branch Information (BI) for debugging
             num_branches=debug_info["num_branches"],
             best_utility=debug_info["best_utility"],
@@ -545,8 +549,8 @@ class RRTInfotaxisNode(Node):
             f'{est_y:.4f}',
             f'{est_Q:.4f}',
             f'{current_measurement:.4f}',
-            binary_measurement,
-            f'{self.sensor_model.threshold:.4f}' if self.sensor_model.threshold is not None else '0.0',
+            discrete_measurement,
+            f'{self.sensor_model.thresholds[-1]:.4f}' if self.sensor_model.initialized else '0.0',
             debug_info["num_branches"],
             f'{debug_info["best_utility"]:.4f}',
             f'{debug_info["best_entropy_gain"]:.4f}',
@@ -586,11 +590,13 @@ class RRTInfotaxisNode(Node):
         if self.log_file is not None:
             self.log_file.close()
             self.get_logger().info('Closed entropy log file')
+
+
 def main(args=None):
     """Main function."""
     rclpy.init(args=args)
     try:
-        node = RRTInfotaxisNode()
+        node = DiscreteRRTInfotaxisNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass

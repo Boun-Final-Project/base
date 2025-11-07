@@ -27,6 +27,7 @@ setup(
             "start = rrt_infotaxis.rrt_infotaxis:main",
             'calibrate_q = rrt_infotaxis.calibrate_q:main',
             'calibrate_q_gaden = rrt_infotaxis.calibrate_q_gaden:main',
+            'discrete_start = rrt_infotaxisBut.discrete_rrt_infotaxis:main',
         ],
     },
 )
