@@ -28,13 +28,14 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('wind_velocity', 0.1)
         self.declare_parameter('number_of_particles', 1000)
         self.declare_parameter('n_tn', 30)
-        self.declare_parameter('delta', 1)
+        self.declare_parameter('delta', 0.5)
         self.declare_parameter('xy_goal_tolerance', 0.3)  # XY distance tolerance in meters
         self.declare_parameter('robot_radius', 0.35)  # Robot footprint radius for collision checking
-        self.declare_parameter('sigma_threshold', 0.3)  # Std dev threshold for estimation convergence (scaled for small map)
+        self.declare_parameter('sigma_threshold', 0.35)  # Std dev threshold for estimation convergence (scaled for small map)
         self.declare_parameter('success_distance', 0.5)  # Distance threshold for source localization success (meters)
         self.declare_parameter('zeta_1', 0.1)  # Gaussian dispersion parameter
         self.declare_parameter('zeta_2', 0.1)  # Gaussian dispersion parameter
+        self.declare_parameter('positive_weight', 0.5)  # Weight of information gain compared to travel cost
 
         # Sensor readings
         self.sensor_raw_value = None
@@ -108,7 +109,8 @@ class RRTInfotaxisNode(Node):
                        N_tn=self.get_parameter('n_tn').value,
                        R_range=self.get_parameter('n_tn').value * self.get_parameter('delta').value,
                        delta=self.get_parameter('delta').value,
-                       robot_radius=self.get_parameter('robot_radius').value)
+                       robot_radius=self.get_parameter('robot_radius').value,
+                       positive_weight=self.get_parameter('positive_weight').value)
         self.ppm_converter = GasUnitConverter()
         self.get_logger().info('RRT initialized')
 
@@ -117,7 +119,7 @@ class RRTInfotaxisNode(Node):
         self.get_logger().info('Text visualizer initialized')
 
         # Timer for taking steps (start after all components are initialized)
-        self.timer = self.create_timer(0.2, self.take_step)
+        self.timer = self.create_timer(0.1, self.take_step)
         self.get_logger().info('Node initialized successfully, starting measure-plan-move loop')
 
     def pose_callback(self, msg):
@@ -418,7 +420,7 @@ class RRTInfotaxisNode(Node):
 
         # Initialize sensor threshold with first measurement
         if not self.sensor_initialized:
-            self.binary_sensor_model.initialize_threshold(self.sensor_raw_value)
+            self.binary_sensor_model.initialize_threshold(self.ppm_converter.ppm_to_ug_m3(self.sensor_raw_value))
             self.sensor_initialized = True
             self.get_logger().info(f'Sensor initialized with threshold based on measurement: {self.sensor_raw_value}')
             return
@@ -471,7 +473,7 @@ class RRTInfotaxisNode(Node):
         self.visualize_estimated_source(est_x, est_y)
         self.visualize_current_position(self.current_position)
 
-        # Visualize text info box
+        # Visualize text info box with branch information
         current_stds = self.particle_filter.get_estimate()[1]
         sigma_p = max(current_stds["x"], current_stds["y"])
         self.text_visualizer.publish_source_info(
@@ -480,7 +482,16 @@ class RRTInfotaxisNode(Node):
             predicted_y=est_y,
             predicted_z=0.5,  # Assuming source at 0.5m height
             std_dev=sigma_p,
-            search_complete=self.search_complete
+            search_complete=self.search_complete,
+            sensor_value=current_measurement,
+            binary_value=binary_measurement,
+            threshold=self.binary_sensor_model.threshold,
+            # Branch Information (BI) for debugging
+            num_branches=debug_info["num_branches"],
+            best_utility=debug_info["best_utility"],
+            best_entropy_gain=debug_info["best_entropy_gain"],
+            best_travel_cost=debug_info["best_travel_cost"],
+            num_tree_nodes=debug_info["num_tree_nodes"]
         )
 
         self.get_logger().info(f'[PLAN] Next position: {next_pos}, Estimated source: ({est_x:.2f}, {est_y:.2f}, {est_Q:.2f})')

@@ -1,4 +1,5 @@
 from scipy.stats import norm
+import numpy as np
 
 class BinarySensorModel:
     """
@@ -49,6 +50,30 @@ class BinarySensorModel:
         if self.threshold is None:
             raise ValueError("Threshold not initialized. Call update_threshold() first.")
         return 1 if actual_measurement > self.threshold else 0
+    
+    def probability_binary_vec(self, measurement: int, concentrations: np.ndarray) -> np.ndarray:
+        """
+        Vectorized probability of a binary measurement given a vector of concentrations.
+
+        Applies MIN_LIKELIHOOD floor to prevent division by zero in particle filter updates.
+        See probability_binary() for detailed explanation.
+        """
+        MIN_LIKELIHOOD = 1e-10
+
+        # This is P(Z=0 | C), the probability of a "no-hit"
+        delta_c = self.threshold - concentrations
+        sigma_g = self.alpha * concentrations + self.sigma_env
+        sigma_g = np.maximum(sigma_g, 1e-10) # Avoid division by zero
+
+        prob_z0 = norm.cdf(delta_c / sigma_g)
+
+        if measurement == 0:
+            prob = prob_z0
+        else:
+            prob = 1.0 - prob_z0
+
+        # Apply likelihood floor (vectorized)
+        return np.clip(prob, MIN_LIKELIHOOD, 1.0 - MIN_LIKELIHOOD)
 
     def probability_binary(self, binary_value, particle_concentration):
         """
@@ -78,8 +103,22 @@ class BinarySensorModel:
         # Use CDF of standard normal distribution
         beta = norm.cdf(delta_c / sigma_g)
 
-        # Apply minimum likelihood floor to prevent particle collapse
-        # This ensures particles are never completely rejected during RRT planning
+        # CRITICAL: Apply minimum likelihood floor to prevent division by zero
+        #
+        # During RRT lookahead (rrt.py:131), hypothetical particle filter updates
+        # can result in ALL particles having zero likelihood. This happens when:
+        # 1. Particles have converged near the true source
+        # 2. RRT samples a far-away position with an incompatible measurement
+        # 3. All particles predict this measurement is impossible (likelihood ≈ 0)
+        # 4. weight_sum = 0 → division by zero in normalization
+        # 5. Copied filter reinitializes → wrong entropy → bad path selection
+        #
+        # The floor (1e-10) is small enough to not bias decisions but prevents:
+        # - Division by zero during RRT entropy calculations
+        # - Spurious filter reinitialization in copied filters
+        # - RRT selecting paths that appear "informative" due to numerical errors
+        #
+        # This is a NECESSARY fix for numerical stability, not an optional enhancement.
         MIN_LIKELIHOOD = 1e-10
 
         # Eq. 24

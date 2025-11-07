@@ -70,8 +70,15 @@ class ParticleFilterOptimized:
 
         return particles
 
-    def update(self, measurement: int, sensor_position: tuple[float, float]):
-        """Update particle filter with new binary measurement (vectorized)."""
+    def update(self, measurement: int, sensor_position: tuple[float, float], skip_resample: bool = False):
+        """
+        Update particle filter with new binary measurement (vectorized).
+
+        Args:
+            measurement: Binary sensor measurement (0 or 1)
+            sensor_position: Position where measurement was taken
+            skip_resample: If True, skip resampling and MCMC (for RRT hypothetical updates)
+        """
         self.iteration += 1
 
         # Store measurement for MCMC
@@ -96,25 +103,24 @@ class ParticleFilterOptimized:
             return
 
         # Step 4: Check effective sample size and resample if needed
-        N_eff = self._effective_sample_size()
-        if N_eff < self.resample_threshold * self.N:
-            self._resample()
-            self._mcmc_move()
+        # SKIP this for RRT hypothetical updates to prevent entropy increase
+        if not skip_resample:
+            N_eff = self._effective_sample_size()
+            if N_eff < self.resample_threshold * self.N:
+                self._resample()
+                self._mcmc_move()
 
-    def _compute_concentrations_batch(self, sensor_position: tuple[float, float]) -> np.ndarray:
+    def _compute_concentrations_for_particles(self, particles_array: np.ndarray, 
+                                            sensor_position: tuple[float, float]) -> np.ndarray:
         """
-        Compute concentrations for all particles at once (VECTORIZED).
-
-        Returns:
-        --------
-        concentrations : np.ndarray, shape (N,)
-            Predicted concentrations for each particle
+        Compute concentrations for a given array of particles (VECTORIZED).
         """
         # Extract particle parameters
-        x0 = self.particles[:, 0]
-        y0 = self.particles[:, 1]
-        Q0 = self.particles[:, 2] * 1e6  # Convert to μg/s
-
+        x0 = particles_array[:, 0]
+        y0 = particles_array[:, 1]
+        Q0 = particles_array[:, 2] * 1e6  # Convert to μg/s
+        
+        N_particles = particles_array.shape[0]
         sx, sy = sensor_position
 
         # Transform to wind-aligned coordinate system (VECTORIZED)
@@ -126,7 +132,7 @@ class ParticleFilterOptimized:
         crosswind = -dx * np.sin(wind_dir) + dy * np.cos(wind_dir)
 
         # Initialize concentrations
-        concentrations = np.zeros(self.N)
+        concentrations = np.zeros(N_particles)
 
         # Only compute for downwind positions
         mask = downwind > 0.1
@@ -166,16 +172,101 @@ class ParticleFilterOptimized:
 
         return concentrations
 
+    # def _compute_concentrations_batch(self, sensor_position: tuple[float, float]) -> np.ndarray:
+    #     """
+    #     Compute concentrations for all particles at once (VECTORIZED).
+
+    #     Returns:
+    #     --------
+    #     concentrations : np.ndarray, shape (N,)
+    #         Predicted concentrations for each particle
+    #     """
+    #     # Extract particle parameters
+    #     x0 = self.particles[:, 0]
+    #     y0 = self.particles[:, 1]
+    #     Q0 = self.particles[:, 2] * 1e6  # Convert to μg/s
+
+    #     sx, sy = sensor_position
+
+    #     # Transform to wind-aligned coordinate system (VECTORIZED)
+    #     dx = sx - x0
+    #     dy = sy - y0
+
+    #     wind_dir = self.dispersion_model.wind_direction
+    #     downwind = dx * np.cos(wind_dir) + dy * np.sin(wind_dir)
+    #     crosswind = -dx * np.sin(wind_dir) + dy * np.cos(wind_dir)
+
+    #     # Initialize concentrations
+    #     concentrations = np.zeros(self.N)
+
+    #     # Only compute for downwind positions
+    #     mask = downwind > 0.1
+    #     if not np.any(mask):
+    #         return concentrations
+
+    #     # Compute standard deviations (VECTORIZED)
+    #     dw = downwind[mask]
+    #     sigma_y = self.dispersion_model.zeta1 * dw / np.sqrt(1 + 0.0001 * dw)
+    #     sigma_z = self.dispersion_model.zeta2 * dw / np.sqrt(1 + 0.0001 * dw)
+
+    #     # Filter out invalid sigma values
+    #     valid_sigma = (sigma_y >= 0.01) & (sigma_z >= 0.01)
+    #     if not np.any(valid_sigma):
+    #         return concentrations
+
+    #     # Extract valid values
+    #     cw = crosswind[mask][valid_sigma]
+    #     sy_v = sigma_y[valid_sigma]
+    #     sz_v = sigma_z[valid_sigma]
+    #     Q0_v = Q0[mask][valid_sigma]
+
+    #     # Compute concentration (VECTORIZED)
+    #     crosswind_term = np.exp(-cw**2 / (2 * sy_v**2))
+
+    #     z_diff = self.dispersion_model.agent_height - self.dispersion_model.z0
+    #     z_sum = self.dispersion_model.agent_height + self.dispersion_model.z0
+    #     z_term = (np.exp(-z_diff**2 / (2 * sz_v**2)) +
+    #               np.exp(-z_sum**2 / (2 * sz_v**2)))
+
+    #     conc_valid = (Q0_v / (2 * np.pi * self.dispersion_model.V * sy_v * sz_v) *
+    #                   crosswind_term * z_term)
+
+    #     # Map back to full array
+    #     valid_indices = np.where(mask)[0][valid_sigma]
+    #     concentrations[valid_indices] = conc_valid
+
+    #     return concentrations
+
+    def _compute_concentrations_batch(self, sensor_position: tuple[float, float]) -> np.ndarray:
+        """
+        Compute concentrations for all SELF.particles at once (VECTORIZED).
+        This is now a wrapper for the general helper function.
+        """
+        return self._compute_concentrations_for_particles(self.particles, sensor_position)
+
+    # def _compute_likelihoods_vectorized(self, measurement: int, sensor_position: tuple[float, float]):
+    #     """Compute binary measurement likelihood for all particles (VECTORIZED)."""
+    #     # Compute all concentrations at once
+    #     predicted_concs = self._compute_concentrations_batch(sensor_position)
+
+    #     # Compute likelihoods using sensor model (VECTORIZED)
+    #     likelihoods = np.array([
+    #         self.sensor_model.probability_binary(measurement, conc)
+    #         for conc in predicted_concs
+    #     ])
+
+    #     return likelihoods
+
     def _compute_likelihoods_vectorized(self, measurement: int, sensor_position: tuple[float, float]):
         """Compute binary measurement likelihood for all particles (VECTORIZED)."""
         # Compute all concentrations at once
         predicted_concs = self._compute_concentrations_batch(sensor_position)
 
-        # Compute likelihoods using sensor model (VECTORIZED)
-        likelihoods = np.array([
-            self.sensor_model.probability_binary(measurement, conc)
-            for conc in predicted_concs
-        ])
+        # Compute all likelihoods at once using the vectorized sensor model method
+        likelihoods = self.sensor_model.probability_binary_vec(measurement, predicted_concs)
+        
+        # # Add a small epsilon to prevent all weights from becoming zero
+        # likelihoods = np.maximum(likelihoods, 1e-50)
 
         return likelihoods
 
@@ -183,10 +274,40 @@ class ParticleFilterOptimized:
         """Compute effective sample size N_eff ≈ 1 / Σ(wⁱ)²."""
         return 1.0 / np.sum(self.weights ** 2)
 
-    def _resample(self):
-        """Resample particles using systematic resampling."""
+    def _resample(self, rouge_fraction: float = 0.05):
+        """
+        Resample particles using systematic resampling.
+
+        NOTE: Rouge particle injection (5% random particles) has been disabled
+        to match the original paper implementation. The paper relies on MCMC moves
+        alone for maintaining particle diversity.
+        """
+        # 1. Perform systematic resampling
         indices = self._systematic_resample()
         self.particles = self.particles[indices]
+
+        # --- ROUGE PARTICLES DISABLED (not in original paper) ---
+        #
+        # # 2. Add "rouge" particles (regularization)
+        # # This re-introduces a small fraction of particles from the prior
+        # # distribution to prevent the filter from becoming over-confident.
+        #
+        # num_rouge = int(self.N * rouge_fraction)
+        #
+        # if num_rouge > 0:
+        #     # Get random indices to replace with new particles
+        #     replace_indices = np.random.choice(self.N, num_rouge, replace=False)
+        #
+        #     # Generate new random particles (from the prior)
+        #     # We only need 'num_rouge' new particles
+        #     new_particles = self._initialize_particles()
+        #
+        #     # Replace the selected particles
+        #     self.particles[replace_indices] = new_particles[:num_rouge]
+        #
+        # --- END ROUGE PARTICLES ---
+
+        # 2. Reset weights
         self.weights = np.ones(self.N) / self.N
 
     def _systematic_resample(self):
@@ -207,55 +328,55 @@ class ParticleFilterOptimized:
         return indices
 
     def _mcmc_move(self):
-        """MCMC move step (optimized with vectorization where possible)."""
+        """MCMC move step (FULLY VECTORIZED)."""
         if self.last_measurement is None or self.last_sensor_position is None:
             return
 
-        # Generate all proposals at once
+        # 1. Generate all proposals at once (You did this correctly)
         proposals = self.particles.copy()
         proposals[:, 0] += np.random.normal(0, self.mcmc_std['x'], self.N)
         proposals[:, 1] += np.random.normal(0, self.mcmc_std['y'], self.N)
         proposals[:, 2] += np.random.normal(0, self.mcmc_std['Q'], self.N)
 
-        # Check bounds (VECTORIZED)
+        # 2. Check bounds (You did this correctly)
         in_bounds = (
             (proposals[:, 0] >= self.bounds['x'][0]) & (proposals[:, 0] <= self.bounds['x'][1]) &
             (proposals[:, 1] >= self.bounds['y'][0]) & (proposals[:, 1] <= self.bounds['y'][1]) &
             (proposals[:, 2] >= self.bounds['Q'][0]) & (proposals[:, 2] <= self.bounds['Q'][1])
         )
+        
+        # 3. Compute likelihoods for ALL CURRENT particles at once
+        conc_curr = self._compute_concentrations_for_particles(
+            self.particles, self.last_sensor_position
+        )
+        # Assumes you have a vectorized sensor model method
+        likelihood_curr = self.sensor_model.probability_binary_vec(
+            self.last_measurement, conc_curr
+        )
 
-        # Compute likelihoods for current and proposal particles
-        # This is still the expensive part, but we do it in batch
-        for i in range(self.N):
-            if not in_bounds[i]:
-                continue
+        # 4. Compute likelihoods for ALL PROPOSED particles at once
+        conc_prop = self._compute_concentrations_for_particles(
+            proposals, self.last_sensor_position
+        )
+        # Assumes you have a vectorized sensor model method
+        likelihood_prop = self.sensor_model.probability_binary_vec(
+            self.last_measurement, conc_prop
+        )
 
-            # Compute current likelihood
-            x0_curr, y0_curr, Q0_curr = self.particles[i]
-            conc_curr = self.dispersion_model.compute_concentration(
-                self.last_sensor_position, (x0_curr, y0_curr), Q0_curr
-            )
-            likelihood_curr = self.sensor_model.probability_binary(
-                self.last_measurement, conc_curr
-            )
+        # 5. Metropolis-Hastings acceptance (FULLY VECTORIZED)
+        
+        # Avoid division by zero
+        likelihood_curr = np.maximum(likelihood_curr, 1e-50)
+        
+        acceptance_prob = likelihood_prop / likelihood_curr
+        acceptance_prob = np.minimum(1.0, acceptance_prob)
 
-            # Compute proposal likelihood
-            x0_prop, y0_prop, Q0_prop = proposals[i]
-            conc_prop = self.dispersion_model.compute_concentration(
-                self.last_sensor_position, (x0_prop, y0_prop), Q0_prop
-            )
-            likelihood_prop = self.sensor_model.probability_binary(
-                self.last_measurement, conc_prop
-            )
-
-            # Metropolis-Hastings acceptance
-            if likelihood_curr > 1e-10:
-                acceptance_prob = min(1.0, likelihood_prop / likelihood_curr)
-            else:
-                acceptance_prob = 1.0 if likelihood_prop > 1e-10 else 0.5
-
-            if np.random.random() < acceptance_prob:
-                self.particles[i] = proposals[i]
+        # 6. Find particles to move (VECTORIZED)
+        rand_vals = np.random.random(self.N)
+        move_mask = (rand_vals < acceptance_prob) & in_bounds
+        
+        # 7. Update particles in one operation (VECTORIZED)
+        self.particles[move_mask] = proposals[move_mask]
 
     def _in_bounds(self, particle: np.ndarray):
         """Check if particle is within bounds."""

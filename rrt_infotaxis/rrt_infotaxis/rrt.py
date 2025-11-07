@@ -128,7 +128,8 @@ class RRT:
             for measurement in [0, 1]:
                 pf_copy = initial_particle_filter.copy()
                 probability_of_measurement = pf_copy.predict_measurement_probability(position, measurement)
-                pf_copy.update(measurement, position)
+                # CRITICAL: skip_resample=True prevents entropy increase from stochastic MCMC/resampling
+                pf_copy.update(measurement, position, skip_resample=True)
                 new_entropy = pf_copy.get_entropy()
                 expected_entropy += probability_of_measurement * new_entropy
             information_gain = start_entropy - expected_entropy

@@ -170,16 +170,45 @@ class OccupancyGridMap:
         valid : bool
             True if position is valid and collision-free
         """
+        # gx, gy = self.world_to_grid(*position)
+        # if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
+        #     return False
+
+        # # Check surrounding cells within the radius
+        # radius_cells = int(np.ceil(radius / self.resolution))
+        # for dx in range(-radius_cells, radius_cells + 1):
+        #     for dy in range(-radius_cells, radius_cells + 1):
+        #         if 0 <= gx + dx < self.grid_width and 0 <= gy + dy < self.grid_height:
+        #             if self.grid[gy + dy, gx + dx] != 0:
+        #                 return False
+        # return True
         gx, gy = self.world_to_grid(*position)
         if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
             return False
 
         # Check surrounding cells within the radius
         radius_cells = int(np.ceil(radius / self.resolution))
+        
+        # --- START OF FIX ---
+        # Pre-calculate the squared radius in grid cells for comparison
+        radius_sq_cells = radius_cells**2
+        # --- END OF FIX ---
+
         for dx in range(-radius_cells, radius_cells + 1):
             for dy in range(-radius_cells, radius_cells + 1):
-                if 0 <= gx + dx < self.grid_width and 0 <= gy + dy < self.grid_height:
-                    if self.grid[gy + dy, gx + dx] != 0:
+                
+                # --- START OF FIX ---
+                # Check if the grid cell (dx, dy) is within the circular radius
+                # by comparing squared distances.
+                if dx*dx + dy*dy > radius_sq_cells:
+                    continue  # Skip this cell, it's in the "corner" of the square
+                # --- END OF FIX ---
+                
+                check_gx = gx + dx
+                check_gy = gy + dy
+
+                if 0 <= check_gx < self.grid_width and 0 <= check_gy < self.grid_height:
+                    if self.grid[check_gy, check_gx] != 0:
                         return False
         return True
 
