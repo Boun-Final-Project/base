@@ -7,7 +7,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from nav2_msgs.action import NavigateToPose
 from .occupancy_grid import create_occupancy_map_from_service
-from .sensor_model import BinarySensorModel
+from .sensor_model import DiscreteSensorModel
 # from .particle_filter import ParticleFilter
 from .particle_filter_optimized import ParticleFilterOptimized as ParticleFilter
 from .igdm_gas_model import IndoorGaussianDispersionModel
@@ -121,11 +121,12 @@ class RRTInfotaxisNode(Node):
         self.get_logger().info(f'IGDM initialized with σ_m={self.get_parameter("sigma_m").value}m')
 
         # Initialize sensor model and particle filter
-        self.binary_sensor_model = BinarySensorModel()
+        # Using DiscreteSensorModel with 6 levels (empirical three-sigma rule)
+        self.sensor_model = DiscreteSensorModel(alpha=0.1, sigma_env=1.5, num_levels=6)
         self.particle_filter = ParticleFilter(
             num_particles=self.get_parameter('number_of_particles').value,
-            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 100)},
-            binary_sensor_model=self.binary_sensor_model,
+            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 200)},
+            binary_sensor_model=self.sensor_model,
             dispersion_model=self.dispersion_model
         )
         self.get_logger().info('Particle filter initialized')
@@ -177,7 +178,7 @@ class RRTInfotaxisNode(Node):
         # Write header
         self.csv_writer.writerow([
             'step', 'elapsed_time', 'entropy', 'std_dev_x', 'std_dev_y', 'std_dev_Q',
-            'est_x', 'est_y', 'est_Q', 'sensor_value', 'binary_value', 'threshold',
+            'est_x', 'est_y', 'est_Q', 'sensor_value', 'discrete_level', 'max_threshold',
             'num_branches', 'best_utility', 'J1_entropy_gain', 'J2_travel_cost',
             'robot_x', 'robot_y', 'sigma_m', 'bi_optimal', 'bi_threshold', 'dead_end_detected'
         ])
@@ -591,11 +592,12 @@ class RRTInfotaxisNode(Node):
             self.get_logger().debug('Waiting for sensor and position data...')
             return
 
-        # Initialize sensor threshold with first measurement
+        # Initialize sensor thresholds with first measurement
         if not self.sensor_initialized:
-            self.binary_sensor_model.initialize_threshold(self.sensor_raw_value)
+            current_measurement = self.ppm_converter.ppm_to_ug_m3(self.sensor_raw_value)
+            self.sensor_model.initialize_thresholds(current_measurement)
             self.sensor_initialized = True
-            self.get_logger().info(f'Sensor initialized with threshold based on measurement: {self.sensor_raw_value}')
+            self.get_logger().info(f'Sensor initialized with thresholds based on measurement: {self.sensor_raw_value} ppm = {current_measurement:.2f} μg/m³')
             return
 
         # Check if robot is currently moving to a goal
@@ -621,12 +623,12 @@ class RRTInfotaxisNode(Node):
         current_measurement_ppm = self.sensor_raw_value
         current_measurement = self.ppm_converter.ppm_to_ug_m3(current_measurement_ppm)
 
-        # Update threshold first (Eq. 27), then compute binary measurement
-        self.binary_sensor_model.update_threshold(current_measurement)
-        binary_measurement = self.binary_sensor_model.get_binary_measurement(current_measurement)
+        # Update thresholds adaptively, then compute discrete measurement level
+        self.sensor_model.update_thresholds(current_measurement)
+        discrete_measurement = self.sensor_model.get_discrete_measurement(current_measurement)
 
-        self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement}, Binary: {binary_measurement}')
-        self.particle_filter.update(binary_measurement, self.current_position)
+        self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement:.4f} μg/m³, Discrete level: {discrete_measurement}/{self.sensor_model.num_levels-1}')
+        self.particle_filter.update(discrete_measurement, self.current_position)
 
         # Estimate source location
         current_means, current_stds = self.particle_filter.get_estimate()
@@ -681,8 +683,8 @@ class RRTInfotaxisNode(Node):
             std_dev=sigma_p,
             search_complete=self.search_complete,
             sensor_value=current_measurement,
-            binary_value=binary_measurement,
-            threshold=self.binary_sensor_model.threshold,
+            binary_value=discrete_measurement,  # Now using discrete level (0 to num_levels-1)
+            threshold=self.sensor_model.thresholds[-1] if self.sensor_model.initialized else 0.0,  # Use max threshold
             num_branches=debug_info.get("num_branches", 0),
             best_utility=debug_info.get("best_utility", 0.0),
             best_entropy_gain=debug_info.get("best_entropy_gain", 0.0),
@@ -707,8 +709,8 @@ class RRTInfotaxisNode(Node):
             f'{est_y:.4f}',
             f'{est_Q:.4f}',
             f'{current_measurement:.4f}',
-            binary_measurement,
-            f'{self.binary_sensor_model.threshold:.4f}' if self.binary_sensor_model.threshold is not None else '0.0',
+            discrete_measurement,  # Discrete level (0 to num_levels-1)
+            f'{self.sensor_model.thresholds[-1]:.4f}' if self.sensor_model.initialized else '0.0',  # Max threshold
             debug_info.get("num_branches", 0),
             f'{debug_info.get("best_utility", 0.0):.4f}',
             f'{debug_info.get("best_entropy_gain", 0.0):.4f}',

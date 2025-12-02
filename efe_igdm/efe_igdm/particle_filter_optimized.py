@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.stats import multivariate_normal, norm as scipy_norm
 from .igdm_gas_model import IndoorGaussianDispersionModel
-from .sensor_model import BinarySensorModel
+from .sensor_model import DiscreteSensorModel
 from copy import deepcopy
 
 class ParticleFilterOptimized:
@@ -16,11 +16,13 @@ class ParticleFilterOptimized:
     """
 
     def __init__(self, num_particles: int, search_bounds: dict[str, list[float]],
-                 binary_sensor_model: BinarySensorModel,
+                 binary_sensor_model: DiscreteSensorModel,
                  dispersion_model: IndoorGaussianDispersionModel,
-                 resample_threshold: float = 0.5, mcmc_std=None):
+                 resample_threshold: float = 0.3, mcmc_std=None):
         """
         Parameters are identical to original ParticleFilter for drop-in replacement.
+        Note: 'binary_sensor_model' parameter name kept for backwards compatibility,
+        but now accepts DiscreteSensorModel for multi-level measurements.
         """
         self.N = num_particles
         self.bounds = search_bounds
@@ -33,10 +35,11 @@ class ParticleFilterOptimized:
             x_range = search_bounds['x'][1] - search_bounds['x'][0]
             y_range = search_bounds['y'][1] - search_bounds['y'][0]
             Q_range = search_bounds['Q'][1] - search_bounds['Q'][0]
+            # Increased from 0.05 to 0.10 for better exploration
             self.mcmc_std = {
-                'x': 0.05 * x_range,
-                'y': 0.05 * y_range,
-                'Q': 0.05 * Q_range
+                'x': 0.10 * x_range,
+                'y': 0.10 * y_range,
+                'Q': 0.10 * Q_range
             }
         else:
             self.mcmc_std = mcmc_std
@@ -77,10 +80,10 @@ class ParticleFilterOptimized:
 
     def update(self, measurement: int, sensor_position: tuple[float, float], skip_resample: bool = False):
         """
-        Update particle filter with new binary measurement (vectorized).
+        Update particle filter with new discrete measurement (vectorized).
 
         Args:
-            measurement: Binary sensor measurement (0 or 1)
+            measurement: Discrete sensor measurement level (0 to num_levels-1)
             sensor_position: Position where measurement was taken
             skip_resample: If True, skip resampling and MCMC (for RRT hypothetical updates)
         """
@@ -482,30 +485,76 @@ class ParticleFilterOptimized:
 
     def predict_measurement_probability(self, sensor_position, binary_value=None):
         """
-        Predict probability of future binary measurement (VECTORIZED).
+        Predict probability of future measurement (VECTORIZED).
+        Works with both BinarySensorModel and DiscreteSensorModel.
 
         This is the critical hotspot for RRT-Infotaxis!
         """
         # Compute all concentrations at once (VECTORIZED)
         predicted_concs = self._compute_concentrations_batch(sensor_position)
 
-        # Vectorized computation of beta
-        delta_c = self.sensor_model.threshold - predicted_concs
-        sigma_g = self.sensor_model.alpha * predicted_concs + self.sensor_model.sigma_env
+        # Check if using BinarySensorModel or DiscreteSensorModel
+        if hasattr(self.sensor_model, 'threshold'):
+            # BinarySensorModel: single threshold
+            delta_c = self.sensor_model.threshold - predicted_concs
+            sigma_g = self.sensor_model.alpha * predicted_concs + self.sensor_model.sigma_env
+            sigma_g = np.maximum(sigma_g, 1e-15)
 
-        # Handle division by zero
-        sigma_g = np.maximum(sigma_g, 1e-15)
+            phi = scipy_norm.cdf(delta_c / sigma_g)
+            beta = np.sum(phi * self.weights)
 
-        # Vectorized CDF computation
-        phi = scipy_norm.cdf(delta_c / sigma_g)
-        beta = np.sum(phi * self.weights)
+            if binary_value is None:
+                return beta, 1 - beta
+            elif binary_value == 0:
+                return beta
+            else:
+                return 1 - beta
 
-        if binary_value is None:
-            return beta, 1 - beta
-        elif binary_value == 0:
-            return beta
         else:
-            return 1 - beta
+            # DiscreteSensorModel: multiple thresholds
+            if not self.sensor_model.initialized:
+                # If not initialized, return uniform probabilities
+                num_levels = self.sensor_model.num_levels
+                probs = [1.0 / num_levels] * num_levels
+                return probs if binary_value is None else probs[binary_value]
+
+            # Compute sigma_g for each particle
+            sigma_g = self.sensor_model.alpha * predicted_concs + self.sensor_model.sigma_env
+            sigma_g = np.maximum(sigma_g, 1e-15)
+
+            # Compute probability for each discrete level
+            num_levels = self.sensor_model.num_levels
+            level_probs = []
+
+            for level in range(num_levels):
+                # Get bin boundaries for this level
+                if level == 0:
+                    lower_bound = 0
+                    upper_bound = self.sensor_model.thresholds[0]
+                elif level == num_levels - 1:
+                    lower_bound = self.sensor_model.thresholds[-1]
+                    upper_bound = np.inf
+                else:
+                    lower_bound = self.sensor_model.thresholds[level - 1]
+                    upper_bound = self.sensor_model.thresholds[level]
+
+                # Compute P(level | concentration) for each particle
+                if upper_bound == np.inf:
+                    prob_per_particle = 1.0 - scipy_norm.cdf((lower_bound - predicted_concs) / sigma_g)
+                else:
+                    prob_upper = scipy_norm.cdf((upper_bound - predicted_concs) / sigma_g)
+                    prob_lower = scipy_norm.cdf((lower_bound - predicted_concs) / sigma_g)
+                    prob_per_particle = prob_upper - prob_lower
+
+                # Weight by particle weights and sum
+                level_prob = np.sum(prob_per_particle * self.weights)
+                level_probs.append(level_prob)
+
+            # Return requested probability
+            if binary_value is None:
+                return level_probs
+            else:
+                return level_probs[binary_value]
 
     def get_particles(self):
         """Get current particles and weights."""

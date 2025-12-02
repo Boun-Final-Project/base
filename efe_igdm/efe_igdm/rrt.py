@@ -137,9 +137,16 @@ class RRT:
                 continue
             position = node.position
             start_entropy = initial_particle_filter.get_entropy()
-            # Two outcomes: detection (1) and no detection (0)
+
+            # Determine number of measurement levels based on sensor model
+            # Binary: 2 levels (0, 1), Discrete: N levels (0 to N-1)
+            if hasattr(initial_particle_filter.sensor_model, 'num_levels'):
+                num_measurements = initial_particle_filter.sensor_model.num_levels
+            else:
+                num_measurements = 2  # Binary sensor model
+
             expected_entropy = 0.0
-            for measurement in [0, 1]:
+            for measurement in range(num_measurements):
                 # Get probability of this measurement
                 probability_of_measurement = initial_particle_filter.predict_measurement_probability(position, measurement)
                 # Compute hypothetical entropy WITHOUT modifying filter state (Eq. 28-29 from paper)

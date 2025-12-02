@@ -41,8 +41,8 @@ class TextVisualizer:
             std_dev: Standard deviation of the estimate
             search_complete: Boolean indicating if search is complete
             sensor_value: Last sensor measurement value
-            binary_value: Binary sensor value (0 or 1)
-            threshold: Binary sensor threshold value
+            binary_value: Discrete sensor level (0 to num_levels-1)
+            threshold: Maximum discretization threshold value
             num_branches: Number of RRT branches (paths) found
             best_utility: Best utility value (J_total)
             best_entropy_gain: Best entropy gain (J1)
@@ -114,8 +114,8 @@ class TextVisualizer:
             f"Std Dev: {std_dev:.3f}\n"
             f"Entropy: {entropy:.3f}\n"
             f"Sensor: {sensor_value:.2f}\n"
-            f"Binary: {binary_value}\n"
-            f"Threshold: {threshold:.2f}\n"
+            f"Discrete Level: {binary_value}\n"
+            f"Max Threshold: {threshold:.2f}\n"
             f"--- Branch Info (BI) ---\n"
             f"Branches: {num_branches}\n"
             f"Tree Nodes: {num_tree_nodes}\n"
