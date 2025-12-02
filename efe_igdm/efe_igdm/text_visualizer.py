@@ -28,7 +28,8 @@ class TextVisualizer:
     def publish_source_info(self, timestamp, predicted_x, predicted_y, predicted_z,
                            std_dev, search_complete, sensor_value, binary_value, threshold,
                            num_branches=0, best_utility=0.0, best_entropy_gain=0.0,
-                           best_travel_cost=0.0, num_tree_nodes=0, entropy=0.0):
+                           best_travel_cost=0.0, num_tree_nodes=0, entropy=0.0,
+                           bi_optimal=0.0, bi_threshold=0.0, dead_end_detected=False):
         """
         Publish source estimation information as text in RViz with white background.
 
@@ -48,6 +49,9 @@ class TextVisualizer:
             best_travel_cost: Best travel cost (J2)
             num_tree_nodes: Total number of nodes in RRT tree
             entropy: Shannon entropy of particle distribution
+            bi_optimal: Optimal branch information (BI*)
+            bi_threshold: Dead end threshold
+            dead_end_detected: Whether dead end was detected
         """
         marker_array = MarkerArray()
 
@@ -66,10 +70,10 @@ class TextVisualizer:
         background.pose.position.z = self.position_z
         background.pose.orientation.w = 1.0
 
-        # Background box size (expanded for branch info and entropy)
+        # Background box size (expanded for branch info, entropy, and dead end detection)
         background.scale.x = 2.2  # Width (wider for longer text)
         background.scale.y = 0.05  # Depth (thin)
-        background.scale.z = 2.8  # Height (taller to fit all info)
+        background.scale.z = 3.2  # Height (taller to fit all info including dead end)
 
         # White color with some transparency
         background.color.r = 1.0
@@ -92,8 +96,16 @@ class TextVisualizer:
         text.pose.position.z = self.position_z
         text.pose.orientation.w = 1.0
 
-        # Build text content with branch information and entropy
-        status = "COMPLETE" if search_complete else "SEARCHING"
+        # Build text content with branch information, entropy, and dead end detection
+        # Add visual indicators for clarity
+        if search_complete:
+            status = "✓ COMPLETE"
+        else:
+            status = "⟳ SEARCHING"
+
+        dead_end_status = "⚠ DEAD END!" if dead_end_detected else "✓ OK"
+        dead_end_margin = bi_optimal - bi_threshold
+
         text.text = (
             f"Predicted Source:\n"
             f"  x: {predicted_x:.2f} m\n"
@@ -110,7 +122,12 @@ class TextVisualizer:
             f"Best Utility: {best_utility:.2f}\n"
             f"  J1 (Entropy): {best_entropy_gain:.2f}\n"
             f"  J2 (Cost): {best_travel_cost:.2f}\n"
-            f"Status: {status}"
+            f"--- Dead End Detect ---\n"
+            f"BI*: {bi_optimal:.3f}\n"
+            f"Threshold: {bi_threshold:.3f}\n"
+            f"Margin: {dead_end_margin:+.3f}\n"
+            f"Status: {dead_end_status}\n"
+            f"Search: {status}"
         )
 
         # Text appearance - black color

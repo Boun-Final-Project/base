@@ -14,6 +14,7 @@ from .igdm_gas_model import IndoorGaussianDispersionModel
 from .rrt import RRT
 from .unit_conversion import GasUnitConverter
 from .text_visualizer import TextVisualizer
+from .dead_end_detector import DeadEndDetector
 import numpy as np
 import csv
 from datetime import datetime
@@ -28,15 +29,24 @@ class RRTInfotaxisNode(Node):
 
         # Parameters
         self.declare_parameter('use_fast_rrt', True)  # Use optimized RRT implementation
-        self.declare_parameter('sigma_m', 1.0)  # IGDM constant std dev (meters)
+        self.declare_parameter('sigma_m', 1.5)  # IGDM constant std dev (meters)
         self.declare_parameter('number_of_particles', 1000)
         self.declare_parameter('n_tn', 50)
         self.declare_parameter('delta', 0.7)
         self.declare_parameter('xy_goal_tolerance', 0.3)  # XY distance tolerance in meters
         self.declare_parameter('robot_radius', 0.35)  # Robot footprint radius for collision checking
-        self.declare_parameter('sigma_threshold', 0.35)  # Std dev threshold for estimation convergence
+        self.declare_parameter('sigma_threshold', 0.35)  # Std dev threshold for estimation convergence (LOWERED to prevent early convergence)
         self.declare_parameter('success_distance', 0.5)  # Distance threshold for source localization success (meters)
         self.declare_parameter('positive_weight', 0.5)  # Weight of information gain compared to travel cost
+
+        # Dead end detection parameters (Equations 20-21 from paper)
+        self.declare_parameter('dead_end_epsilon', 0.85)  # Weight for threshold update (ε in Eq. 21)
+        self.declare_parameter('dead_end_initial_threshold', 0.1)  # Initial BI threshold
+
+        # Particle filter diversity parameters (prevent early convergence)
+        self.declare_parameter('resample_threshold', 0.5)  # Effective sample size threshold for resampling
+        self.declare_parameter('min_steps_before_convergence', 10)  # Minimum steps before allowing convergence
+        self.declare_parameter('block_convergence_in_dead_end', True)  # Don't converge when dead end detected
 
         # Sensor readings
         self.sensor_raw_value = None
@@ -48,6 +58,7 @@ class RRTInfotaxisNode(Node):
         self.goal_handle = None
         self.goal_position = None  # Store target goal position
         self.search_complete = False  # Flag to indicate if source search is finished
+        self.current_dead_end_status = False  # Track if currently in a dead end
 
         # Data logging for entropy tracking
         self.step_count = 0
@@ -139,6 +150,13 @@ class RRTInfotaxisNode(Node):
         self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
         self.get_logger().info('Text visualizer initialized')
 
+        # Initialize dead end detector (Equations 20-21 from paper)
+        self.dead_end_detector = DeadEndDetector(
+            epsilon=self.get_parameter('dead_end_epsilon').value,
+            initial_threshold=self.get_parameter('dead_end_initial_threshold').value
+        )
+        self.get_logger().info(f'Dead end detector initialized (ε={self.get_parameter("dead_end_epsilon").value})')
+
         # Timer for taking steps (start after all components are initialized)
         self.timer = self.create_timer(0.2, self.take_step)
         self.get_logger().info('Node initialized successfully, starting measure-plan-move loop')
@@ -161,7 +179,7 @@ class RRTInfotaxisNode(Node):
             'step', 'elapsed_time', 'entropy', 'std_dev_x', 'std_dev_y', 'std_dev_Q',
             'est_x', 'est_y', 'est_Q', 'sensor_value', 'binary_value', 'threshold',
             'num_branches', 'best_utility', 'J1_entropy_gain', 'J2_travel_cost',
-            'robot_x', 'robot_y', 'sigma_m'
+            'robot_x', 'robot_y', 'sigma_m', 'bi_optimal', 'bi_threshold', 'dead_end_detected'
         ])
         self.log_file.flush()
 
@@ -217,8 +235,14 @@ class RRTInfotaxisNode(Node):
 
         self.particle_pub.publish(marker_array)
 
-    def visualize_all_paths(self, all_paths):
-        """Visualize all RRT paths in gray."""
+    def visualize_all_paths(self, all_paths, all_utilities=None):
+        """
+        Visualize all RRT paths with color coding based on utility.
+
+        Color scheme:
+        - RED (low utility) -> YELLOW (medium) -> GREEN (high utility)
+        - Best path is highlighted separately in blue
+        """
         marker_array = MarkerArray()
 
         # Explicitly delete old markers from previous iteration
@@ -231,6 +255,24 @@ class RRTInfotaxisNode(Node):
             delete_marker.id = i
             delete_marker.action = Marker.DELETE
             marker_array.markers.append(delete_marker)
+
+        # Normalize utilities for color mapping if provided
+        if all_utilities and len(all_utilities) > 0:
+            utilities = np.array(all_utilities)
+            min_util = utilities.min()
+            max_util = utilities.max()
+
+            self.get_logger().info(f'[VIZ] Path utilities: min={min_util:.4f}, max={max_util:.4f}, range={max_util-min_util:.4f}')
+
+            # Avoid division by zero
+            if max_util - min_util > 1e-6:
+                normalized_utilities = (utilities - min_util) / (max_util - min_util)
+            else:
+                self.get_logger().warn('[VIZ] All utilities are identical - using uniform coloring')
+                normalized_utilities = np.ones_like(utilities) * 0.5
+        else:
+            self.get_logger().warn('[VIZ] No utilities provided - using gray coloring')
+            normalized_utilities = None
 
         # Add new path markers
         num_valid_paths = 0
@@ -255,11 +297,33 @@ class RRTInfotaxisNode(Node):
 
             marker.scale.x = 0.08  # Line width (increased for visibility)
 
+            # Color based on normalized utility
             marker.color = ColorRGBA()
-            marker.color.r = 0.6
-            marker.color.g = 0.6
-            marker.color.b = 0.6
-            marker.color.a = 0.5  # Increased opacity for better visibility
+            if normalized_utilities is not None and i < len(normalized_utilities):
+                # Color map: Red (0.0) -> Yellow (0.5) -> Green (1.0)
+                # Apply power transformation for better contrast
+                norm_util = normalized_utilities[i]
+                # Square the value for more contrast (emphasize differences)
+                norm_util_enhanced = norm_util ** 0.5  # Spread out low values more
+
+                if norm_util_enhanced < 0.5:
+                    # Red to Yellow transition
+                    marker.color.r = 1.0
+                    marker.color.g = float(2.0 * norm_util_enhanced)
+                    marker.color.b = 0.0
+                else:
+                    # Yellow to Green transition
+                    marker.color.r = float(2.0 * (1.0 - norm_util_enhanced))
+                    marker.color.g = 1.0
+                    marker.color.b = 0.0
+
+                marker.color.a = 0.9  # Even higher opacity for better visibility
+            else:
+                # Fallback to gray if no utilities provided
+                marker.color.r = 0.6
+                marker.color.g = 0.6
+                marker.color.b = 0.6
+                marker.color.a = 0.5
 
             marker_array.markers.append(marker)
             num_valid_paths += 1
@@ -359,7 +423,14 @@ class RRTInfotaxisNode(Node):
         self.current_pos_pub.publish(marker)
 
     def is_estimation_converged(self):
-        """Check if particle filter estimation has converged (std dev below threshold)."""
+        """
+        Check if particle filter estimation has converged (std dev below threshold).
+
+        Prevents early convergence by requiring:
+        1. Standard deviation below threshold
+        2. Minimum number of steps completed
+        3. Not currently in a dead end (optional, configurable)
+        """
         current_means, current_stds = self.particle_filter.get_estimate()
         sigma_x = current_stds["x"]
         sigma_y = current_stds["y"]
@@ -368,10 +439,44 @@ class RRTInfotaxisNode(Node):
         sigma_p = max(sigma_x, sigma_y)
 
         sigma_threshold = self.get_parameter('sigma_threshold').value
-        converged = sigma_p < sigma_threshold
+        min_steps = self.get_parameter('min_steps_before_convergence').value
+        block_dead_end = self.get_parameter('block_convergence_in_dead_end').value
+
+        # Check all conditions
+        std_dev_converged = sigma_p < sigma_threshold
+        enough_steps = self.step_count >= min_steps
+        not_in_dead_end = not self.current_dead_end_status
+
+        # Apply dead end blocking if enabled
+        if block_dead_end:
+            converged = std_dev_converged and enough_steps and not_in_dead_end
+        else:
+            converged = std_dev_converged and enough_steps
+
+        # Log convergence status every step for debugging
+        self.get_logger().debug(
+            f'Convergence check: σ_p={sigma_p:.3f}, σ_t={sigma_threshold:.3f}, '
+            f'steps={self.step_count}/{min_steps}, dead_end={self.current_dead_end_status}, converged={converged}'
+        )
+
+        # Warn if convergence blocked due to various reasons
+        if std_dev_converged and not enough_steps:
+            self.get_logger().warn(
+                f'Early convergence prevented: σ_p={sigma_p:.3f} < {sigma_threshold:.3f} '
+                f'but only {self.step_count} steps (need {min_steps})'
+            )
+
+        if block_dead_end and std_dev_converged and enough_steps and self.current_dead_end_status:
+            self.get_logger().warn(
+                f'Convergence blocked: In dead end! σ_p={sigma_p:.3f} < {sigma_threshold:.3f}, '
+                f'steps={self.step_count}>={min_steps}, but BI* too low. Continuing search...'
+            )
 
         if converged:
-            self.get_logger().info(f'Estimation converged! σ_p = {sigma_p:.3f} < σ_t = {sigma_threshold:.3f}')
+            self.get_logger().info(
+                f'Estimation converged! σ_p = {sigma_p:.3f} < σ_t = {sigma_threshold:.3f} '
+                f'after {self.step_count} steps'
+            )
 
         return converged
 
@@ -534,9 +639,32 @@ class RRTInfotaxisNode(Node):
         best_path = debug_info["best_path"]
         all_paths = debug_info["all_paths"]
 
+        # Dead end detection (Equations 20-21 from paper)
+        # BI* = max(BI) for all branches (Eq. 20)
+        bi_optimal = debug_info.get("best_utility", debug_info.get("best_entropy_gain", 0.0))
+
+        # Check if dead end is detected (Eq. 21)
+        dead_end_detected = self.dead_end_detector.is_dead_end(bi_optimal)
+        detector_status = self.dead_end_detector.get_status()
+
+        # Update current dead end status (used for convergence blocking)
+        self.current_dead_end_status = dead_end_detected
+
+        if dead_end_detected:
+            self.get_logger().warn(
+                f'[DEAD END DETECTED] BI*={bi_optimal:.4f} < BI_thresh={detector_status["bi_threshold"]:.4f} '
+                f'→ Convergence blocked, continuing search'
+            )
+            # TODO: Switch to global planner when implemented
+            # For now, blocks convergence and continues local search
+        else:
+            self.get_logger().debug(
+                f'[LOCAL PLANNER] BI*={bi_optimal:.4f} >= BI_thresh={detector_status["bi_threshold"]:.4f}'
+            )
+
         # Visualize everything in RViz2
         self.visualize_particles(self.particle_filter.particles, self.particle_filter.weights)
-        self.visualize_all_paths(all_paths)
+        self.visualize_all_paths(all_paths, debug_info.get("all_utilities", None))
         self.visualize_best_path(best_path)
         self.visualize_estimated_source(est_x, est_y)
         self.visualize_current_position(self.current_position)
@@ -560,7 +688,10 @@ class RRTInfotaxisNode(Node):
             best_entropy_gain=debug_info.get("best_entropy_gain", 0.0),
             best_travel_cost=debug_info.get("best_travel_cost", 0.0),
             num_tree_nodes=debug_info.get("num_tree_nodes", 0),
-            entropy=current_entropy
+            entropy=current_entropy,
+            bi_optimal=bi_optimal,
+            bi_threshold=detector_status["bi_threshold"],
+            dead_end_detected=dead_end_detected
         )
 
         # Log data to CSV
@@ -584,7 +715,10 @@ class RRTInfotaxisNode(Node):
             f'{debug_info.get("best_travel_cost", 0.0):.4f}',
             f'{self.current_position[0]:.4f}',
             f'{self.current_position[1]:.4f}',
-            f'{self.get_parameter("sigma_m").value:.4f}'
+            f'{self.get_parameter("sigma_m").value:.4f}',
+            f'{bi_optimal:.4f}',
+            f'{detector_status["bi_threshold"]:.4f}',
+            1 if dead_end_detected else 0
         ])
         self.log_file.flush()
         self.step_count += 1
