@@ -326,8 +326,11 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
-                rrt_nodes=None
-            )
+                rrt_nodes=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
+)
 
             self.search_complete = True
             return False
@@ -352,8 +355,11 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
-                rrt_nodes=None
-            )
+                rrt_nodes=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
+)
 
             self.search_complete = True
             return False
@@ -401,8 +407,11 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
             d_success_thr=self.d_success_thr,
             occupancy_grid=self.grid,
             rrt_nodes=rrt_nodes,
-            rrt_pruned_paths=rrt_pruned_paths
-        )
+            rrt_pruned_paths=rrt_pruned_paths,
+            sensor_reading=measurement,
+            threshold_bins=self.sensor.level_thresholds,
+            digital_value=discrete_measurement
+)
 
         # Log all path evaluations with details
         self.log_all_path_evaluations(debug_info, best_idx)

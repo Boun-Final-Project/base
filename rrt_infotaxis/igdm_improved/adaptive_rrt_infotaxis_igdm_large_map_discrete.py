@@ -1,19 +1,18 @@
 """
-Standalone RRT-Infotaxis with IGDM (Indoor Gaussian Dispersion Model) with Multiple Rooms
-Uses 5-level DISCRETE SENSOR instead of binary sensor.
+Adaptive RRT-Infotaxis with IGDM (Indoor Gaussian Dispersion Model) on Large Map with Discrete Sensor.
 
-Updated RRT with:
-- 4 guaranteed initial nodes (forward, behind, right, left) for better directional coverage
-- Improved pruning that preserves shallow branches and prunes deep branches to max_depth
+Implements an ADAPTIVE RRT strategy that increases planning complexity near obstacles:
+- When robot is within 0.75m of an obstacle: N_tn=25, max_depth=3
+- Otherwise (normal operation): N_tn=20, max_depth=2
 
-Implements the complete measure-plan-move loop from the paper with an exploration penalty
-to discourage revisiting recent areas.
+This allows more thorough planning in tight spaces while maintaining efficiency in open areas.
 
 Algorithm:
 1. MEASURE: Take sensor measurement, update threshold, update particle filter
-2. PLAN: Build RRT, evaluate paths with entropy gain vs travel cost, apply exploration penalty
-3. MOVE: Navigate to next position
-4. Check: If estimation converged, stop
+2. CHECK PROXIMITY: Detect if robot is within 0.75m of any obstacle
+3. PLAN: Build RRT with adaptive parameters, evaluate paths with entropy gain vs travel cost
+4. MOVE: Navigate to next position
+5. Check: If robot reached true source (distance < threshold), stop
 
 Exploration Penalty (time-dependent):
 - 1 step since visit: Divide info gain by 2^5 = 32
@@ -24,15 +23,10 @@ Exploration Penalty (time-dependent):
 - For nodes within 1m radius of visited positions
 - Encourages exploration of new areas rather than revisiting recent locations
 
-Building Layout:
-- 25x25 meter map with 3 fully enclosed rooms connected by a central hallway
-- Room 1 (top-left): x: 0-10, y: 15-25 (right wall at x=10 with door at y: 19-21)
-- Room 2 (bottom-left): x: 0-10, y: 0-10 (right wall at x=10 with door at y: 4-6)
-- Room 3 (top-right): x: 15-25, y: 15-25 (left wall at x=15 with door at y: 19-21)
-- Central hallway: x: 10-15, y: 0-25 connecting the rooms
-- Horizontal walls: (0,15)-(10,15), (0,10)-(10,10), (15,15)-(25,15) close the rooms
-- Gas source at (5.0, 20.0) inside Room 1 with Q=1.0
-- Robot starts at (12.5, 12.5) in the central hallway
+- 25x25 meter map with a room in top-left corner (x: 0-5, y: 20-25)
+- Room walls: Right wall at x=5, Bottom wall at y=20 with 2m door at x: 0-2
+- Source at (2.5, 22.5) inside the room with Q=1.0
+- Robot starts at (12.0, 13.0) in open area
 - IGDM uses Dijkstra distance (obstacle-aware)
 
 Discrete Sensor Levels:
@@ -41,10 +35,6 @@ Discrete Sensor Levels:
 - Level 2: Medium (threshold[1] <= C < threshold[2])
 - Level 3: High (threshold[2] <= C < threshold[3])
 - Level 4: Very High (C >= threshold[3])
-
-Utility Function:
-- utility = J1 * 0.5 - J2 * 0.5
-- J1 (information gain) and J2 (travel cost) contribute equally
 """
 
 import numpy as np
@@ -64,7 +54,7 @@ from igdm_model import IGDMModel
 from sensor_model_discrete import DiscreteSensorModel
 from particle_filter import ParticleFilter
 from occupancy_grid import OccupancyGrid
-from rrt_updated import RRTInfotaxisUpdated
+from rrt import RRTInfotaxis
 from visualizer import StepVisualizer
 
 
@@ -96,8 +86,18 @@ def setup_logging(log_file):
     return logger
 
 
-class RRTInfotaxisIGDMRoomsDiscreteUpdated:
-    """Standalone RRT-Infotaxis with IGDM and 5-level discrete sensor for multi-room building (Updated version)."""
+class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
+    """Adaptive RRT-Infotaxis with IGDM and discrete sensor on large map.
+
+    Increases RRT planning complexity when near obstacles for better navigation.
+    """
+
+    # Adaptive RRT parameters
+    OBSTACLE_PROXIMITY_THRESHOLD = 0.75  # meters
+    NORMAL_N_TN = 20
+    NORMAL_MAX_DEPTH = 2
+    NEAR_OBSTACLE_N_TN = 25
+    NEAR_OBSTACLE_MAX_DEPTH = 3
 
     def __init__(self, sigma_m=1.0, logger=None):
         """
@@ -113,45 +113,25 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         self.room_height = 25.0
         self.resolution = 0.1
 
-        self.true_source = (5.0, 20.0)
+        self.true_source = (2.5, 22.5)
         self.true_Q = 1.0
-        self.robot_start = (12.5, 12.5)
+        self.robot_start = (12.0, 13.0)
 
         self.sigma_m = sigma_m
         self.max_steps = 150
 
         # Algorithm parameters
-        self.sigma_threshold = 0.3  # Standard deviation threshold for particles (kept for calculation)
+        self.sigma_threshold = 0.3  # Standard deviation threshold for particles (for logging only)
         self.d_success_thr = 0.5   # Success distance from true source location (meters)
 
         self.grid = OccupancyGrid(self.room_width, self.room_height, self.resolution)
 
-        # Build room layout with walls and doors
-        # Vertical walls
-        # Room 1 (top-left): x: 0-10, y: 15-25
-        # Right wall at x=10 with door opening at y: 19-21
-        self.grid.add_rectangular_obstacle(x_min=9.9, x_max=10.1, y_min=15.0, y_max=19.0, value=1)
-        self.grid.add_rectangular_obstacle(x_min=9.9, x_max=10.1, y_min=21.0, y_max=25.0, value=1)
+        # Add room obstacles (walls with door opening)
+        # Right wall at x=5 (vertical wall spanning y: 20 to 25)
+        self.grid.add_rectangular_obstacle(x_min=4.9, x_max=5.1, y_min=20.0, y_max=25.0, value=1)
 
-        # Room 2 (bottom-left): x: 0-10, y: 0-10
-        # Right wall at x=10 with door opening at y: 4-6
-        self.grid.add_rectangular_obstacle(x_min=9.9, x_max=10.1, y_min=0.0, y_max=4.0, value=1)
-        self.grid.add_rectangular_obstacle(x_min=9.9, x_max=10.1, y_min=6.0, y_max=10.0, value=1)
-
-        # Room 3 (top-right): x: 15-25, y: 15-25
-        # Left wall at x=15 with door opening at y: 19-21
-        self.grid.add_rectangular_obstacle(x_min=14.9, x_max=15.1, y_min=15.0, y_max=19.0, value=1)
-        self.grid.add_rectangular_obstacle(x_min=14.9, x_max=15.1, y_min=21.0, y_max=25.0, value=1)
-
-        # Horizontal walls to close rooms
-        # Wall from (0, 15) to (10, 15) - separates Room 1 and Room 2
-        self.grid.add_rectangular_obstacle(x_min=0.0, x_max=10.0, y_min=14.9, y_max=15.1, value=1)
-
-        # Wall from (0, 10) to (10, 10) - closes bottom of Room 2
-        self.grid.add_rectangular_obstacle(x_min=0.0, x_max=10.0, y_min=9.9, y_max=10.1, value=1)
-
-        # Wall from (15, 15) to (25, 15) - closes bottom of Room 3
-        self.grid.add_rectangular_obstacle(x_min=15.0, x_max=25.0, y_min=14.9, y_max=15.1, value=1)
+        # Bottom wall at y=20 with door opening at x: 0-2 (wall spans x: 2-5)
+        self.grid.add_rectangular_obstacle(x_min=2.0, x_max=5.0, y_min=19.9, y_max=20.1, value=1)
 
         # Use faster dispersion rate so gas spreads noticeably over the time horizon
         # This ensures measurements change significantly at same locations, providing
@@ -167,8 +147,9 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
             resample_threshold=0.42
         )
 
-        # Use updated RRT with 4 initial nodes and improved pruning
-        self.rrt = RRTInfotaxisUpdated(self.grid, N_tn=50, R_range=8, delta=1.0, max_depth=3,
+        # Initialize RRT with normal parameters (will be adapted dynamically)
+        self.rrt = RRTInfotaxis(self.grid, N_tn=self.NORMAL_N_TN, R_range=8, delta=1.0,
+                      max_depth=self.NORMAL_MAX_DEPTH,
                       discount_factor=0.8, positive_weight=0.60, penalty_radius=0.50)
 
         self.robot_pos = self.robot_start
@@ -180,8 +161,8 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to week-10
-        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10/updated_rrt_igdm_improved_rooms_discrete_steps")
+        # Visualization - save to week-12
+        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-12/adaptive_rrt_igdm_large_map_discrete_steps")
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -190,6 +171,82 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         if flush:
             for handler in self.logger.handlers:
                 handler.flush()
+
+    def get_distance_to_nearest_obstacle(self, position):
+        """Compute the distance from a position to the nearest obstacle.
+
+        Parameters:
+        -----------
+        position : tuple
+            (x, y) world coordinates
+
+        Returns:
+        --------
+        distance : float
+            Distance to nearest obstacle in meters. Returns infinity if no obstacles.
+        """
+        x, y = position
+        min_distance = float('inf')
+
+        # Search radius in grid cells (search up to 2m to be safe)
+        search_radius_meters = 2.0
+        search_radius_cells = int(np.ceil(search_radius_meters / self.resolution))
+
+        # Convert position to grid coordinates
+        gx, gy = self.grid.world_to_grid(x, y)
+
+        # Search in a square region around the position
+        for dx in range(-search_radius_cells, search_radius_cells + 1):
+            for dy in range(-search_radius_cells, search_radius_cells + 1):
+                check_gx = gx + dx
+                check_gy = gy + dy
+
+                # Check bounds
+                if 0 <= check_gx < self.grid.grid_width and 0 <= check_gy < self.grid.grid_height:
+                    # If this cell is occupied
+                    if self.grid.grid[check_gy, check_gx] != 0:
+                        # Convert grid cell back to world coordinates (center of cell)
+                        obs_x = (check_gx + 0.5) * self.resolution
+                        obs_y = (check_gy + 0.5) * self.resolution
+
+                        # Compute Euclidean distance
+                        dist = np.sqrt((x - obs_x)**2 + (y - obs_y)**2)
+                        min_distance = min(min_distance, dist)
+
+        return min_distance
+
+    def is_near_obstacle(self, position):
+        """Check if the robot is within the proximity threshold of any obstacle.
+
+        Parameters:
+        -----------
+        position : tuple
+            (x, y) world coordinates
+
+        Returns:
+        --------
+        near_obstacle : bool
+            True if within OBSTACLE_PROXIMITY_THRESHOLD of an obstacle
+        distance : float
+            Distance to nearest obstacle
+        """
+        distance = self.get_distance_to_nearest_obstacle(position)
+        return distance <= self.OBSTACLE_PROXIMITY_THRESHOLD, distance
+
+    def adapt_rrt_parameters(self, near_obstacle):
+        """Adapt RRT parameters based on obstacle proximity.
+
+        Parameters:
+        -----------
+        near_obstacle : bool
+            True if robot is near an obstacle
+        """
+        if near_obstacle:
+            self.rrt.N_tn = self.NEAR_OBSTACLE_N_TN
+            self.rrt.max_depth = self.NEAR_OBSTACLE_MAX_DEPTH
+        else:
+            self.rrt.N_tn = self.NORMAL_N_TN
+            self.rrt.max_depth = self.NORMAL_MAX_DEPTH
 
     def log_all_path_evaluations(self, debug_info, best_idx):
         """Log detailed evaluation results for all paths.
@@ -258,20 +315,8 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         noisy = true_conc + np.random.normal(0, sigma)
         return max(0, noisy)
 
-    def is_estimation_converged(self):
-        """Check if estimation has converged (sigma < threshold).
-
-        Returns:
-        --------
-        converged : bool
-            True if estimation has converged
-        """
-        _, stds = self.particle_filter.get_estimate()
-        sigma_p = max(stds['x'], stds['y'])
-        return sigma_p < self.sigma_threshold
-
     def take_step(self, step_num):
-        """Execute one measure-plan-move cycle (Algorithm 1 from paper).
+        """Execute one measure-plan-move cycle with adaptive RRT.
 
         Parameters:
         -----------
@@ -287,6 +332,17 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
 
         self.log(f"\n--- Step {step_num} ---")
         self.log(f"Robot at: ({self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f})")
+
+        # ==== CHECK OBSTACLE PROXIMITY ====
+        near_obstacle, obstacle_distance = self.is_near_obstacle(self.robot_pos)
+        self.adapt_rrt_parameters(near_obstacle)
+
+        if near_obstacle:
+            self.log(f"[ADAPTIVE] Near obstacle (dist={obstacle_distance:.3f}m < {self.OBSTACLE_PROXIMITY_THRESHOLD}m)")
+            self.log(f"[ADAPTIVE] Using enhanced RRT: N_tn={self.rrt.N_tn}, max_depth={self.rrt.max_depth}")
+        else:
+            self.log(f"[ADAPTIVE] Open area (dist={obstacle_distance:.3f}m >= {self.OBSTACLE_PROXIMITY_THRESHOLD}m)")
+            self.log(f"[ADAPTIVE] Using normal RRT: N_tn={self.rrt.N_tn}, max_depth={self.rrt.max_depth}")
 
         # ==== MEASURE PHASE ====
         measurement = self.get_measurement(self.robot_pos)
@@ -324,9 +380,9 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         self.measurements.append({'pos': self.robot_pos, 'raw': measurement})
         self.estimates.append((mean, std))
 
-        # ==== CHECK CONVERGENCE (early check before planning) ====
+        # ==== CHECK DISTANCE TO TRUE SOURCE (only stopping condition) ====
         sigma_p = max(std['x'], std['y'])
-        self.log(f"[CONVERGE] sigma_p = {sigma_p:.3f}, sigma_t = {self.sigma_threshold:.3f}")
+        self.log(f"[INFO] sigma_p = {sigma_p:.3f} (for reference only, not used as stopping condition)")
 
         # Check if robot has reached true source
         dist_to_true = np.sqrt((self.robot_pos[0] - self.true_source[0])**2 + (self.robot_pos[1] - self.true_source[1])**2)
@@ -339,7 +395,7 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
             self.log(f"  Robot position: ({self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f})")
             self.log(f"  Localization error: {np.sqrt((mean['x']-self.true_source[0])**2 + (mean['y']-self.true_source[1])**2):.3f}m")
 
-            # Save final visualization (no RRT since we return early)
+            # Save final visualization
             self.visualizer.save_step(
                 robot_pos=self.robot_pos,
                 trajectory=self.trajectory,
@@ -353,46 +409,15 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
-                rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
                 digital_value=discrete_measurement
-)
-
+            )
             self.search_complete = True
             return False
 
-        if self.is_estimation_converged():
-            self.log(f"\n✓✓✓ ESTIMATION CONVERGED! ✓✓✓")
-            self.log(f"  True source: {self.true_source}")
-            self.log(f"  Estimated: ({mean['x']:.2f}, {mean['y']:.2f})")
-            self.log(f"  Error: {np.sqrt((mean['x']-self.true_source[0])**2 + (mean['y']-self.true_source[1])**2):.3f}m")
-
-            # Save final converged visualization (no RRT since we return early)
-            self.visualizer.save_step(
-                robot_pos=self.robot_pos,
-                trajectory=self.trajectory,
-                est_source=(mean['x'], mean['y']),
-                est_std=(std['x'], std['y']),
-                true_source=self.true_source,
-                step_num=step_num,
-                sigma_p=sigma_p,
-                current_step=step_num,
-                particle_filter=self.particle_filter,
-                distance_to_true=dist_to_true,
-                d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid,
-                rrt_nodes=None,
-                sensor_reading=measurement,
-                threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
-)
-
-            self.search_complete = True
-            return False
-
-        # ==== PLAN PHASE (before visualization for RRT drawing) ====
-        self.log(f"[PLAN] Building RRT with exploration penalty...")
+        # ==== PLAN PHASE ====
+        self.log(f"[PLAN] Building Adaptive RRT with exploration penalty...")
         # Update RRT with visited positions and current step for exploration penalty
         self.rrt.visited_positions = self.trajectory_with_steps
         self.rrt.current_step = step_num
@@ -409,15 +434,6 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         rrt_nodes = debug_info.get('rrt_nodes', None)
         rrt_pruned_paths = debug_info.get('rrt_pruned_paths', None)
         best_idx = len(debug_info.get('all_utilities', [])) - 1  # Default to last if not found
-
-        # Find the best index
-        if 'all_utilities' in debug_info:
-            all_utilities = debug_info['all_utilities']
-            best_utility = debug_info['best_utility']
-            for idx, util in enumerate(all_utilities):
-                if abs(util - best_utility) < 1e-6:
-                    best_idx = idx
-                    break
 
         # ==== SAVE STEP VISUALIZATION (with RRT tree) ====
         self.visualizer.save_step(
@@ -438,55 +454,25 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
             sensor_reading=measurement,
             threshold_bins=self.sensor.level_thresholds,
             digital_value=discrete_measurement
-)
+        )
+
+        # Find the best index
+        if 'all_utilities' in debug_info:
+            all_utilities = debug_info['all_utilities']
+            best_utility = debug_info['best_utility']
+            for idx, util in enumerate(all_utilities):
+                if abs(util - best_utility) < 1e-6:
+                    best_idx = idx
+                    break
 
         # Log all path evaluations with details
         self.log_all_path_evaluations(debug_info, best_idx)
 
         self.log(f"[PLAN] Best utility: {debug_info['best_utility']:.4f}")
-        self.log(f"[PLAN] J1 (Information gain):")
-        self.log(f"[PLAN]   - Original (before penalty): {debug_info['best_information_gain_original']:.4f}")
-        self.log(f"[PLAN]   - With penalty applied: {debug_info['best_information_gain_penalized']:.4f}")
-        self.log(f"[PLAN]   - Normalized [0-1]: {debug_info['best_information_gain']:.4f}")
-        self.log(f"[PLAN]   - Range in all paths: [{debug_info['norm_info_gain_range'][0]:.4f}, {debug_info['norm_info_gain_range'][1]:.4f}]")
-        self.log(f"[PLAN] J2 (Travel cost):")
-        self.log(f"[PLAN]   - Original: {debug_info['best_travel_cost_original']:.4f}")
-        self.log(f"[PLAN]   - Normalized [0-1]: {debug_info['best_travel_cost']:.4f}")
-        self.log(f"[PLAN]   - Range in all paths: [{debug_info['norm_travel_cost_range'][0]:.4f}, {debug_info['norm_travel_cost_range'][1]:.4f}]")
+        self.log(f"[PLAN] Information gain (penalized): {debug_info['best_information_gain']:.4f}")
+        self.log(f"[PLAN] Information gain (original): {debug_info['best_information_gain_original']:.4f}")
+        self.log(f"[PLAN] Travel cost: {debug_info['best_travel_cost']:.4f}")
         self.log(f"[PLAN] Paths analyzed: {debug_info['total_paths']} total | {debug_info['paths_with_penalties']} with penalties")
-
-        # Show penalty information
-        if debug_info['best_penalty_applied']:
-            original = debug_info['best_information_gain_original']
-            penalized = debug_info['best_information_gain_penalized']
-            normalized = debug_info['best_information_gain']
-            penalty_info = debug_info['best_penalty_info']
-            steps_since = self.current_step - penalty_info['visited_step']
-            penalty_exponent = 6 - steps_since
-            penalty_divisor = 2 ** penalty_exponent
-            visited_pos = penalty_info['visited_pos']
-            visited_step = penalty_info['visited_step']
-            distance = penalty_info['distance']
-
-            if original >= 0:
-                penalty_reduction = (1 - debug_info['best_penalty_factor']) * 100
-                self.log(f"[PLAN] ⚠️  PENALTY APPLIED (visited {steps_since} step{'s' if steps_since != 1 else ''} ago):")
-                self.log(f"[PLAN]    Penalized node: ({next_pos[0]:.2f}, {next_pos[1]:.2f})")
-                self.log(f"[PLAN]    Visited position: ({visited_pos[0]:.2f}, {visited_pos[1]:.2f}) at step {visited_step}")
-                self.log(f"[PLAN]    Distance to visited node: {distance:.3f}m (threshold: 1.0m)")
-                self.log(f"[PLAN]    Original J1: {original:.4f} → Penalized: {penalized:.4f} → Normalized: {normalized:.4f}")
-                self.log(f"[PLAN]    Information gain reduced by {penalty_reduction:.1f}% (2^{penalty_exponent} = {penalty_divisor}x divisor)")
-            else:
-                penalty_factor_inverse = 1 / debug_info['best_penalty_factor']
-                penalty_increase = (penalty_factor_inverse - 1) * 100
-                self.log(f"[PLAN] ⚠️  PENALTY APPLIED (visited {steps_since} step{'s' if steps_since != 1 else ''} ago):")
-                self.log(f"[PLAN]    Penalized node: ({next_pos[0]:.2f}, {next_pos[1]:.2f})")
-                self.log(f"[PLAN]    Visited position: ({visited_pos[0]:.2f}, {visited_pos[1]:.2f}) at step {visited_step}")
-                self.log(f"[PLAN]    Distance to visited node: {distance:.3f}m (threshold: 1.0m)")
-                self.log(f"[PLAN]    Original J1: {original:.4f} → Penalized: {penalized:.4f} → Normalized: {normalized:.4f}")
-                self.log(f"[PLAN]    Information gain made worse by {penalty_increase:.1f}% (2^{penalty_exponent} = {penalty_divisor}x amplification)")
-        else:
-            self.log(f"[PLAN] No penalty applied (exploring new areas)")
 
         # ==== MOVE PHASE ====
         self.log(f"[MOVE] Moving to ({next_pos[0]:.2f}, {next_pos[1]:.2f})")
@@ -497,30 +483,25 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         return True
 
     def run(self):
-        """Run the full RRT-Infotaxis algorithm with discrete sensor."""
+        """Run the full Adaptive RRT-Infotaxis algorithm."""
         self.log("=" * 70)
-        self.log("RRT-INFOTAXIS WITH IGDM + DISCRETE SENSOR + EXPLORATION PENALTY - UPDATED")
-        self.log("(Multi-Room Building)")
+        self.log("ADAPTIVE RRT-INFOTAXIS WITH IGDM + DISCRETE SENSOR + EXPLORATION PENALTY (Large Map)")
         self.log("=" * 70)
-        self.log(f"Environment: {self.room_width}m × {self.room_height}m (with multiple fully enclosed rooms)")
-        self.log(f"Room 1 (top-left): x∈[0,10], y∈[15,25] with door at y∈[19,21]")
-        self.log(f"Room 2 (bottom-left): x∈[0,10], y∈[0,10] with door at y∈[4,6]")
-        self.log(f"Room 3 (top-right): x∈[15,25], y∈[15,25] with door at y∈[19,21]")
-        self.log(f"Central hallway: x∈[10,15], y∈[0,25]")
-        self.log(f"Horizontal walls: (0,15)-(10,15), (0,10)-(10,10), (15,15)-(25,15)")
-        self.log(f"True source: {self.true_source} (Q={self.true_Q}) in Room 1")
-        self.log(f"Robot start: {self.robot_start} in central hallway")
+        self.log(f"Environment: {self.room_width}m × {self.room_height}m (with room walls and door)")
+        self.log(f"Room: x∈[0,5], y∈[20,25] with right wall at x=5 and bottom wall at y=20 (door at x∈[0,2])")
+        self.log(f"True source: {self.true_source} (Q={self.true_Q}) inside room")
+        self.log(f"Robot start: {self.robot_start} in open area")
         self.log(f"Algorithm parameters:")
         self.log(f"  - IGDM sigma_m: {self.sigma_m}m (Dijkstra distance, obstacle-aware)")
         self.log(f"  - Sensor: 5-level DISCRETE (provides ~2.3 bits/measurement vs 1 bit for binary)")
-        self.log(f"  - Utility weights: J1 (information gain) = 0.5, J2 (travel cost) = 0.5 (normalized, equal contribution)")
+        self.log(f"  - ADAPTIVE RRT:")
+        self.log(f"    * Obstacle proximity threshold: {self.OBSTACLE_PROXIMITY_THRESHOLD}m")
+        self.log(f"    * Normal (open area): N_tn={self.NORMAL_N_TN}, max_depth={self.NORMAL_MAX_DEPTH}")
+        self.log(f"    * Near obstacle: N_tn={self.NEAR_OBSTACLE_N_TN}, max_depth={self.NEAR_OBSTACLE_MAX_DEPTH}")
         self.log(f"  - Exploration penalty (time-dependent): 2^(6-steps_since_visit) divisor for visited positions")
         self.log(f"    * 1 step ago: ÷32  | 2 steps: ÷16  | 3 steps: ÷8  | 4 steps: ÷4  | 5 steps: ÷2")
-        self.log(f"  - Success distance threshold: {self.d_success_thr}m")
+        self.log(f"  - Stopping condition: Distance to true source < {self.d_success_thr}m (only)")
         self.log(f"  - Max steps: {self.max_steps}")
-        self.log(f"RRT Updates:")
-        self.log(f"  - 4 guaranteed initial nodes (forward, behind, right, left) for better directional coverage")
-        self.log(f"  - Improved pruning: preserves shallow branches, prunes deep branches to max_depth")
         self.log("=" * 70)
 
         for step in range(1, self.max_steps + 1):
@@ -532,7 +513,7 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         self.log(f"Test completed after {len(self.trajectory)-1} steps")
         self.log(f"{'='*70}")
 
-    def visualize_final(self, filename='updated_rrt_infotaxis_igdm_rooms_discrete_result.png'):
+    def visualize_final(self, filename='adaptive_rrt_infotaxis_igdm_large_map_discrete_result.png'):
         """Create final summary plot.
 
         Parameters:
@@ -547,25 +528,13 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         ax1.set_xlim(0, self.room_width)
         ax1.set_ylim(0, self.room_height)
         ax1.set_aspect('equal')
-        ax1.set_title('RRT-Infotaxis Trajectory (IGDM + Discrete Sensor + Exploration Penalty) - UPDATED', fontsize=12, fontweight='bold')
+        ax1.set_title('Adaptive RRT-Infotaxis Trajectory (IGDM + Discrete Sensor, Large Map)', fontsize=12, fontweight='bold')
         ax1.set_xlabel('X (m)')
         ax1.set_ylabel('Y (m)')
 
-        # Plot room walls
-        # Vertical walls
-        # Room 1 right wall
-        ax1.add_patch(plt.Rectangle((9.9, 15.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax1.add_patch(plt.Rectangle((9.9, 21.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        # Room 2 right wall
-        ax1.add_patch(plt.Rectangle((9.9, 0.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax1.add_patch(plt.Rectangle((9.9, 6.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        # Room 3 left wall
-        ax1.add_patch(plt.Rectangle((14.9, 15.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax1.add_patch(plt.Rectangle((14.9, 21.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        # Horizontal walls
-        ax1.add_patch(plt.Rectangle((0.0, 14.9), 10.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax1.add_patch(plt.Rectangle((0.0, 9.9), 10.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax1.add_patch(plt.Rectangle((15.0, 14.9), 10.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
+        # Plot room obstacles
+        ax1.add_patch(plt.Rectangle((4.9, 20.0), 0.2, 5.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
+        ax1.add_patch(plt.Rectangle((2.0, 19.9), 3.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
 
         traj = np.array(self.trajectory)
         ax1.plot(traj[:, 0], traj[:, 1], 'b-o', linewidth=2, markersize=4, label='Path')
@@ -589,7 +558,7 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
         ax2.set_ylabel('Y (m)')
 
         x_grid = np.linspace(0, self.room_width, 100)
-        y_grid = np.linspace(0, self.room_height, 100)
+        y_grid = np.linspace(0, self.room_height, 60)
         X, Y = np.meshgrid(x_grid, y_grid)
 
         # Use the final step number for time-dependent dispersion visualization
@@ -605,18 +574,9 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
 
         im = ax2.contourf(X, Y, Z, levels=20, cmap='hot_r')
         cbar = plt.colorbar(im, ax=ax2, label='Concentration')
-        # Plot room walls on concentration field
-        # Vertical walls
-        ax2.add_patch(plt.Rectangle((9.9, 15.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax2.add_patch(plt.Rectangle((9.9, 21.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax2.add_patch(plt.Rectangle((9.9, 0.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax2.add_patch(plt.Rectangle((9.9, 6.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax2.add_patch(plt.Rectangle((14.9, 15.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax2.add_patch(plt.Rectangle((14.9, 21.0), 0.2, 4.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        # Horizontal walls
-        ax2.add_patch(plt.Rectangle((0.0, 14.9), 10.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax2.add_patch(plt.Rectangle((0.0, 9.9), 10.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
-        ax2.add_patch(plt.Rectangle((15.0, 14.9), 10.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
+        # Plot room obstacles on concentration field
+        ax2.add_patch(plt.Rectangle((4.9, 20.0), 0.2, 5.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
+        ax2.add_patch(plt.Rectangle((2.0, 19.9), 3.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
         ax2.plot(self.true_source[0], self.true_source[1], 'r*', markersize=10)
 
         # Plot 3: Estimation error over time
@@ -642,17 +602,18 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
             final_error = np.sqrt((final_mean['x']-self.true_source[0])**2 + (final_mean['y']-self.true_source[1])**2)
             final_sigma = max(final_std['x'], final_std['y'])
 
-            info_text = "RRT-INFOTAXIS RESULTS (MULTI-ROOM + DISCRETE SENSOR) - UPDATED\n"
+            info_text = "ADAPTIVE RRT-INFOTAXIS RESULTS\n"
             info_text += "="*40 + "\n\n"
             info_text += f"Steps taken: {len(self.trajectory)-1}\n"
-            info_text += f"Converged: {self.search_complete}\n\n"
+            info_text += f"Reached source: {self.search_complete}\n\n"
             info_text += f"True source: ({self.true_source[0]:.2f}, {self.true_source[1]:.2f})\n"
             info_text += f"Estimated:  ({final_mean['x']:.2f}, {final_mean['y']:.2f})\n"
             info_text += f"Error: {final_error:.3f} m\n\n"
             info_text += f"Success distance threshold: {self.d_success_thr:.3f} m\n\n"
-            info_text += "Updated RRT Features:\n"
-            info_text += "- 4 guaranteed initial nodes\n"
-            info_text += "- Improved pruning strategy\n"
+            info_text += f"Adaptive RRT Parameters:\n"
+            info_text += f"  Proximity threshold: {self.OBSTACLE_PROXIMITY_THRESHOLD}m\n"
+            info_text += f"  Normal: N_tn={self.NORMAL_N_TN}, depth={self.NORMAL_MAX_DEPTH}\n"
+            info_text += f"  Near obstacle: N_tn={self.NEAR_OBSTACLE_N_TN}, depth={self.NEAR_OBSTACLE_MAX_DEPTH}\n"
 
             ax4.text(0.05, 0.95, info_text, transform=ax4.transAxes, fontsize=11,
                     verticalalignment='top', fontfamily='monospace',
@@ -664,12 +625,16 @@ class RRTInfotaxisIGDMRoomsDiscreteUpdated:
 
 
 if __name__ == "__main__":
-    # Setup logging
-    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10")
-    log_file = log_dir / "updated_rrt_infotaxis_igdm_rooms_discrete.log"
+    # Setup logging to file
+    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-12")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "adaptive_rrt_infotaxis_igdm_large_map_discrete.log"
+
     logger = setup_logging(str(log_file))
+    logger.info(f"Log file: {log_file}")
 
     # Run with default sigma_m=1.0
-    infotaxis = RRTInfotaxisIGDMRoomsDiscreteUpdated(sigma_m=1.0, logger=logger)
+    infotaxis = AdaptiveRRTInfotaxisIGDMDiscreteLargeMap(sigma_m=1.0, logger=logger)
     infotaxis.run()
-    infotaxis.visualize_final()
+    final_png = log_dir / "adaptive_rrt_infotaxis_igdm_large_map_discrete_result.png"
+    infotaxis.visualize_final(str(final_png))

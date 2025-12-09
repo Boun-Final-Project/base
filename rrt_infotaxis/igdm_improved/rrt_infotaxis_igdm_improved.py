@@ -203,7 +203,10 @@ class RRTInfotaxisIGDM:
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid
+                occupancy_grid=self.grid,
+                sensor_reading=measurement,
+                threshold_bins=[self.sensor.threshold],
+                digital_value=binary_measurement
             )
 
             self.search_complete = True
@@ -228,7 +231,10 @@ class RRTInfotaxisIGDM:
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid
+                occupancy_grid=self.grid,
+                sensor_reading=measurement,
+                threshold_bins=[self.sensor.threshold],
+                digital_value=binary_measurement
             )
 
             self.search_complete = True
@@ -247,7 +253,10 @@ class RRTInfotaxisIGDM:
             particle_filter=self.particle_filter,
             distance_to_true=dist_to_true,
             d_success_thr=self.d_success_thr,
-            occupancy_grid=self.grid
+            occupancy_grid=self.grid,
+            sensor_reading=measurement,
+            threshold_bins=[self.sensor.threshold],
+            digital_value=binary_measurement
         )
 
         # ==== PLAN PHASE ====

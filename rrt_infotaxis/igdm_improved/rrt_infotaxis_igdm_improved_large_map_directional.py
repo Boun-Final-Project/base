@@ -326,7 +326,10 @@ class DirectionalPlannerIGDMDiscreteLargeMap:
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
                 rrt_nodes=None,
-                rrt_pruned_paths=None
+                rrt_pruned_paths=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
             )
 
             self.search_complete = True
@@ -352,7 +355,10 @@ class DirectionalPlannerIGDMDiscreteLargeMap:
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
                 rrt_nodes=None,
-                rrt_pruned_paths=None
+                rrt_pruned_paths=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
             )
 
             self.search_complete = True
@@ -392,7 +398,10 @@ class DirectionalPlannerIGDMDiscreteLargeMap:
             d_success_thr=self.d_success_thr,
             occupancy_grid=self.grid,
             rrt_nodes=rrt_nodes,
-            rrt_pruned_paths=rrt_pruned_paths
+            rrt_pruned_paths=rrt_pruned_paths,
+            sensor_reading=measurement,
+            threshold_bins=self.sensor.level_thresholds,
+            digital_value=discrete_measurement
         )
 
         # Find the best index
