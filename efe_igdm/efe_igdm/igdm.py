@@ -1,12 +1,15 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from olfaction_msgs.msg import GasSensor
 from geometry_msgs.msg import PoseWithCovarianceStamped, Point, PoseStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from nav2_msgs.action import NavigateToPose
-from .occupancy_grid import create_occupancy_map_from_service
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import OccupancyGrid
+from .occupancy_grid import create_occupancy_map_from_service, create_empty_occupancy_map
 from .sensor_model import ContinuousGaussianSensorModel
 # from .particle_filter import ParticleFilter
 from .particle_filter_optimized import ParticleFilterOptimized as ParticleFilter
@@ -49,6 +52,7 @@ class RRTInfotaxisNode(Node):
         # Sensor readings
         self.sensor_raw_value = None
         self.current_position = None
+        self.current_theta = None  # Robot orientation (yaw) for laser transformation
         self.sensor_initialized = False
 
         # State management for measure-plan-move loop
@@ -68,6 +72,10 @@ class RRTInfotaxisNode(Node):
         # Track previous marker counts for proper cleanup
         self.prev_num_paths = 0
 
+        # SLAM map tracking
+        self.laser_scan_count = 0
+        self.total_obstacles_marked = 0
+
         # Subscriptions
         self.pose_subscription = self.create_subscription(
             PoseWithCovarianceStamped,
@@ -83,6 +91,13 @@ class RRTInfotaxisNode(Node):
             10
         )
 
+        self.laser_subscription = self.create_subscription(
+            LaserScan,
+            '/PioneerP3DX/laser_scanner',
+            self.laser_callback,
+            10
+        )
+
         # Publishers for visualization
         self.particle_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/particles', 10)
         self.all_paths_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/all_paths', 10)
@@ -90,6 +105,14 @@ class RRTInfotaxisNode(Node):
         self.estimated_source_pub = self.create_publisher(Marker, '/rrt_infotaxis/estimated_source', 10)
         self.current_pos_pub = self.create_publisher(Marker, '/rrt_infotaxis/current_position', 10)
         self.text_info_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/source_info_text', 10)
+
+        # SLAM map publisher with QoS profile compatible with RViz Map display
+        map_qos = QoSProfile(
+            depth=10,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,  # Keep latest message for late subscribers
+            reliability=QoSReliabilityPolicy.RELIABLE
+        )
+        self.slam_map_pub = self.create_publisher(OccupancyGrid, '/rrt_infotaxis/slam_map', map_qos)
 
         # Nav2 action client
         self.nav_to_pose_client = ActionClient(self, NavigateToPose, '/PioneerP3DX/navigate_to_pose')
@@ -107,6 +130,14 @@ class RRTInfotaxisNode(Node):
             )
             self.get_logger().info('Successfully received occupancy map!')
 
+            # Create empty SLAM map with same dimensions and resolution
+            self.slam_map = create_empty_occupancy_map(self.occupancy_map)
+            self.get_logger().info(
+                f'Empty SLAM map initialized '
+                f'(resolution={self.slam_map.resolution}m, '
+                f'size={self.slam_map.width}x{self.slam_map.height})'
+            )
+
         except Exception as e:
             self.get_logger().error(f'Failed to load occupancy map: {e}')
             raise
@@ -121,11 +152,11 @@ class RRTInfotaxisNode(Node):
         # Initialize sensor model and particle filter
         # Using ContinuousGaussianSensorModel (paper's Equation 3)
         # Working in ppm: alpha=0.1 (10% noise), sigma_env=1.0 ppm
-        # Discretization: 10 bins over [0, 10] ppm (each bin is 1 ppm wide)
-        self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.0, num_levels=10, max_concentration=10.0)
+        # Discretization: 10 bins over [0, 20] ppm (each bin is 2 ppm wide)
+        self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.0, num_levels=10, max_concentration=20.0)
         self.particle_filter = ParticleFilter(
             num_particles=self.get_parameter('number_of_particles').value,
-            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 50)},
+            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 20)},
             binary_sensor_model=self.sensor_model,
             dispersion_model=self.dispersion_model
         )
@@ -160,6 +191,10 @@ class RRTInfotaxisNode(Node):
 
         # Timer for taking steps (start after all components are initialized)
         self.timer = self.create_timer(0.2, self.take_step)
+
+        # Timer for publishing SLAM map at 2 Hz for RViz visualization
+        self.slam_map_timer = self.create_timer(0.5, self._publish_slam_map_timer)
+
         self.get_logger().info('Node initialized successfully, starting measure-plan-move loop')
 
     def _setup_data_logging(self):
@@ -189,13 +224,152 @@ class RRTInfotaxisNode(Node):
 
     def pose_callback(self, msg):
         """Callback for robot pose updates."""
-        self.current_position = (msg.pose.pose.position.x, msg.pose.pose.position.y)
-        self.get_logger().debug(f'Robot position: {self.current_position}')
+        # Extract position
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+
+        # Extract yaw angle from quaternion for laser transformation
+        from math import atan2
+        qx = msg.pose.pose.orientation.x
+        qy = msg.pose.pose.orientation.y
+        qz = msg.pose.pose.orientation.z
+        qw = msg.pose.pose.orientation.w
+
+        # Convert quaternion to yaw (rotation around z-axis)
+        siny_cosp = 2.0 * (qw * qz + qx * qy)
+        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+        theta = atan2(siny_cosp, cosy_cosp)
+
+        # Store position as (x, y) for RRT compatibility
+        self.current_position = (x, y)
+        # Store theta separately for laser transformation
+        self.current_theta = theta
+        self.get_logger().debug(f'Robot position: ({x:.2f}, {y:.2f}, theta={theta:.2f})')
 
     def sensor_callback(self, msg):
         """Callback for gas sensor readings."""
         self.sensor_raw_value = msg.raw
         self.get_logger().debug(f'Received sensor reading: {self.sensor_raw_value}')
+
+    def laser_callback(self, msg: LaserScan):
+        """
+        Process laser scan and update SLAM map using ground truth pose.
+
+        For each laser ray that detects an obstacle:
+        1. Convert polar (angle, range) to Cartesian in robot frame
+        2. Transform to world frame using ground truth pose
+        3. Mark obstacle in slam_map
+        """
+        # Check if SLAM map is initialized (happens after GADEN map loads)
+        if not hasattr(self, 'slam_map'):
+            return  # SLAM map not ready yet
+
+        if self.current_position is None or self.current_theta is None:
+            return  # No pose yet
+
+        # Get current robot pose (x, y, theta)
+        robot_x = self.current_position[0]
+        robot_y = self.current_position[1]
+        robot_theta = self.current_theta
+
+        # Track obstacles marked in this scan
+        obstacles_this_scan = 0
+
+        # Process each laser ray
+        for i, range_val in enumerate(msg.ranges):
+            # Skip invalid readings
+            if range_val < msg.range_min or range_val > msg.range_max:
+                continue
+            if not np.isfinite(range_val):
+                continue
+
+            # Calculate ray angle in robot frame
+            angle = msg.angle_min + i * msg.angle_increment
+
+            # Convert to Cartesian in robot frame
+            local_x = range_val * np.cos(angle)
+            local_y = range_val * np.sin(angle)
+
+            # Transform to world frame
+            world_x = robot_x + local_x * np.cos(robot_theta) - local_y * np.sin(robot_theta)
+            world_y = robot_y + local_x * np.sin(robot_theta) + local_y * np.cos(robot_theta)
+
+            # Mark as occupied in slam_map
+            if self._mark_obstacle_in_slam_map(world_x, world_y):
+                obstacles_this_scan += 1
+
+        # Update counters
+        self.laser_scan_count += 1
+        self.total_obstacles_marked += obstacles_this_scan
+
+        # Log every 100 scans
+        if self.laser_scan_count % 100 == 0:
+            occupied_cells = np.sum(self.slam_map.grid > 0)
+            self.get_logger().info(
+                f'[SLAM] Scan #{self.laser_scan_count}: '
+                f'{obstacles_this_scan} obstacles this scan, '
+                f'{self.total_obstacles_marked} total marked, '
+                f'{occupied_cells} occupied cells in map'
+            )
+
+    def _mark_obstacle_in_slam_map(self, world_x: float, world_y: float) -> bool:
+        """
+        Mark obstacle in slam_map with small inflation.
+
+        Parameters:
+            world_x, world_y: World coordinates of obstacle
+
+        Returns:
+            True if obstacle was marked, False if out of bounds
+        """
+        # Convert world to grid coordinates
+        gx, gy = self.slam_map.world_to_grid(world_x, world_y)
+
+        # Check bounds
+        if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height:
+            return False  # Out of bounds
+
+        # Inflate by 1 cell in each direction for safety
+        # This accounts for discretization and sensor noise
+        inflation_cells = 1
+
+        for dx in range(-inflation_cells, inflation_cells + 1):
+            for dy in range(-inflation_cells, inflation_cells + 1):
+                nx, ny = gx + dx, gy + dy
+                if 0 <= nx < self.slam_map.width and 0 <= ny < self.slam_map.height:
+                    # Mark as occupied (1) - permanent
+                    self.slam_map.grid[ny, nx] = 1
+
+        return True
+
+    def publish_slam_map(self):
+        """Publish slam_map as OccupancyGrid for RViz visualization."""
+        # Check if SLAM map is initialized
+        if not hasattr(self, 'slam_map'):
+            return
+
+        msg = OccupancyGrid()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'  # Use same frame as existing markers
+
+        msg.info.resolution = self.slam_map.resolution
+        msg.info.width = self.slam_map.width
+        msg.info.height = self.slam_map.height
+        msg.info.origin.position.x = self.slam_map.origin_x
+        msg.info.origin.position.y = self.slam_map.origin_y
+        msg.info.origin.position.z = 0.0
+        msg.info.origin.orientation.w = 1.0
+
+        # Flatten grid: 0=free, 100=occupied (ROS convention)
+        # Convert: 0 -> 0, 1 -> 100
+        flat_grid = (self.slam_map.grid.flatten() * 100).astype(np.int8)
+        msg.data = flat_grid.tolist()
+
+        self.slam_map_pub.publish(msg)
+
+    def _publish_slam_map_timer(self):
+        """Timer callback to publish SLAM map at regular intervals for RViz."""
+        self.publish_slam_map()
 
     def visualize_particles(self, particles, weights):
         """Visualize particles with weights as colored spheres."""
@@ -663,6 +837,9 @@ class RRTInfotaxisNode(Node):
             bi_threshold=detector_status["bi_threshold"],
             dead_end_detected=dead_end_detected
         )
+
+        # Publish SLAM map for visualization
+        self.publish_slam_map()
 
         # Log data to CSV
         elapsed_time = (self.get_clock().now() - self.start_time).nanoseconds / 1e9

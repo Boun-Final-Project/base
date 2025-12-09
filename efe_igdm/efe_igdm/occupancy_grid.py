@@ -282,3 +282,40 @@ def create_occupancy_map_from_service(node: Node, z_level: int = 5,
         timeout_sec=timeout_sec
     )
     return OccupancyGridMap(grid, params)
+
+
+def create_empty_occupancy_map(reference_map: OccupancyGridMap) -> OccupancyGridMap:
+    """
+    Create empty occupancy map with same dimensions as reference.
+
+    This is useful for creating a SLAM map that starts empty but
+    shares the same coordinate system and resolution as an existing map.
+
+    Parameters:
+    -----------
+    reference_map : OccupancyGridMap
+        Existing map to copy dimensions from
+
+    Returns:
+    --------
+    empty_map : OccupancyGridMap
+        Empty OccupancyGridMap (all cells free)
+    """
+    # Create empty grid (all zeros = free space)
+    empty_grid = np.zeros_like(reference_map.grid, dtype=np.int8)
+
+    # Create params dict matching reference map
+    params = {
+        'env_min': [reference_map.origin_x, reference_map.origin_y, 0.0],
+        'env_max': [
+            reference_map.origin_x + reference_map.width * reference_map.resolution,
+            reference_map.origin_y + reference_map.height * reference_map.resolution,
+            0.0
+        ],
+        'num_cells': [reference_map.width, reference_map.height, 1],
+        'cell_size': reference_map.resolution,
+        'z_level': reference_map.z_level,
+        'z_height': reference_map.z_height
+    }
+
+    return OccupancyGridMap(empty_grid, params)

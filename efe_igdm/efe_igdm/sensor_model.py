@@ -359,7 +359,7 @@ class ContinuousGaussianSensorModel:
     # Minimum likelihood floor to prevent numerical issues
     MIN_LIKELIHOOD = 1e-50
 
-    def __init__(self, alpha=0.1, sigma_env=1.0, num_levels=10, max_concentration=10.0):
+    def __init__(self, alpha=0.1, sigma_env=1.0, num_levels=10, max_concentration=20.0):
         """
         Initialize continuous Gaussian sensor model.
 
@@ -378,7 +378,6 @@ class ContinuousGaussianSensorModel:
         self.alpha = alpha
         self.sigma_env = sigma_env
         self.num_levels = num_levels  # For RRT discretization (Eq. 13-15)
-        self.max_concentration = max_concentration  # Fixed upper bound
 
     def get_std(self, predicted_concentration):
         """
