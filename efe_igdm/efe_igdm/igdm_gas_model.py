@@ -78,12 +78,12 @@ class IndoorGaussianDispersionModel:
         source_location : tuple (x0, y0)
             Source location in meters (world coordinates)
         release_rate : float
-            Gas release rate Qm (in g/s)
+            Gas release rate Qm (units determine output concentration units)
 
         Returns:
         --------
         concentration : float
-            Mean gas concentration in μg/m³
+            Mean gas concentration (units match release_rate parameter)
         """
         # Convert release rate from g/s to μg/s
         # Qm = release_rate * 1e6

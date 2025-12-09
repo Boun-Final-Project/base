@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.stats import multivariate_normal, norm as scipy_norm
 from .igdm_gas_model import IndoorGaussianDispersionModel
-from .sensor_model import DiscreteSensorModel
+from .sensor_model import ContinuousGaussianSensorModel
 from copy import deepcopy
 
 class ParticleFilterOptimized:
@@ -16,13 +16,13 @@ class ParticleFilterOptimized:
     """
 
     def __init__(self, num_particles: int, search_bounds: dict[str, list[float]],
-                 binary_sensor_model: DiscreteSensorModel,
+                 binary_sensor_model: ContinuousGaussianSensorModel,
                  dispersion_model: IndoorGaussianDispersionModel,
                  resample_threshold: float = 0.3, mcmc_std=None):
         """
         Parameters are identical to original ParticleFilter for drop-in replacement.
         Note: 'binary_sensor_model' parameter name kept for backwards compatibility,
-        but now accepts DiscreteSensorModel for multi-level measurements.
+        but now expects ContinuousGaussianSensorModel (paper's Equation 3).
         """
         self.N = num_particles
         self.bounds = search_bounds
@@ -78,12 +78,12 @@ class ParticleFilterOptimized:
 
         return particles
 
-    def update(self, measurement: int, sensor_position: tuple[float, float], skip_resample: bool = False):
+    def update(self, measurement: float, sensor_position: tuple[float, float], skip_resample: bool = False):
         """
-        Update particle filter with new discrete measurement (vectorized).
+        Update particle filter with new continuous measurement (vectorized).
 
         Args:
-            measurement: Discrete sensor measurement level (0 to num_levels-1)
+            measurement: Continuous sensor measurement (e.g., 10.94 ppm)
             sensor_position: Position where measurement was taken
             skip_resample: If True, skip resampling and MCMC (for RRT hypothetical updates)
         """
@@ -297,16 +297,23 @@ class ParticleFilterOptimized:
 
     #     return likelihoods
 
-    def _compute_likelihoods_vectorized(self, measurement: int, sensor_position: tuple[float, float]):
-        """Compute binary measurement likelihood for all particles (VECTORIZED)."""
-        # Compute all concentrations at once
+    def _compute_likelihoods_vectorized(self, measurement: float, sensor_position: tuple[float, float]):
+        """
+        Compute Gaussian measurement likelihood for all particles (VECTORIZED).
+
+        Uses continuous Gaussian likelihood from paper Equation 3:
+        p(z_k | θ^i) = (1/(σ_g√2π)) * exp(-(z_k - R_i)²/(2σ_g²))
+        """
+        # Compute all predicted concentrations at once
         predicted_concs = self._compute_concentrations_batch(sensor_position)
 
-        # Compute all likelihoods at once using the vectorized sensor model method
-        likelihoods = self.sensor_model.probability_binary_vec(measurement, predicted_concs)
-        
-        # # Add a small epsilon to prevent all weights from becoming zero
-        # likelihoods = np.maximum(likelihoods, 1e-50)
+        # Check if sensor model has continuous Gaussian likelihood (paper's method)
+        if hasattr(self.sensor_model, 'probability_continuous_vec'):
+            # Use continuous Gaussian likelihood (Equation 3)
+            likelihoods = self.sensor_model.probability_continuous_vec(measurement, predicted_concs)
+        else:
+            # Fallback to discrete/binary sensor model (for compatibility)
+            likelihoods = self.sensor_model.probability_binary_vec(measurement, predicted_concs)
 
         return likelihoods
 
@@ -389,19 +396,29 @@ class ParticleFilterOptimized:
         conc_curr = self._compute_concentrations_for_particles(
             self.particles, self.last_sensor_position
         )
-        # Assumes you have a vectorized sensor model method
-        likelihood_curr = self.sensor_model.probability_binary_vec(
-            self.last_measurement, conc_curr
-        )
+        # Use appropriate method based on sensor model type
+        if hasattr(self.sensor_model, 'probability_continuous_vec'):
+            likelihood_curr = self.sensor_model.probability_continuous_vec(
+                self.last_measurement, conc_curr
+            )
+        else:
+            likelihood_curr = self.sensor_model.probability_binary_vec(
+                self.last_measurement, conc_curr
+            )
 
         # 4. Compute likelihoods for ALL PROPOSED particles at once
         conc_prop = self._compute_concentrations_for_particles(
             proposals, self.last_sensor_position
         )
-        # Assumes you have a vectorized sensor model method
-        likelihood_prop = self.sensor_model.probability_binary_vec(
-            self.last_measurement, conc_prop
-        )
+        # Use appropriate method based on sensor model type
+        if hasattr(self.sensor_model, 'probability_continuous_vec'):
+            likelihood_prop = self.sensor_model.probability_continuous_vec(
+                self.last_measurement, conc_prop
+            )
+        else:
+            likelihood_prop = self.sensor_model.probability_binary_vec(
+                self.last_measurement, conc_prop
+            )
 
         # 5. Metropolis-Hastings acceptance (FULLY VECTORIZED)
         
@@ -457,14 +474,27 @@ class ParticleFilterOptimized:
         According to Eq. (28) in the paper: ŵi_k+n = p(b̂k+n|θi_k) · wi_k
 
         Args:
-            measurement: Binary sensor measurement (0 or 1)
+            measurement: Discrete bin index (0 to num_levels-1) for RRT discretization
             sensor_position: Position where measurement would be taken
 
         Returns:
             float: Entropy that would result from this hypothetical measurement
         """
-        # Compute likelihoods without modifying state
-        likelihoods = self._compute_likelihoods_vectorized(measurement, sensor_position)
+        # For ContinuousGaussianSensorModel, compute bin likelihoods using discretization
+        if hasattr(self.sensor_model, 'create_discretization_thresholds'):
+            # Get particle predictions at this position
+            predicted_concs = self._compute_concentrations_batch(sensor_position)
+
+            # Create discretization thresholds for this position (Eq. 13-14)
+            thresholds = self.sensor_model.create_discretization_thresholds(predicted_concs)
+
+            # Compute P(z ∈ bin | θ^i) for all particles
+            likelihoods = self.sensor_model.compute_bin_likelihood_vec(
+                measurement, predicted_concs, thresholds
+            )
+        else:
+            # For Binary/Discrete sensor models, use existing method
+            likelihoods = self._compute_likelihoods_vectorized(measurement, sensor_position)
 
         # Compute hypothetical weights (Eq. 28)
         hypothetical_weights = self.weights * likelihoods
@@ -486,14 +516,14 @@ class ParticleFilterOptimized:
     def predict_measurement_probability(self, sensor_position, binary_value=None):
         """
         Predict probability of future measurement (VECTORIZED).
-        Works with both BinarySensorModel and DiscreteSensorModel.
+        Works with BinarySensorModel, DiscreteSensorModel, and ContinuousGaussianSensorModel.
 
         This is the critical hotspot for RRT-Infotaxis!
         """
         # Compute all concentrations at once (VECTORIZED)
         predicted_concs = self._compute_concentrations_batch(sensor_position)
 
-        # Check if using BinarySensorModel or DiscreteSensorModel
+        # Check sensor model type
         if hasattr(self.sensor_model, 'threshold'):
             # BinarySensorModel: single threshold
             delta_c = self.sensor_model.threshold - predicted_concs
@@ -510,8 +540,31 @@ class ParticleFilterOptimized:
             else:
                 return 1 - beta
 
+        elif hasattr(self.sensor_model, 'create_discretization_thresholds'):
+            # ContinuousGaussianSensorModel: use dynamic discretization (Eq. 13-15)
+            thresholds = self.sensor_model.create_discretization_thresholds(predicted_concs)
+
+            num_levels = self.sensor_model.num_levels
+            level_probs = []
+
+            for level in range(num_levels):
+                # Compute P(level | concentration) for each particle
+                prob_per_particle = self.sensor_model.compute_bin_likelihood_vec(
+                    level, predicted_concs, thresholds
+                )
+
+                # Weight by particle weights and sum (Eq. 29)
+                level_prob = np.sum(prob_per_particle * self.weights)
+                level_probs.append(level_prob)
+
+            # Return requested probability
+            if binary_value is None:
+                return level_probs
+            else:
+                return level_probs[binary_value]
+
         else:
-            # DiscreteSensorModel: multiple thresholds
+            # DiscreteSensorModel with fixed thresholds
             if not self.sensor_model.initialized:
                 # If not initialized, return uniform probabilities
                 num_levels = self.sensor_model.num_levels

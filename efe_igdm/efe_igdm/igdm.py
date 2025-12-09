@@ -7,7 +7,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from nav2_msgs.action import NavigateToPose
 from .occupancy_grid import create_occupancy_map_from_service
-from .sensor_model import DiscreteSensorModel
+from .sensor_model import ContinuousGaussianSensorModel
 # from .particle_filter import ParticleFilter
 from .particle_filter_optimized import ParticleFilterOptimized as ParticleFilter
 from .igdm_gas_model import IndoorGaussianDispersionModel
@@ -43,10 +43,8 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('dead_end_epsilon', 0.85)  # Weight for threshold update (ε in Eq. 21)
         self.declare_parameter('dead_end_initial_threshold', 0.1)  # Initial BI threshold
 
-        # Particle filter diversity parameters (prevent early convergence)
+        # Particle filter diversity parameters
         self.declare_parameter('resample_threshold', 0.5)  # Effective sample size threshold for resampling
-        self.declare_parameter('min_steps_before_convergence', 10)  # Minimum steps before allowing convergence
-        self.declare_parameter('block_convergence_in_dead_end', True)  # Don't converge when dead end detected
 
         # Sensor readings
         self.sensor_raw_value = None
@@ -121,11 +119,13 @@ class RRTInfotaxisNode(Node):
         self.get_logger().info(f'IGDM initialized with σ_m={self.get_parameter("sigma_m").value}m')
 
         # Initialize sensor model and particle filter
-        # Using DiscreteSensorModel with 6 levels (empirical three-sigma rule)
-        self.sensor_model = DiscreteSensorModel(alpha=0.1, sigma_env=1.5, num_levels=6)
+        # Using ContinuousGaussianSensorModel (paper's Equation 3)
+        # Working in ppm: alpha=0.1 (10% noise), sigma_env=1.0 ppm
+        # Discretization: 10 bins over [0, 10] ppm (each bin is 1 ppm wide)
+        self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.0, num_levels=10, max_concentration=10.0)
         self.particle_filter = ParticleFilter(
             num_particles=self.get_parameter('number_of_particles').value,
-            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 200)},
+            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 50)},
             binary_sensor_model=self.sensor_model,
             dispersion_model=self.dispersion_model
         )
@@ -178,7 +178,7 @@ class RRTInfotaxisNode(Node):
         # Write header
         self.csv_writer.writerow([
             'step', 'elapsed_time', 'entropy', 'std_dev_x', 'std_dev_y', 'std_dev_Q',
-            'est_x', 'est_y', 'est_Q', 'sensor_value', 'discrete_level', 'max_threshold',
+            'est_x', 'est_y', 'est_Q', 'sensor_value', 'continuous_measurement', 'threshold',
             'num_branches', 'best_utility', 'J1_entropy_gain', 'J2_travel_cost',
             'robot_x', 'robot_y', 'sigma_m', 'bi_optimal', 'bi_threshold', 'dead_end_detected'
         ])
@@ -427,51 +427,22 @@ class RRTInfotaxisNode(Node):
         """
         Check if particle filter estimation has converged (std dev below threshold).
 
-        Prevents early convergence by requiring:
-        1. Standard deviation below threshold
-        2. Minimum number of steps completed
-        3. Not currently in a dead end (optional, configurable)
+        Paper's stopping condition: max(σ_x, σ_y) < σ_t
         """
         current_means, current_stds = self.particle_filter.get_estimate()
         sigma_x = current_stds["x"]
         sigma_y = current_stds["y"]
 
-        # Use maximum of x and y standard deviations
+        # Use maximum of x and y standard deviations (paper's condition)
         sigma_p = max(sigma_x, sigma_y)
-
         sigma_threshold = self.get_parameter('sigma_threshold').value
-        min_steps = self.get_parameter('min_steps_before_convergence').value
-        block_dead_end = self.get_parameter('block_convergence_in_dead_end').value
 
-        # Check all conditions
-        std_dev_converged = sigma_p < sigma_threshold
-        enough_steps = self.step_count >= min_steps
-        not_in_dead_end = not self.current_dead_end_status
+        # Simple threshold check - no other conditions
+        converged = sigma_p < sigma_threshold
 
-        # Apply dead end blocking if enabled
-        if block_dead_end:
-            converged = std_dev_converged and enough_steps and not_in_dead_end
-        else:
-            converged = std_dev_converged and enough_steps
-
-        # Log convergence status every step for debugging
         self.get_logger().debug(
-            f'Convergence check: σ_p={sigma_p:.3f}, σ_t={sigma_threshold:.3f}, '
-            f'steps={self.step_count}/{min_steps}, dead_end={self.current_dead_end_status}, converged={converged}'
+            f'Convergence check: σ_p={sigma_p:.3f}, σ_t={sigma_threshold:.3f}, converged={converged}'
         )
-
-        # Warn if convergence blocked due to various reasons
-        if std_dev_converged and not enough_steps:
-            self.get_logger().warn(
-                f'Early convergence prevented: σ_p={sigma_p:.3f} < {sigma_threshold:.3f} '
-                f'but only {self.step_count} steps (need {min_steps})'
-            )
-
-        if block_dead_end and std_dev_converged and enough_steps and self.current_dead_end_status:
-            self.get_logger().warn(
-                f'Convergence blocked: In dead end! σ_p={sigma_p:.3f} < {sigma_threshold:.3f}, '
-                f'steps={self.step_count}>={min_steps}, but BI* too low. Continuing search...'
-            )
 
         if converged:
             self.get_logger().info(
@@ -592,13 +563,12 @@ class RRTInfotaxisNode(Node):
             self.get_logger().debug('Waiting for sensor and position data...')
             return
 
-        # Initialize sensor thresholds with first measurement
+        # Initialize sensor (no thresholds needed for continuous Gaussian model)
         if not self.sensor_initialized:
-            current_measurement = self.ppm_converter.ppm_to_ug_m3(self.sensor_raw_value)
-            self.sensor_model.initialize_thresholds(current_measurement)
             self.sensor_initialized = True
-            self.get_logger().info(f'Sensor initialized with thresholds based on measurement: {self.sensor_raw_value} ppm = {current_measurement:.2f} μg/m³')
-            return
+            self.get_logger().info(f'Continuous Gaussian sensor model initialized (α={self.sensor_model.alpha}, σ_env={self.sensor_model.sigma_env})')
+            # Don't return - process this first measurement
+            # return
 
         # Check if robot is currently moving to a goal
         if self.is_moving:
@@ -620,15 +590,13 @@ class RRTInfotaxisNode(Node):
         # MEASURE-PLAN-MOVE LOOP
 
         # 1. MEASURE: Take sensor measurement and update particle filter
-        current_measurement_ppm = self.sensor_raw_value
-        current_measurement = self.ppm_converter.ppm_to_ug_m3(current_measurement_ppm)
+        # Work directly in ppm (no conversion to μg/m³)
+        current_measurement = self.sensor_raw_value  # Already in ppm
 
-        # Update thresholds adaptively, then compute discrete measurement level
-        self.sensor_model.update_thresholds(current_measurement)
-        discrete_measurement = self.sensor_model.get_discrete_measurement(current_measurement)
-
-        self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement:.4f} μg/m³, Discrete level: {discrete_measurement}/{self.sensor_model.num_levels-1}')
-        self.particle_filter.update(discrete_measurement, self.current_position)
+        # Use continuous measurement directly (paper's Equation 3)
+        # NO discretization for actual measurements!
+        self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement:.4f} ppm (continuous)')
+        self.particle_filter.update(current_measurement, self.current_position)
 
         # Estimate source location
         current_means, current_stds = self.particle_filter.get_estimate()
@@ -683,8 +651,8 @@ class RRTInfotaxisNode(Node):
             std_dev=sigma_p,
             search_complete=self.search_complete,
             sensor_value=current_measurement,
-            binary_value=discrete_measurement,  # Now using discrete level (0 to num_levels-1)
-            threshold=self.sensor_model.thresholds[-1] if self.sensor_model.initialized else 0.0,  # Use max threshold
+            binary_value=int(current_measurement),  # Display rounded value for visualization
+            threshold=0.0,  # No thresholds in continuous model
             num_branches=debug_info.get("num_branches", 0),
             best_utility=debug_info.get("best_utility", 0.0),
             best_entropy_gain=debug_info.get("best_entropy_gain", 0.0),
@@ -709,8 +677,8 @@ class RRTInfotaxisNode(Node):
             f'{est_y:.4f}',
             f'{est_Q:.4f}',
             f'{current_measurement:.4f}',
-            discrete_measurement,  # Discrete level (0 to num_levels-1)
-            f'{self.sensor_model.thresholds[-1]:.4f}' if self.sensor_model.initialized else '0.0',  # Max threshold
+            f'{current_measurement:.4f}',  # Continuous measurement (same as sensor_value)
+            '0.0',  # No thresholds in continuous model
             debug_info.get("num_branches", 0),
             f'{debug_info.get("best_utility", 0.0):.4f}',
             f'{debug_info.get("best_entropy_gain", 0.0):.4f}',
