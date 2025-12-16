@@ -110,33 +110,48 @@ class RRT:
             paths.append(path[::-1])
         return paths
 
-    def calculate_entropy_gain(self, path : List[Node], initial_particle_filter : ParticleFilterOptimized) -> float:
+    def calculate_branch_information(self, path : List[Node], initial_particle_filter : ParticleFilterOptimized) -> float:
         """
-        Calculate the entropy gain along a given path.
-        This is the J1 metric from the paper. Eq(30).
+        Calculate Branch Information (BI) for a path using Equation 19 from paper.
+
+        BI(V_b) = Σ_{i=1}^{m} γ^{i-1} · I(v_{b,i})
+
+        where:
+        - V_b is a branch (path) in the RRT tree
+        - v_{b,i} is the i-th vertex in the branch
+        - I(v_{b,i}) is the mutual information at vertex v_{b,i}
+        - γ is the discount factor (assigns higher weight to nearer future)
+        - m is the number of vertices in the branch
+
         Parameters:
         -----------
-        path : list of tuples
-            List of (x, y) positions along the path
-        discount_factor : float
-            Discount factor for entropy gain
+        path : List[Node]
+            Branch from root to leaf node
         initial_particle_filter : ParticleFilterOptimized
-            A particle filter to estimate entropy gain
-            
+            Current particle filter state for entropy calculations
+
         Returns:
         --------
-        total_gain : float
-            Total discounted entropy gain along the path
+        BI : float
+            Total Branch Information (discounted sum of mutual information)
         """
-        path = path[1:] # Exclude starting position
-        I_total = 0.0
+        path = path[1:] # Exclude starting position (root node)
+        BI = 0.0  # Branch Information (Eq. 19)
+
+        # Compute BI = Σ γ^{i-1} · I(v_i) where i starts from 1 in paper
+        # After excluding root, enumerate starts from 0, so γ^i = γ^{i-1} in paper notation
         for i, node in enumerate(path):
+            # Use cached entropy gain if available
             if node.entropy_gain != -np.inf:
                 discounted_gain = (self.discount_factor ** i) * node.entropy_gain
-                I_total += discounted_gain
+                BI += discounted_gain
                 continue
+
             position = node.position
-            start_entropy = initial_particle_filter.get_entropy()
+
+            # Compute mutual information I(v_i) at this vertex
+            # I(v_i) = H_k - E[H_{k+1}] (Equation 9 in paper)
+            current_entropy = initial_particle_filter.get_entropy()
 
             # Determine number of measurement levels based on sensor model
             # Binary: 2 levels (0, 1), Discrete: N levels (0 to N-1)
@@ -145,18 +160,26 @@ class RRT:
             else:
                 num_measurements = 2  # Binary sensor model
 
+            # Compute expected entropy E[H_{k+1}] = Σ p(z) · H(z) (Eq. 11-12)
             expected_entropy = 0.0
             for measurement in range(num_measurements):
-                # Get probability of this measurement
+                # p(z | current state) from Equation 29
                 probability_of_measurement = initial_particle_filter.predict_measurement_probability(position, measurement)
-                # Compute hypothetical entropy WITHOUT modifying filter state (Eq. 28-29 from paper)
+                # H_{k+1}(z) - hypothetical entropy after measurement z (Eq. 28)
                 hypothetical_entropy = initial_particle_filter.compute_hypothetical_entropy(measurement, position)
                 expected_entropy += probability_of_measurement * hypothetical_entropy
-            information_gain = start_entropy - expected_entropy
-            node.entropy_gain = information_gain
-            discounted_gain = (self.discount_factor ** i) * information_gain
-            I_total += discounted_gain
-        return I_total
+
+            # Mutual information at this vertex
+            mutual_information = current_entropy - expected_entropy
+
+            # Cache for potential reuse
+            node.entropy_gain = mutual_information
+
+            # Apply discount factor: γ^i · I(v_i)
+            discounted_gain = (self.discount_factor ** i) * mutual_information
+            BI += discounted_gain
+
+        return BI
 
     def calculate_travel_cost(self, path : List[Node], initial_particle_filter : ParticleFilterOptimized) -> float:
         """Calculate the travel cost along a given path. J2 from the paper. Eq(31)."""
@@ -172,23 +195,31 @@ class RRT:
         return total_cost
     
     def get_next_move(self, start_pos : tuple[float,float], initial_particle_filter : ParticleFilterOptimized) -> tuple[float,float]:
-        """Get the next move position based on utility maximization."""
+        """
+        Get the next move position by maximizing Branch Information (BI).
+
+        Implements local planner from Section IV.B.1:
+        - Select branch V_b* = argmax_{V_b} BI(V_b)  (Equation 20)
+        - Move to first vertex of selected branch
+        """
         # Clear previous tree
         self.nodes = []
         self.sprawl(start_pos)
         paths = self.prune()
         best_path = None
-        best_utility = -np.inf
+        best_BI = -np.inf  # BI* (Equation 20)
+
         for path in paths:
-            I_gain = self.calculate_entropy_gain(path, initial_particle_filter)
-            travel_cost = self.calculate_travel_cost(path, initial_particle_filter)
-            # utility = I_gain * self.positive_weight - travel_cost * (1 - self.positive_weight)
-            utility = I_gain  # Pure infotaxis - only maximize information gain
-            if utility > best_utility:
-                best_utility = utility
+            # Compute Branch Information (Equation 19)
+            BI = self.calculate_branch_information(path, initial_particle_filter)
+
+            # Select branch with highest BI (Equation 20)
+            if BI > best_BI:
+                best_BI = BI
                 best_path = path
+
         if best_path is not None and len(best_path) > 1:
-            return tuple(best_path[1].position)  # Next move
+            return tuple(best_path[1].position)  # Move to first vertex
         else:
             return start_pos  # No move possible
 
@@ -255,30 +286,28 @@ class RRT:
                 'error': 'No valid paths found'
             }
 
-        # Evaluate all paths
-        all_utilities = []
-        all_entropy_gains = []
+        # Evaluate all paths (branches)
+        all_branch_information = []  # BI for each branch
         all_travel_costs = []
 
         best_path = None
-        best_utility = -np.inf
-        best_entropy_gain = 0.0
+        best_BI = -np.inf  # BI* (Equation 20)
         best_travel_cost = 0.0
 
         for path in paths:
-            I_gain = self.calculate_entropy_gain(path, initial_particle_filter)
+            # Compute Branch Information (Equation 19)
+            BI = self.calculate_branch_information(path, initial_particle_filter)
+
+            # Compute travel cost (for debugging, not used in local planner)
             travel_cost = self.calculate_travel_cost(path, initial_particle_filter)
-            # utility = I_gain * self.positive_weight - travel_cost * (1 - self.positive_weight)
-            utility = I_gain  # Pure infotaxis - only maximize information gain
 
-            all_entropy_gains.append(I_gain)
+            all_branch_information.append(BI)
             all_travel_costs.append(travel_cost)
-            all_utilities.append(utility)
 
-            if utility > best_utility:
-                best_utility = utility
+            # Select branch with highest BI (Equation 20)
+            if BI > best_BI:
+                best_BI = BI
                 best_path = path
-                best_entropy_gain = I_gain
                 best_travel_cost = travel_cost
 
         # Get next position
@@ -306,12 +335,15 @@ class RRT:
         return {
             'next_position': next_position,
             'best_path': best_path_tuples,
-            'best_utility': best_utility,
-            'best_entropy_gain': best_entropy_gain,
+            'best_BI': best_BI,  # BI* (Equation 20) - Branch Information of best path
+            'best_branch_information': best_BI,  # Alias for clarity
+            'best_utility': best_BI,  # Backward compatibility (BI is the utility for local planner)
+            'best_entropy_gain': best_BI,  # Backward compatibility
             'best_travel_cost': best_travel_cost,
             'all_paths': all_paths_tuples,
-            'all_utilities': all_utilities,
-            'all_entropy_gains': all_entropy_gains,
+            'all_branch_information': all_branch_information,  # BI for all branches
+            'all_utilities': all_branch_information,  # Backward compatibility
+            'all_entropy_gains': all_branch_information,  # Backward compatibility
             'all_travel_costs': all_travel_costs,
             'tree_nodes': self.nodes.copy(),  # Copy to avoid modification
             'num_branches': len(paths),
