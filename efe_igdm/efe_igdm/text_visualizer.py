@@ -3,55 +3,38 @@ Simple text box visualizer for RViz to display source estimation information.
 """
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
-
+import math
 
 class TextVisualizer:
     """Helper class to publish text information to RViz."""
 
     def __init__(self, publisher, frame_id="map", position_x=8.0, position_y=5.5, position_z=1.5):
-        """
-        Initialize the text visualizer.
-
-        Args:
-            publisher: ROS2 publisher for Marker/MarkerArray messages
-            frame_id: Frame of reference for the text (default: "map")
-            position_x: Fixed x position for text box (default: 8.0)
-            position_y: Fixed y position for text box (default: 5.5)
-            position_z: Fixed z position for text box (default: 1.5)
-        """
         self.publisher = publisher
         self.frame_id = frame_id
         self.position_x = position_x
         self.position_y = position_y
         self.position_z = position_z
 
+    def draw_ascii_bar(self, value, max_value, width=10):
+        """Creates a text-based progress bar: [■■■□□□□□□□]"""
+        if max_value <= 0: 
+            return "[]"
+        
+        # Clamp value
+        normalized = min(max(value / max_value, 0.0), 1.0)
+        filled_len = int(normalized * width)
+        
+        bar = "■" * filled_len + "□" * (width - filled_len)
+        return f"[{bar}]"
+
     def publish_source_info(self, timestamp, predicted_x, predicted_y, predicted_z,
-                           std_dev, search_complete, sensor_value, binary_value, threshold,
+                           std_dev, search_complete, sensor_value, binary_value, 
+                           threshold, max_concentration=20.0, num_levels=10, # <--- Added these args
                            num_branches=0, best_utility=0.0, best_entropy_gain=0.0,
                            best_travel_cost=0.0, num_tree_nodes=0, entropy=0.0,
                            bi_optimal=0.0, bi_threshold=0.0, dead_end_detected=False):
         """
-        Publish source estimation information as text in RViz with white background.
-
-        Args:
-            timestamp: ROS timestamp
-            predicted_x: Predicted x coordinate
-            predicted_y: Predicted y coordinate
-            predicted_z: Predicted z coordinate
-            std_dev: Standard deviation of the estimate
-            search_complete: Boolean indicating if search is complete
-            sensor_value: Last sensor measurement value
-            binary_value: Discrete sensor level (0 to num_levels-1)
-            threshold: Maximum discretization threshold value
-            num_branches: Number of RRT branches (paths) found
-            best_utility: Best utility value (J_total)
-            best_entropy_gain: Best entropy gain (J1)
-            best_travel_cost: Best travel cost (J2)
-            num_tree_nodes: Total number of nodes in RRT tree
-            entropy: Shannon entropy of particle distribution
-            bi_optimal: Optimal branch information (BI*)
-            bi_threshold: Dead end threshold
-            dead_end_detected: Whether dead end was detected
+        Publish source estimation information as text in RViz.
         """
         marker_array = MarkerArray()
 
@@ -63,23 +46,17 @@ class TextVisualizer:
         background.id = 0
         background.type = Marker.CUBE
         background.action = Marker.ADD
-
-        # Position in top-right corner (fixed position)
         background.pose.position.x = self.position_x
         background.pose.position.y = self.position_y
         background.pose.position.z = self.position_z
         background.pose.orientation.w = 1.0
-
-        # Background box size (expanded for branch info, entropy, and dead end detection)
-        background.scale.x = 2.2  # Width (wider for longer text)
-        background.scale.y = 0.05  # Depth (thin)
-        background.scale.z = 3.2  # Height (taller to fit all info including dead end)
-
-        # White color with some transparency
+        background.scale.x = 2.4  # Slightly wider for the bar
+        background.scale.y = 0.05
+        background.scale.z = 3.5 
         background.color.r = 1.0
         background.color.g = 1.0
         background.color.b = 1.0
-        background.color.a = 0.9  # Slightly transparent
+        background.color.a = 0.9
 
         # Create text marker
         text = Marker()
@@ -89,15 +66,12 @@ class TextVisualizer:
         text.id = 1
         text.type = Marker.TEXT_VIEW_FACING
         text.action = Marker.ADD
-
-        # Position same as background (text will be centered)
         text.pose.position.x = self.position_x
         text.pose.position.y = self.position_y
         text.pose.position.z = self.position_z
         text.pose.orientation.w = 1.0
 
-        # Build text content with branch information, entropy, and dead end detection
-        # Add visual indicators for clarity
+        # Status Logic
         if search_complete:
             status = "✓ COMPLETE"
         else:
@@ -105,6 +79,13 @@ class TextVisualizer:
 
         dead_end_status = "⚠ DEAD END!" if dead_end_detected else "✓ OK"
         dead_end_margin = bi_optimal - bi_threshold
+        
+        # --- NEW VISUALIZATION LOGIC ---
+        # Generate the discrete bin bar
+        bin_bar = self.draw_ascii_bar(binary_value + 1, num_levels, width=10)
+        
+        # Generate a continuous level bar (relative to max concentration)
+        conc_bar = self.draw_ascii_bar(sensor_value, max_concentration, width=10)
 
         text.text = (
             f"Predicted Source:\n"
@@ -113,8 +94,12 @@ class TextVisualizer:
             f"  z: {predicted_z:.2f} m\n"
             f"Std Dev: {std_dev:.3f}\n"
             f"Entropy: {entropy:.3f}\n"
-            f"Sensor: {sensor_value:.2f} ppm\n"
-            f"(Continuous Gaussian Model)\n"
+            f"-----------------------\n"
+            f"Sensor: {sensor_value:.2f} / {max_concentration:.0f} ppm\n"
+            f"{conc_bar}\n"
+            f"Bin: {binary_value} / {num_levels-1}\n"
+            f"{bin_bar}\n"
+            f"-----------------------\n"
             f"--- Branch Info (BI) ---\n"
             f"Branches: {num_branches}\n"
             f"Tree Nodes: {num_tree_nodes}\n"
@@ -129,13 +114,11 @@ class TextVisualizer:
             f"Search: {status}"
         )
 
-        # Text appearance - black color
-        text.scale.z = 0.2  # Text height in meters
+        text.scale.z = 0.2
         text.color.r = 0.0
         text.color.g = 0.0
         text.color.b = 0.0
-        text.color.a = 1.0  # Fully opaque
+        text.color.a = 1.0
 
-        # Add both markers to array and publish
         marker_array.markers = [background, text]
         self.publisher.publish(marker_array)

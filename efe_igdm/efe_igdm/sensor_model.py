@@ -378,6 +378,7 @@ class ContinuousGaussianSensorModel:
         self.alpha = alpha
         self.sigma_env = sigma_env
         self.num_levels = num_levels  # For RRT discretization (Eq. 13-15)
+        self.max_concentration = max_concentration
 
     def get_std(self, predicted_concentration):
         """
@@ -466,6 +467,7 @@ class ContinuousGaussianSensorModel:
         # 1. Find the active range from particle predictions
         mean_conc = np.mean(predicted_concentrations)
         max_conc = np.max(predicted_concentrations)
+        self.max_concentration = max_conc # Will fix this later
 
         # Compute average sensor noise
         avg_sigma = self.alpha * mean_conc + self.sigma_env

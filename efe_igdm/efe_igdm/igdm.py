@@ -114,6 +114,13 @@ class RRTInfotaxisNode(Node):
         )
         self.slam_map_pub = self.create_publisher(OccupancyGrid, '/rrt_infotaxis/slam_map', map_qos)
 
+        self.consecutive_failures = 0
+        self.max_failures_tolerance = 3  # How many fails before triggering recovery
+        self.in_recovery = False
+        self.recovery_step = 0  # 0: rotate left, 1: rotate right, 2: backup (optional)
+        self.initial_spin_done = False
+        self.initial_spin_goal_handle = None
+
         # Nav2 action client
         self.nav_to_pose_client = ActionClient(self, NavigateToPose, '/PioneerP3DX/navigate_to_pose')
         self.get_logger().info('Waiting for Nav2 action server...')
@@ -143,11 +150,12 @@ class RRTInfotaxisNode(Node):
             raise
 
         # Initialize Indoor Gaussian Dispersion Model (IGDM)
+        # NOW USING SLAM MAP for obstacle-aware distance calculations
         self.dispersion_model = IndoorGaussianDispersionModel(
             sigma_m=self.get_parameter('sigma_m').value,
-            occupancy_grid=self.occupancy_map
+            occupancy_grid=self.slam_map
         )
-        self.get_logger().info(f'IGDM initialized with σ_m={self.get_parameter("sigma_m").value}m')
+        self.get_logger().info(f'IGDM initialized with σ_m={self.get_parameter("sigma_m").value}m (using SLAM map)')
 
         # Initialize sensor model and particle filter
         # Using ContinuousGaussianSensorModel (paper's Equation 3)
@@ -156,18 +164,19 @@ class RRTInfotaxisNode(Node):
         self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.0, num_levels=10, max_concentration=20.0)
         self.particle_filter = ParticleFilter(
             num_particles=self.get_parameter('number_of_particles').value,
-            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 20)},
+            search_bounds={"x": (0, self.slam_map.real_world_width), "y": (0, self.slam_map.real_world_height), "Q": (0, 20)},
             binary_sensor_model=self.sensor_model,
             dispersion_model=self.dispersion_model
         )
         self.get_logger().info('Particle filter initialized')
 
         # Initialize RRT (choose fast or standard implementation)
+        # NOW USING SLAM MAP for collision checking
         use_fast = self.get_parameter('use_fast_rrt').value
         RRTClass = RRT
 
         self.rrt = RRTClass(
-            occupancy_grid=self.occupancy_map,
+            occupancy_grid=self.slam_map,
             N_tn=self.get_parameter('n_tn').value,
             R_range=self.get_parameter('n_tn').value * self.get_parameter('delta').value,
             delta=self.get_parameter('delta').value,
@@ -176,7 +185,7 @@ class RRTInfotaxisNode(Node):
         )
         self.ppm_converter = GasUnitConverter()
         rrt_type = "Fast RRT" if use_fast else "Standard RRT"
-        self.get_logger().info(f'{rrt_type} initialized')
+        self.get_logger().info(f'{rrt_type} initialized (using SLAM map for collision checking)')
 
         # Initialize text visualizer
         self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
@@ -222,6 +231,49 @@ class RRTInfotaxisNode(Node):
         self.get_logger().info(f'Data logging to: {log_filename}')
         self.start_time = self.get_clock().now()
 
+    def trigger_recovery(self):
+        """
+        Simple recovery behavior: Rotate the robot to clear costmaps 
+        or find a new path when stuck.
+        """
+        self.in_recovery = True
+        self.consecutive_failures = 0  # Reset counter
+        
+        self.get_logger().warn('!!! STUCK DETECTED - EXECUTING RECOVERY ROTATION !!!')
+        
+        if self.current_position is None:
+            return
+
+        # Calculate a goal that is just a rotation (same X, Y)
+        # We rotate 90 degrees (PI/2) relative to current orientation
+        target_yaw = self.current_theta + 1.57  # +90 degrees
+        
+        # Create quaternion from yaw
+        from math import sin, cos
+        qz = sin(target_yaw / 2.0)
+        qw = cos(target_yaw / 2.0)
+        
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose.header.frame_id = 'map'
+        goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
+        
+        # Keep SAME position, change ORIENTATION
+        goal_msg.pose.pose.position.x = float(self.current_position[0])
+        goal_msg.pose.pose.position.y = float(self.current_position[1])
+        goal_msg.pose.pose.position.z = 0.0
+        
+        goal_msg.pose.pose.orientation.z = float(qz)
+        goal_msg.pose.pose.orientation.w = float(qw)
+        
+        self.is_moving = True
+        self.get_logger().info('Recovery: Spinning in place...')
+        
+        send_goal_future = self.nav_to_pose_client.send_goal_async(
+            goal_msg, 
+            feedback_callback=self.nav_feedback_callback
+        )
+        send_goal_future.add_done_callback(self.nav_goal_response_callback)
+    
     def pose_callback(self, msg):
         """Callback for robot pose updates."""
         # Extract position
@@ -255,10 +307,11 @@ class RRTInfotaxisNode(Node):
         """
         Process laser scan and update SLAM map using ground truth pose.
 
-        For each laser ray that detects an obstacle:
+        For each laser ray:
         1. Convert polar (angle, range) to Cartesian in robot frame
         2. Transform to world frame using ground truth pose
-        3. Mark obstacle in slam_map
+        3. Mark free space along the ray
+        4. Mark endpoint as occupied (if obstacle detected) or free (if max range)
         """
         # Check if SLAM map is initialized (happens after GADEN map loads)
         if not hasattr(self, 'slam_map'):
@@ -278,25 +331,30 @@ class RRTInfotaxisNode(Node):
         # Process each laser ray
         for i, range_val in enumerate(msg.ranges):
             # Skip invalid readings
-            if range_val < msg.range_min or range_val > msg.range_max:
-                continue
             if not np.isfinite(range_val):
                 continue
 
             # Calculate ray angle in robot frame
             angle = msg.angle_min + i * msg.angle_increment
 
-            # Convert to Cartesian in robot frame
+            # Determine if this ray hit an obstacle or reached max range
+            hit_obstacle = (range_val >= msg.range_min and range_val < msg.range_max)
+
+            # Convert endpoint to Cartesian in robot frame
             local_x = range_val * np.cos(angle)
             local_y = range_val * np.sin(angle)
 
-            # Transform to world frame
-            world_x = robot_x + local_x * np.cos(robot_theta) - local_y * np.sin(robot_theta)
-            world_y = robot_y + local_x * np.sin(robot_theta) + local_y * np.cos(robot_theta)
+            # Transform endpoint to world frame
+            end_x = robot_x + local_x * np.cos(robot_theta) - local_y * np.sin(robot_theta)
+            end_y = robot_y + local_x * np.sin(robot_theta) + local_y * np.cos(robot_theta)
 
-            # Mark as occupied in slam_map
-            if self._mark_obstacle_in_slam_map(world_x, world_y):
-                obstacles_this_scan += 1
+            # Mark free space along the ray from robot to endpoint
+            self._mark_ray_as_free(robot_x, robot_y, end_x, end_y)
+
+            # Mark endpoint as occupied if obstacle detected
+            if hit_obstacle:
+                if self._mark_obstacle_in_slam_map(end_x, end_y):
+                    obstacles_this_scan += 1
 
         # Update counters
         self.laser_scan_count += 1
@@ -305,11 +363,12 @@ class RRTInfotaxisNode(Node):
         # Log every 100 scans
         if self.laser_scan_count % 100 == 0:
             occupied_cells = np.sum(self.slam_map.grid > 0)
+            free_cells = np.sum(self.slam_map.grid == 0)
+            unknown_cells = np.sum(self.slam_map.grid < 0)
             self.get_logger().info(
                 f'[SLAM] Scan #{self.laser_scan_count}: '
-                f'{obstacles_this_scan} obstacles this scan, '
-                f'{self.total_obstacles_marked} total marked, '
-                f'{occupied_cells} occupied cells in map'
+                f'{obstacles_this_scan} obstacles, '
+                f'Map: {unknown_cells} unknown, {free_cells} free, {occupied_cells} occupied'
             )
 
     def _mark_obstacle_in_slam_map(self, world_x: float, world_y: float) -> bool:
@@ -718,13 +777,95 @@ class RRTInfotaxisNode(Node):
 
         if status == 4:  # SUCCEEDED
             self.get_logger().info('Navigation goal reached!')
+            self.consecutive_failures = 0  # Success resets the counter!
+            self.in_recovery = False       # We are no longer recovering
+            
         elif status == 5:  # CANCELED
             self.get_logger().warn('Navigation goal was canceled')
+            # Canceled usually means we intervened, don't auto-increment failure
+            
         elif status == 6:  # ABORTED
             self.get_logger().warn('Navigation goal was aborted')
+            
+            # If we were already recovering and it aborted, just reset state to try RRT again
+            if self.in_recovery:
+                self.in_recovery = False
+            else:
+                # Normal move failed -> Increment failure
+                self.consecutive_failures += 1
+                if self.consecutive_failures >= self.max_failures_tolerance:
+                    # We can't call trigger_recovery() here directly safely because of threading
+                    # Just leave the counter high, and the next timer tick in take_step will catch it
+                    pass
 
         self.is_moving = False
         self.goal_handle = None
+
+    def _mark_ray_as_free(self, x0, y0, x1, y1):
+        """
+        Ray trace from robot (x0,y0) to endpoint (x1,y1) and mark cells as free.
+        Uses Bresenham's line algorithm on the grid.
+        
+        Args:
+            x0, y0: Start position (robot) in world coordinates
+            x1, y1: End position (laser hit/max range) in world coordinates
+        """
+        # Convert world coordinates to grid indices
+        gx0, gy0 = self.slam_map.world_to_grid(x0, y0)
+        gx1, gy1 = self.slam_map.world_to_grid(x1, y1)
+
+        # Setup Bresenham's algorithm
+        dx = abs(gx1 - gx0)
+        dy = abs(gy1 - gy0)
+        
+        x = gx0
+        y = gy0
+        
+        sx = 1 if gx0 < gx1 else -1
+        sy = 1 if gy0 < gy1 else -1
+        
+        err = dx - dy
+
+        while True:
+            if 0 <= x < self.slam_map.width and 0 <= y < self.slam_map.height:
+                if x == gx1 and y == gy1:
+                    break
+                
+                # --- THE FIX ---
+                # Don't overwrite if it's already marked as occupied (1)
+                # Only overwrite Unknown (-1) or keep it Free (0)
+                if self.slam_map.grid[y, x] != 1:
+                    self.slam_map.grid[y, x] = 0
+
+            if x == gx1 and y == gy1:
+                break
+
+            # Calculate next step
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+
+    def initial_spin_response_callback(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error('Initial spin rejected! Forcing start anyway.')
+            self.initial_spin_done = True
+            self.is_moving = False
+            return
+
+        self.get_logger().info('Initial spin accepted. Sweeping map...')
+        self.initial_spin_goal_handle = goal_handle
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self.initial_spin_result_callback)
+
+    def initial_spin_result_callback(self, future):
+        self.is_moving = False
+        self.initial_spin_done = True  # <--- CRITICAL: This enables the main loop
+        self.get_logger().info('Initial spin complete! SLAM map should be clear. Starting gas search.')
 
     def take_step(self):
         # Check if search is already complete
@@ -744,6 +885,38 @@ class RRTInfotaxisNode(Node):
             # Don't return - process this first measurement
             # return
 
+        # 1. EXECUTE INITIAL 360 SPIN
+        if not self.initial_spin_done:
+            if not self.is_moving:
+                self.get_logger().info('[STARTUP] Starting initial 360° sensor sweep...')
+                
+                # Command a rotation (e.g., PI radians / 180 degrees)
+                # Note: Doing a full 2*PI (360) in one command might make the planner 
+                # think it's already there (0 == 360). 
+                # It's safer to do two 180° turns or a specific "Spin" behavior if Nav2 has it.
+                # Here we try a large relative rotation:
+                
+                target_yaw = self.current_theta + 3.14  # Rotate 180 degrees first
+                
+                # Create goal
+                from math import sin, cos
+                goal_msg = NavigateToPose.Goal()
+                goal_msg.pose.header.frame_id = 'map'
+                goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
+                goal_msg.pose.pose.position.x = float(self.current_position[0])
+                goal_msg.pose.pose.position.y = float(self.current_position[1])
+                
+                qz = sin(target_yaw / 2.0)
+                qw = cos(target_yaw / 2.0)
+                goal_msg.pose.pose.orientation.z = float(qz)
+                goal_msg.pose.pose.orientation.w = float(qw)
+                
+                self.is_moving = True
+                future = self.nav_to_pose_client.send_goal_async(goal_msg)
+                future.add_done_callback(self.initial_spin_response_callback)
+            
+            return  # Stop here, don't run RRT yet!
+        
         # Check if robot is currently moving to a goal
         if self.is_moving:
             # Check if we're close enough to the goal (XY only)
@@ -780,6 +953,27 @@ class RRTInfotaxisNode(Node):
         self.get_logger().info('[PLAN] Computing RRT paths...')
         debug_info = self.rrt.get_next_move_debug(self.current_position, self.particle_filter)
         next_pos = debug_info["next_position"]
+        
+        # --- STUCK DETECTION LOGIC ---
+        # Calculate distance to the proposed next move
+        dx_move = next_pos[0] - self.current_position[0]
+        dy_move = next_pos[1] - self.current_position[1]
+        move_dist = (dx_move**2 + dy_move**2)**0.5
+        
+        # If RRT suggests moving less than 5cm, we are effectively stuck
+        if move_dist < 0.05:
+            self.consecutive_failures += 1
+            self.get_logger().warn(f'RRT cannot find move! (Attempt {self.consecutive_failures}/{self.max_failures_tolerance})')
+            
+            if self.consecutive_failures >= self.max_failures_tolerance:
+                self.trigger_recovery()
+                return # Skip the rest of this step
+        else:
+            # If we found a valid move, decrement failure count (so we don't trigger immediately on one bad frame)
+            if self.consecutive_failures > 0:
+                self.consecutive_failures -= 1
+        # -----------------------------
+
         best_path = debug_info["best_path"]
         all_paths = debug_info["all_paths"]
 
@@ -813,20 +1007,36 @@ class RRTInfotaxisNode(Node):
         self.visualize_estimated_source(est_x, est_y)
         self.visualize_current_position(self.current_position)
 
+        # Calculate Discrete Bin for Visualization
+        max_conc = self.sensor_model.max_concentration
+        n_levels = self.sensor_model.num_levels
+        bin_width = max_conc / n_levels
+        
+        # Calculate bin index (0 to n_levels-1)
+        # We clamp it so it doesn't exceed the max bin if reading > max_conc
+        current_bin = int(current_measurement / bin_width)
+        current_bin = min(current_bin, n_levels - 1)
+
         # Visualize text info box
         current_stds = self.particle_filter.get_estimate()[1]
         sigma_p = max(current_stds["x"], current_stds["y"])
         current_entropy = self.particle_filter.get_entropy()
+        
         self.text_visualizer.publish_source_info(
             timestamp=self.get_clock().now().to_msg(),
             predicted_x=est_x,
             predicted_y=est_y,
-            predicted_z=0.5,  # Assuming source at 0.5m height
+            predicted_z=0.5,
             std_dev=sigma_p,
             search_complete=self.search_complete,
             sensor_value=current_measurement,
-            binary_value=int(current_measurement),  # Display rounded value for visualization
-            threshold=0.0,  # No thresholds in continuous model
+            
+            # UPDATED ARGUMENTS
+            binary_value=current_bin,         # Pass the calculated bin index
+            max_concentration=max_conc,       # Pass max concentration
+            num_levels=n_levels,              # Pass total levels
+            threshold=0.0,
+            
             num_branches=debug_info.get("num_branches", 0),
             best_utility=debug_info.get("best_utility", 0.0),
             best_entropy_gain=debug_info.get("best_entropy_gain", 0.0),

@@ -288,8 +288,9 @@ def create_empty_occupancy_map(reference_map: OccupancyGridMap) -> OccupancyGrid
     """
     Create empty occupancy map with same dimensions as reference.
 
-    This is useful for creating a SLAM map that starts empty but
-    shares the same coordinate system and resolution as an existing map.
+    This is useful for creating a SLAM map that starts with all cells
+    as unknown (-1) and shares the same coordinate system and resolution
+    as an existing map.
 
     Parameters:
     -----------
@@ -299,10 +300,11 @@ def create_empty_occupancy_map(reference_map: OccupancyGridMap) -> OccupancyGrid
     Returns:
     --------
     empty_map : OccupancyGridMap
-        Empty OccupancyGridMap (all cells free)
+        Empty OccupancyGridMap (all cells unknown)
     """
-    # Create empty grid (all zeros = free space)
-    empty_grid = np.zeros_like(reference_map.grid, dtype=np.int8)
+    # Create grid initialized to -1 (unknown)
+    # ROS OccupancyGrid convention: -1=unknown, 0=free, 100=occupied
+    empty_grid = np.full_like(reference_map.grid, -1, dtype=np.int8)
 
     # Create params dict matching reference map
     params = {
