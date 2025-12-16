@@ -396,8 +396,6 @@ class RRTInfotaxisNode(Node):
                 
                 # --- CRITICAL FIX ---
                 # Always mark as free (0).
-                # Even if this was previously marked as a wall (1), we overwrite it.
-                # This fixes the "mixed up positions" problem by erasing phantom walls.
                 self.slam_map.grid[y, x] = 0
 
             if x == gx1 and y == gy1:
@@ -625,11 +623,17 @@ class RRTInfotaxisNode(Node):
                 self.planning_pending = True
 
     def _goal_cancel_callback(self, future):
-        self.is_moving = False
-        self.goal_handle = None
+        """
+        Callback when cancel request is ACCEPTED.
+        Do NOT set planning_pending here. We must wait for the Action Server
+        to actually stop the robot (handled in nav_result_callback).
+        """
+        # --- FIX: Removed self.planning_pending = True ---
+        self.get_logger().debug('Cancel request accepted. Waiting for Nav2 to stop...')
+        
+        # We can perform global path index update here as it's just bookkeeping
         if self.planner_mode == 'GLOBAL' and self.global_path and self.global_path_index < len(self.global_path):
             self.global_path_index += 1
-        self.planning_pending = True
 
     def send_nav_goal(self, x, y):
         self.goal_position = (float(x), float(y))
@@ -666,21 +670,29 @@ class RRTInfotaxisNode(Node):
         pass
 
     def nav_result_callback(self, future):
+        """
+        Callback when Action Server is completely done (Success, Aborted, or Canceled).
+        This guarantees the robot has stopped.
+        """
         status = future.result().status
         if status == 4:
             self.get_logger().info('Navigation goal reached!')
             self.consecutive_failures = 0
             self.in_recovery = False
         elif status == 5:
-            self.get_logger().warn('Navigation goal was canceled')
+            self.get_logger().warn('Navigation goal was canceled (Robot Stopped)')
         elif status == 6:
             self.get_logger().warn('Navigation goal was aborted')
             if self.in_recovery:
                 self.in_recovery = False
             else:
                 self.consecutive_failures += 1
+        
         self.is_moving = False
         self.goal_handle = None
+        
+        # --- FIX: Only trigger planning here. ---
+        # The robot has fully stopped now.
         self.planning_pending = True
 
     def initial_spin_response_callback(self, future):
@@ -931,6 +943,8 @@ class RRTInfotaxisNode(Node):
                 self.planner_mode = 'LOCAL'
                 self.global_path = []
                 self.global_path_index = 0
+                self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
+                
             else:
                 waypoint = self.global_path[self.global_path_index]
                 waypoint_position = tuple(waypoint)
@@ -944,11 +958,14 @@ class RRTInfotaxisNode(Node):
                 mutual_info_waypoint = current_entropy - expected_entropy
                 detector_status = self.dead_end_detector.get_status()
                 switch_back_threshold = self.get_parameter('switch_back_threshold').value * detector_status["bi_threshold"]
+                
                 if mutual_info_waypoint > switch_back_threshold:
                     self.get_logger().info(f'[SWITCH TO LOCAL] Mutual info I={mutual_info_waypoint:.4f} > threshold={switch_back_threshold:.4f}')
                     self.planner_mode = 'LOCAL'
                     self.global_path = []
                     self.global_path_index = 0
+                    self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
+                    
                 else:
                     next_pos = waypoint
                     self.visualize_global_path(self.global_path)
