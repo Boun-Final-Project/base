@@ -891,6 +891,51 @@ class RRTInfotaxisNode(Node):
         marker.color.a = 1.0
         self.planner_mode_pub.publish(marker)
 
+    def clear_global_planner_visualizations(self):
+        """Clear all global planner visualization markers."""
+        # Clear frontier cells
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "frontier_cells"
+        marker.id = 0
+        marker.action = Marker.DELETE
+        self.frontier_cells_pub.publish(marker)
+
+        # Clear frontier centroids
+        marker_array = MarkerArray()
+        for i in range(100):  # Clear up to 100 centroid markers
+            marker = Marker()
+            marker.header.frame_id = "map"
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = "frontier_centroids"
+            marker.id = i
+            marker.action = Marker.DELETE
+            marker_array.markers.append(marker)
+        self.frontier_centroids_pub.publish(marker_array)
+
+        # Clear PRM graph (vertices, edges, frontier vertices)
+        marker_array = MarkerArray()
+        for ns in ["prm_vertices", "prm_edges", "frontier_vertices"]:
+            for i in range(10):  # Clear up to 10 markers per namespace
+                marker = Marker()
+                marker.header.frame_id = "map"
+                marker.header.stamp = self.get_clock().now().to_msg()
+                marker.ns = ns
+                marker.id = i
+                marker.action = Marker.DELETE
+                marker_array.markers.append(marker)
+        self.prm_graph_pub.publish(marker_array)
+
+        # Clear global path
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "global_path"
+        marker.id = 0
+        marker.action = Marker.DELETE
+        self.global_path_pub.publish(marker)
+
     def take_step(self):
         if self.search_complete:
             return
@@ -923,6 +968,13 @@ class RRTInfotaxisNode(Node):
         if self.is_moving:
             return
 
+        # Process any pending callbacks to ensure self.current_position is fresh
+        # This prevents RRT from planning from a stale position (0.5s old)
+        import rclpy
+        rclpy.spin_once(self, timeout_sec=0.0)
+
+        self.get_logger().info(f'[POSITION] Planning from current position: ({self.current_position[0]:.3f}, {self.current_position[1]:.3f})')
+
         current_measurement = self.sensor_raw_value
         self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement:.4f} ppm (continuous)')
         self.particle_filter.update(current_measurement, self.current_position)
@@ -940,6 +992,7 @@ class RRTInfotaxisNode(Node):
             self.get_logger().info('[GLOBAL MODE] Following frontier path...')
             if not self.global_path or self.global_path_index >= len(self.global_path):
                 self.get_logger().warn('[GLOBAL MODE] Path exhausted, switching to LOCAL mode')
+                self.clear_global_planner_visualizations()
                 self.planner_mode = 'LOCAL'
                 self.global_path = []
                 self.global_path_index = 0
@@ -961,6 +1014,7 @@ class RRTInfotaxisNode(Node):
                 
                 if mutual_info_waypoint > switch_back_threshold:
                     self.get_logger().info(f'[SWITCH TO LOCAL] Mutual info I={mutual_info_waypoint:.4f} > threshold={switch_back_threshold:.4f}')
+                    self.clear_global_planner_visualizations()
                     self.planner_mode = 'LOCAL'
                     self.global_path = []
                     self.global_path_index = 0
@@ -971,7 +1025,7 @@ class RRTInfotaxisNode(Node):
                     self.visualize_global_path(self.global_path)
 
         if self.planner_mode == 'LOCAL':
-            self.get_logger().info('[LOCAL MODE] Computing RRT paths...')
+            self.get_logger().info(f'[LOCAL MODE] Computing RRT paths from ({self.current_position[0]:.3f}, {self.current_position[1]:.3f})')
             debug_info = self.rrt.get_next_move_debug(self.current_position, self.particle_filter)
             next_pos = debug_info["next_position"]
             best_path = debug_info["best_path"]
@@ -990,7 +1044,8 @@ class RRTInfotaxisNode(Node):
             bi_optimal = debug_info.get("best_utility", debug_info.get("best_entropy_gain", 0.0))
             dead_end_detected = self.dead_end_detector.is_dead_end(bi_optimal)
             if dead_end_detected:
-                self.get_logger().warn('[DEAD END DETECTED] Switching to GLOBAL mode')
+                self.get_logger().warn(f'[DEAD END DETECTED] Switching to GLOBAL mode from ({self.current_position[0]:.3f}, {self.current_position[1]:.3f})')
+                self.clear_global_planner_visualizations()
                 self.planner_mode = 'GLOBAL'
                 global_plan_result = self.global_planner.plan(self.current_position, self.particle_filter)
                 if global_plan_result['success']:
