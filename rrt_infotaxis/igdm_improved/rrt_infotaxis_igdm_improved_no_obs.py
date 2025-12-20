@@ -201,7 +201,8 @@ class RRTInfotaxisIGDM:
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid
+                occupancy_grid=self.grid,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
 
             self.search_complete = True
@@ -226,7 +227,8 @@ class RRTInfotaxisIGDM:
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid
+                occupancy_grid=self.grid,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
 
             self.search_complete = True
@@ -245,7 +247,8 @@ class RRTInfotaxisIGDM:
             particle_filter=self.particle_filter,
             distance_to_true=dist_to_true,
             d_success_thr=self.d_success_thr,
-            occupancy_grid=self.grid
+            occupancy_grid=self.grid,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
         )
 
         # ==== PLAN PHASE ====
@@ -255,7 +258,7 @@ class RRTInfotaxisIGDM:
         self.rrt.current_step = step_num
         debug_info = self.rrt.get_next_move_debug(self.robot_pos, self.particle_filter)
         next_pos = debug_info['next_position']
-
+        })
         print(f"[PLAN] Best utility: {debug_info['best_utility']:.4f}")
         print(f"[PLAN] Information gain: {debug_info['best_information_gain']:.4f}")
         print(f"[PLAN] Travel cost: {debug_info['best_travel_cost']:.4f}")

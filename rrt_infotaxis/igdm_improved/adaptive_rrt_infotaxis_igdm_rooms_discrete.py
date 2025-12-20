@@ -438,7 +438,8 @@ class AdaptiveRRTInfotaxisIGDMRoomsDiscrete:
                 rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
 
             self.search_complete = True
@@ -490,7 +491,8 @@ class AdaptiveRRTInfotaxisIGDMRoomsDiscrete:
             rrt_pruned_paths=rrt_pruned_paths,
             sensor_reading=measurement,
             threshold_bins=self.sensor.level_thresholds,
-            digital_value=discrete_measurement
+            digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
         )
 
         # Log all path evaluations with details
@@ -546,6 +548,7 @@ class AdaptiveRRTInfotaxisIGDMRoomsDiscrete:
         self.robot_pos = next_pos
         self.trajectory.append(self.robot_pos)
         self.trajectory_with_steps.append((self.robot_pos, step_num))  # Track step for penalty
+
 
         return True
 

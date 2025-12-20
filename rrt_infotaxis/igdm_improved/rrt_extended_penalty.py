@@ -69,6 +69,11 @@ class RRTInfotaxis:
         self.current_step = current_step
         self.penalty_radius = penalty_radius
 
+        # Extended penalty parameters
+        self.MAX_PENALTY_STEPS = 20
+        self.INITIAL_PENALTY = 32
+        self.PENALTY_DECAY_RATE = 1.1
+
     def sprawl(self, start_pos):
         """Grow the RRT from start position.
 
@@ -298,13 +303,12 @@ class RRTInfotaxis:
             for visited_pos, visited_step in self.visited_positions:
                 steps_since_visit = self.current_step - visited_step
 
-                # EXTENDED Time-dependent penalty for visits 1-20 steps ago
-                if 1 <= steps_since_visit <= 20:
+                # EXTENDED Time-dependent penalty for visits within MAX_PENALTY_STEPS
+                if 1 <= steps_since_visit <= self.MAX_PENALTY_STEPS:
                     dist_to_visited = np.linalg.norm(next_step_pos - np.array(visited_pos))
                     if dist_to_visited < self.penalty_radius:
-                        # Calculate geometric penalty: 32 / (1.1 ^ (steps_since_visit - 1))
-                        # This divides the divisor by 1.1 for each step, reducing penalty strength
-                        penalty_divisor = 32.0 / (1.1 ** (steps_since_visit - 1))
+                        # Calculate geometric penalty using attributes
+                        penalty_divisor = self.INITIAL_PENALTY / (self.PENALTY_DECAY_RATE ** (steps_since_visit - 1))
                         penalty_factor = 1.0 / penalty_divisor
                         steps_since = steps_since_visit
                         penalty_info = {

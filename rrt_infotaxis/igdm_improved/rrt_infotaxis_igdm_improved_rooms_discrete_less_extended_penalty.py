@@ -346,7 +346,8 @@ class RRTInfotaxisIGDMRoomsDiscreteExtendedPenalty:
                 rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
 )
 
             self.search_complete = True
@@ -375,7 +376,8 @@ class RRTInfotaxisIGDMRoomsDiscreteExtendedPenalty:
                 rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
 )
 
             self.search_complete = True
@@ -396,6 +398,7 @@ class RRTInfotaxisIGDMRoomsDiscreteExtendedPenalty:
 
         debug_info = self.rrt.get_next_move_debug(self.robot_pos, self.particle_filter)
         next_pos = debug_info['next_position']
+        })
         rrt_nodes = debug_info.get('rrt_nodes', None)
         rrt_pruned_paths = debug_info.get('rrt_pruned_paths', None)
         best_idx = len(debug_info.get('all_utilities', [])) - 1  # Default to last if not found
@@ -427,7 +430,8 @@ class RRTInfotaxisIGDMRoomsDiscreteExtendedPenalty:
             rrt_pruned_paths=rrt_pruned_paths,
             sensor_reading=measurement,
             threshold_bins=self.sensor.level_thresholds,
-            digital_value=discrete_measurement
+            digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
 )
 
         # Log all path evaluations with details

@@ -347,7 +347,8 @@ class RRTInfotaxisIGDMRoomsDiscrete:
                 rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+                penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
 
             self.search_complete = True
@@ -376,7 +377,8 @@ class RRTInfotaxisIGDMRoomsDiscrete:
                 rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+                penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
 
             self.search_complete = True
@@ -399,6 +401,7 @@ class RRTInfotaxisIGDMRoomsDiscrete:
         next_pos = debug_info['next_position']
         rrt_nodes = debug_info.get('rrt_nodes', None)
         rrt_pruned_paths = debug_info.get('rrt_pruned_paths', None)
+        })
         best_idx = len(debug_info.get('all_utilities', [])) - 1  # Default to last if not found
 
         # Find the best index
@@ -428,7 +431,8 @@ class RRTInfotaxisIGDMRoomsDiscrete:
             rrt_pruned_paths=rrt_pruned_paths,
             sensor_reading=measurement,
             threshold_bins=self.sensor.level_thresholds,
-            digital_value=discrete_measurement
+            digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
         )
 
         # Log all path evaluations with details

@@ -54,7 +54,8 @@ class StepVisualizer:
     def save_step(self, robot_pos, trajectory, est_source, est_std, true_source,
                   step_num, sigma_p, current_step=None, particle_filter=None,
                   distance_to_true=None, d_success_thr=None, occupancy_grid=None, rrt_nodes=None,
-                  rrt_pruned_paths=None, sensor_reading=None, threshold_bins=None, digital_value=None):
+                  rrt_pruned_paths=None, sensor_reading=None, threshold_bins=None, digital_value=None,
+                  penalty_step_count=0):
         """Save a step visualization with particle filter visualization and RRT tree.
 
         Parameters:
@@ -93,6 +94,9 @@ class StepVisualizer:
             Threshold bin boundaries (e.g., [t1, t2, t3, t4] for 5-level discrete)
         digital_value : int, optional
             Discretized/digital sensor reading
+        penalty_step_count : int, optional
+            Number of recent steps in the penalty zone. The last penalty_step_count edges
+            will be drawn in red, earlier edges in blue. Default is 0 (no penalty highlighting).
         """
         # Get map dimensions from occupancy grid, default to 10x6 if not provided
         if occupancy_grid is not None:
@@ -117,11 +121,34 @@ class StepVisualizer:
         # Plot obstacles first (so they appear behind other elements)
         self._plot_obstacles(ax1, occupancy_grid)
 
+        # Plot trajectory with penalty-aware coloring
         traj = np.array(trajectory)
-        ax1.plot(traj[:, 0], traj[:, 1], 'b-o', linewidth=2, markersize=4, alpha=0.7, label='Robot path')
-        ax1.plot(robot_pos[0], robot_pos[1], 'ko', markersize=10, label='Current position')
-        ax1.plot(est_source[0], est_source[1], 'o', color='orange', markersize=10, label='Estimated source')
-        ax1.plot(true_source[0], true_source[1], 'r*', markersize=10, label='True source')
+        num_edges = len(traj) - 1
+
+        # Determine which edges are in the penalty zone (last penalty_step_count edges)
+        penalty_start_edge = max(0, num_edges - penalty_step_count)
+
+        # Plot trajectory edges individually
+        for i in range(num_edges):
+            # Edges in penalty zone (recent steps) are red, others are blue
+            color = 'red' if i >= penalty_start_edge and penalty_step_count > 0 else 'blue'
+
+            ax1.plot([traj[i, 0], traj[i+1, 0]],
+                    [traj[i, 1], traj[i+1, 1]],
+                    color=color, linewidth=2, alpha=0.7)
+
+        # Plot trajectory nodes with matching colors
+        for i in range(len(traj)):
+            # Node i is in penalty zone if edge i-1 or edge i is in penalty zone
+            # (i.e., if it's one of the last penalty_step_count+1 nodes)
+            penalty_start_node = max(0, len(traj) - penalty_step_count - 1)
+            color = 'red' if i >= penalty_start_node and penalty_step_count > 0 else 'blue'
+            ax1.plot(traj[i, 0], traj[i, 1], 'o', color=color, markersize=4, alpha=0.7)
+
+        # Highlight current position
+        ax1.plot(robot_pos[0], robot_pos[1], 'ko', markersize=10)
+        ax1.plot(est_source[0], est_source[1], 'o', color='orange', markersize=10)
+        ax1.plot(true_source[0], true_source[1], 'r*', markersize=10)
 
         # Draw RRT tree if pruned paths are provided
         if rrt_pruned_paths is not None and len(rrt_pruned_paths) > 0:
@@ -147,14 +174,9 @@ class StepVisualizer:
             # Draw nodes from all paths
             for path in rrt_pruned_paths:
                 for node in path:
-                    ax1.plot(node.position[0], node.position[1], 'r.', markersize=3, alpha=0.8)
-
-            # Add RRT to legend
-            ax1.plot([], [], 'r.', markersize=3, label='RRT nodes (pruned paths)')
-            ax1.plot([], [], 'g-', linewidth=0.5, label='RRT edges (pruned paths)')
+                    ax1.plot(node.position[0], node.position[1], 'g.', markersize=3, alpha=0.8)
 
         ax1.grid(True, alpha=0.3)
-        ax1.legend(loc='upper right', fontsize=9)
 
         # Plot 2: IGDM Concentration field (time-dependent)
         ax2 = plt.subplot(1, 3, 2)
