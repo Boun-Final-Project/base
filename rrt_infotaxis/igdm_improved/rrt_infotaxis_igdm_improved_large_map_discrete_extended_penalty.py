@@ -103,7 +103,7 @@ class RRTInfotaxisIGDMDiscreteLargeMapExtendedPenalty:
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
         self.room_height = 25.0
-        self.resolution = 0.1
+        self.resolution = 0.25
 
         self.true_source = (2.5, 22.5)
         self.true_Q = 1.0
@@ -151,8 +151,8 @@ class RRTInfotaxisIGDMDiscreteLargeMapExtendedPenalty:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to week-11
-        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-11/igdm_improved_large_map_discrete_extended_penalty_steps")
+        # Visualization - save to results folder
+        viz_dir = Path(__file__).parent / "results" / "igdm_improved_large_map_discrete_extended_penalty_steps"
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -608,7 +608,7 @@ class RRTInfotaxisIGDMDiscreteLargeMapExtendedPenalty:
 
 if __name__ == "__main__":
     # Setup logging
-    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-11")
+    log_dir = Path(__file__).parent / "results"
     log_file = log_dir / "rrt_infotaxis_igdm_improved_large_map_discrete_extended_penalty.log"
     logger = setup_logging(str(log_file))
 

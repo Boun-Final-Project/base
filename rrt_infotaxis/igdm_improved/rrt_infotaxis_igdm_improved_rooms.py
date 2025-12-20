@@ -95,7 +95,7 @@ class RRTInfotaxisIGDMRooms:
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
         self.room_height = 25.0
-        self.resolution = 0.1
+        self.resolution = 0.25
 
         self.true_source = (5.0, 20.0)
         self.true_Q = 1.0
@@ -150,7 +150,7 @@ class RRTInfotaxisIGDMRooms:
             dispersion_model=self.igdm
         )
 
-        self.rrt = RRTInfotaxis(self.grid, N_tn=50, R_range=8, delta=1.0, max_depth=3,
+        self.rrt = RRTInfotaxis(self.grid, N_tn=20, R_range=8, delta=1.0, max_depth=2,
                       discount_factor=0.8, positive_weight=0.5, penalty_radius=0.50)
 
         self.robot_pos = self.robot_start
@@ -162,8 +162,8 @@ class RRTInfotaxisIGDMRooms:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to week-9
-        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-9/igdm_improved_rooms_steps")
+        # Visualization - save to results folder
+        viz_dir = Path(__file__).parent / "results" / "igdm_improved_rooms_steps"
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -629,7 +629,7 @@ class RRTInfotaxisIGDMRooms:
 
 if __name__ == "__main__":
     # Setup logging
-    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-9")
+    log_dir = Path(__file__).parent / "results"
     log_file = log_dir / "rrt_infotaxis_igdm_improved_rooms.log"
     logger = setup_logging(str(log_file))
 

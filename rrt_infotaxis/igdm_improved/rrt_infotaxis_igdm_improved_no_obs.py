@@ -46,7 +46,7 @@ class RRTInfotaxisIGDM:
         """
         self.room_width = 10.0
         self.room_height = 6.0
-        self.resolution = 0.1
+        self.resolution = 0.25
 
         self.true_source = (2.0, 3.0)
         self.true_Q = 1.0

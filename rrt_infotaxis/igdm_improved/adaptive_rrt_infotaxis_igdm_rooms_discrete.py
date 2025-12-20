@@ -117,7 +117,7 @@ class AdaptiveRRTInfotaxisIGDMRoomsDiscrete:
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
         self.room_height = 25.0
-        self.resolution = 0.1
+        self.resolution = 0.25
 
         self.true_source = (5.0, 20.0)
         self.true_Q = 1.0
@@ -187,8 +187,8 @@ class AdaptiveRRTInfotaxisIGDMRoomsDiscrete:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to week-12
-        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-12/adaptive_rrt_igdm_rooms_discrete_steps")
+        # Visualization - save to results folder
+        viz_dir = Path(__file__).parent / "results" / "adaptive_rrt_igdm_rooms_discrete_steps"
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -720,7 +720,7 @@ class AdaptiveRRTInfotaxisIGDMRoomsDiscrete:
 
 if __name__ == "__main__":
     # Setup logging
-    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-12")
+    log_dir = Path(__file__).parent / "results"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "adaptive_rrt_infotaxis_igdm_rooms_discrete.log"
     logger = setup_logging(str(log_file))

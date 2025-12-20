@@ -1,28 +1,28 @@
 """
-Adaptive RRT-Infotaxis with IGDM (Indoor Gaussian Dispersion Model) on Large Map with Discrete Sensor.
+Standalone RRT-Infotaxis with IGDM (Indoor Gaussian Dispersion Model) on Large Map with Discrete Sensor.
+EXTENDED PENALTY VERSION: 10-step penalty window with geometric decay (divide by 1.2 each step).
 
-Implements an ADAPTIVE RRT strategy that increases planning complexity near obstacles:
-- When robot is within 0.75m of an obstacle: N_tn=25, max_depth=3
-- Otherwise (normal operation): N_tn=20, max_depth=2
-
-This allows more thorough planning in tight spaces while maintaining efficiency in open areas.
+Implements the complete measure-plan-move loop from the paper with an exploration penalty
+to discourage revisiting recent areas. Uses 5-level DISCRETE SENSOR instead of binary sensor.
 
 Algorithm:
 1. MEASURE: Take sensor measurement, update threshold, update particle filter
-2. CHECK PROXIMITY: Detect if robot is within 0.75m of any obstacle
-3. PLAN: Build RRT with adaptive parameters, evaluate paths with entropy gain vs travel cost
-4. MOVE: Navigate to next position
-5. Check: If robot reached true source (distance < threshold), stop
+2. PLAN: Build RRT, evaluate paths with entropy gain vs travel cost, apply exploration penalty
+3. MOVE: Navigate to next position
+4. Check: If estimation converged, stop
 
-Exploration Penalty (time-dependent):
-- 1 step since visit: Divide info gain by 2^5 = 32
-- 2 steps since visit: Divide info gain by 2^4 = 16
-- 3 steps since visit: Divide info gain by 2^3 = 8
-- 4 steps since visit: Divide info gain by 2^2 = 4
-- 5 steps since visit: Divide info gain by 2^1 = 2
+Exploration Penalty (EXTENDED time-dependent):
+- 1-10 steps since visit: Penalty divisor = 8 / (1.2 ^ (steps_since_visit - 1))
+- 1 step: Divide info gain by 8.00
+- 2 steps: Divide info gain by 6.67
+- 3 steps: Divide info gain by 5.56
+- ...
+- 10 steps: Divide info gain by 1.55
+- 11+ steps: No penalty
 - For nodes within 1m radius of visited positions
 - Encourages exploration of new areas rather than revisiting recent locations
 
+Large Map Layout:
 - 25x25 meter map with a room in top-left corner (x: 0-5, y: 20-25)
 - Room walls: Right wall at x=5, Bottom wall at y=20 with 2m door at x: 0-2
 - Source at (2.5, 22.5) inside the room with Q=1.0
@@ -35,6 +35,8 @@ Discrete Sensor Levels:
 - Level 2: Medium (threshold[1] <= C < threshold[2])
 - Level 3: High (threshold[2] <= C < threshold[3])
 - Level 4: Very High (C >= threshold[3])
+
+This provides ~2.3 bits of information per measurement vs 1 bit for binary.
 """
 
 import numpy as np
@@ -54,7 +56,7 @@ from igdm_model import IGDMModel
 from sensor_model_discrete import DiscreteSensorModel
 from particle_filter import ParticleFilter
 from occupancy_grid import OccupancyGrid
-from rrt import RRTInfotaxis
+from rrt_less_extended_penalty import RRTInfotaxis
 from visualizer import StepVisualizer
 
 
@@ -86,18 +88,8 @@ def setup_logging(log_file):
     return logger
 
 
-class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
-    """Adaptive RRT-Infotaxis with IGDM and discrete sensor on large map.
-
-    Increases RRT planning complexity when near obstacles for better navigation.
-    """
-
-    # Adaptive RRT parameters
-    OBSTACLE_PROXIMITY_THRESHOLD = 0.75  # meters
-    NORMAL_N_TN = 20
-    NORMAL_MAX_DEPTH = 2
-    NEAR_OBSTACLE_N_TN = 25
-    NEAR_OBSTACLE_MAX_DEPTH = 3
+class RRTInfotaxisIGDMDiscreteLargeMapExtendedPenalty:
+    """Standalone RRT-Infotaxis with IGDM and discrete sensor on large map (Extended Penalty)."""
 
     def __init__(self, sigma_m=1.0, logger=None):
         """
@@ -121,7 +113,7 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         self.max_steps = 150
 
         # Algorithm parameters
-        self.sigma_threshold = 0.3  # Standard deviation threshold for particles (for logging only)
+        self.sigma_threshold = 0.3  # Standard deviation threshold for particles (kept for calculation)
         self.d_success_thr = 0.5   # Success distance from true source location (meters)
 
         self.grid = OccupancyGrid(self.room_width, self.room_height, self.resolution)
@@ -147,9 +139,7 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
             resample_threshold=0.42
         )
 
-        # Initialize RRT with normal parameters (will be adapted dynamically)
-        self.rrt = RRTInfotaxis(self.grid, N_tn=self.NORMAL_N_TN, R_range=8, delta=1.0,
-                      max_depth=self.NORMAL_MAX_DEPTH,
+        self.rrt = RRTInfotaxis(self.grid, N_tn=20, R_range=8, delta=1.0, max_depth=2,
                       discount_factor=0.8, positive_weight=0.60, penalty_radius=0.50)
 
         self.robot_pos = self.robot_start
@@ -161,8 +151,8 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to results folder
-        viz_dir = Path(__file__).parent / "results" / "adaptive_rrt_igdm_large_map_discrete_steps"
+        # Visualization - save to updated_penalty_results folder
+        viz_dir = Path(__file__).parent / "updated_penalty_results" / "igdm_improved_large_map_discrete_less_extended_penalty_steps"
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -171,82 +161,6 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         if flush:
             for handler in self.logger.handlers:
                 handler.flush()
-
-    def get_distance_to_nearest_obstacle(self, position):
-        """Compute the distance from a position to the nearest obstacle.
-
-        Parameters:
-        -----------
-        position : tuple
-            (x, y) world coordinates
-
-        Returns:
-        --------
-        distance : float
-            Distance to nearest obstacle in meters. Returns infinity if no obstacles.
-        """
-        x, y = position
-        min_distance = float('inf')
-
-        # Search radius in grid cells (search up to 2m to be safe)
-        search_radius_meters = 2.0
-        search_radius_cells = int(np.ceil(search_radius_meters / self.resolution))
-
-        # Convert position to grid coordinates
-        gx, gy = self.grid.world_to_grid(x, y)
-
-        # Search in a square region around the position
-        for dx in range(-search_radius_cells, search_radius_cells + 1):
-            for dy in range(-search_radius_cells, search_radius_cells + 1):
-                check_gx = gx + dx
-                check_gy = gy + dy
-
-                # Check bounds
-                if 0 <= check_gx < self.grid.grid_width and 0 <= check_gy < self.grid.grid_height:
-                    # If this cell is occupied
-                    if self.grid.grid[check_gy, check_gx] != 0:
-                        # Convert grid cell back to world coordinates (center of cell)
-                        obs_x = (check_gx + 0.5) * self.resolution
-                        obs_y = (check_gy + 0.5) * self.resolution
-
-                        # Compute Euclidean distance
-                        dist = np.sqrt((x - obs_x)**2 + (y - obs_y)**2)
-                        min_distance = min(min_distance, dist)
-
-        return min_distance
-
-    def is_near_obstacle(self, position):
-        """Check if the robot is within the proximity threshold of any obstacle.
-
-        Parameters:
-        -----------
-        position : tuple
-            (x, y) world coordinates
-
-        Returns:
-        --------
-        near_obstacle : bool
-            True if within OBSTACLE_PROXIMITY_THRESHOLD of an obstacle
-        distance : float
-            Distance to nearest obstacle
-        """
-        distance = self.get_distance_to_nearest_obstacle(position)
-        return distance <= self.OBSTACLE_PROXIMITY_THRESHOLD, distance
-
-    def adapt_rrt_parameters(self, near_obstacle):
-        """Adapt RRT parameters based on obstacle proximity.
-
-        Parameters:
-        -----------
-        near_obstacle : bool
-            True if robot is near an obstacle
-        """
-        if near_obstacle:
-            self.rrt.N_tn = self.NEAR_OBSTACLE_N_TN
-            self.rrt.max_depth = self.NEAR_OBSTACLE_MAX_DEPTH
-        else:
-            self.rrt.N_tn = self.NORMAL_N_TN
-            self.rrt.max_depth = self.NORMAL_MAX_DEPTH
 
     def log_all_path_evaluations(self, debug_info, best_idx):
         """Log detailed evaluation results for all paths.
@@ -287,11 +201,10 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
 
                 if penalty_info:
                     steps_since = self.current_step - penalty_info.get('visited_step', 0)
-                    penalty_exponent = 6 - steps_since
-                    penalty_divisor = 2 ** penalty_exponent
+                    penalty_divisor = self.rrt.INITIAL_PENALTY / (self.rrt.PENALTY_DECAY_RATE ** (steps_since - 1))
                     distance = penalty_info.get('distance', 0)
 
-                    self.log(f"[PLAN]         → Original J1={I_gain_original:.4f} → Penalized={I_gain_penalized:.4f} (divisor: 2^{penalty_exponent} = {penalty_divisor}x)")
+                    self.log(f"[PLAN]         → Original J1={I_gain_original:.4f} → Penalized={I_gain_penalized:.4f} (divisor: {self.rrt.INITIAL_PENALTY}/({self.rrt.PENALTY_DECAY_RATE}^{steps_since-1}) = {penalty_divisor:.2f}x)")
                     self.log(f"[PLAN]         → Distance to visited: {distance:.3f}m, {steps_since} steps since visit")
 
         self.log(f"[PLAN] ═══════════════════════════════════════════════════════════════")
@@ -315,8 +228,20 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         noisy = true_conc + np.random.normal(0, sigma)
         return max(0, noisy)
 
+    def is_estimation_converged(self):
+        """Check if estimation has converged (sigma < threshold).
+
+        Returns:
+        --------
+        converged : bool
+            True if estimation has converged
+        """
+        _, stds = self.particle_filter.get_estimate()
+        sigma_p = max(stds['x'], stds['y'])
+        return sigma_p < self.sigma_threshold
+
     def take_step(self, step_num):
-        """Execute one measure-plan-move cycle with adaptive RRT.
+        """Execute one measure-plan-move cycle (Algorithm 1 from paper).
 
         Parameters:
         -----------
@@ -332,17 +257,6 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
 
         self.log(f"\n--- Step {step_num} ---")
         self.log(f"Robot at: ({self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f})")
-
-        # ==== CHECK OBSTACLE PROXIMITY ====
-        near_obstacle, obstacle_distance = self.is_near_obstacle(self.robot_pos)
-        self.adapt_rrt_parameters(near_obstacle)
-
-        if near_obstacle:
-            self.log(f"[ADAPTIVE] Near obstacle (dist={obstacle_distance:.3f}m < {self.OBSTACLE_PROXIMITY_THRESHOLD}m)")
-            self.log(f"[ADAPTIVE] Using enhanced RRT: N_tn={self.rrt.N_tn}, max_depth={self.rrt.max_depth}")
-        else:
-            self.log(f"[ADAPTIVE] Open area (dist={obstacle_distance:.3f}m >= {self.OBSTACLE_PROXIMITY_THRESHOLD}m)")
-            self.log(f"[ADAPTIVE] Using normal RRT: N_tn={self.rrt.N_tn}, max_depth={self.rrt.max_depth}")
 
         # ==== MEASURE PHASE ====
         measurement = self.get_measurement(self.robot_pos)
@@ -380,9 +294,9 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         self.measurements.append({'pos': self.robot_pos, 'raw': measurement})
         self.estimates.append((mean, std))
 
-        # ==== CHECK DISTANCE TO TRUE SOURCE (only stopping condition) ====
+        # ==== CHECK CONVERGENCE (early check before planning) ====
         sigma_p = max(std['x'], std['y'])
-        self.log(f"[INFO] sigma_p = {sigma_p:.3f} (for reference only, not used as stopping condition)")
+        self.log(f"[CONVERGE] sigma_p = {sigma_p:.3f}, sigma_t = {self.sigma_threshold:.3f}")
 
         # Check if robot has reached true source
         dist_to_true = np.sqrt((self.robot_pos[0] - self.true_source[0])**2 + (self.robot_pos[1] - self.true_source[1])**2)
@@ -395,7 +309,7 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
             self.log(f"  Robot position: ({self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f})")
             self.log(f"  Localization error: {np.sqrt((mean['x']-self.true_source[0])**2 + (mean['y']-self.true_source[1])**2):.3f}m")
 
-            # Save final visualization
+            # Save final visualization (no RRT since we return early)
             self.visualizer.save_step(
                 robot_pos=self.robot_pos,
                 trajectory=self.trajectory,
@@ -409,24 +323,55 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
+                rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
                 digital_value=discrete_measurement
             )
+
             self.search_complete = True
             return False
 
-        # ==== PLAN PHASE ====
-        self.log(f"[PLAN] Building Adaptive RRT with exploration penalty...")
+        if self.is_estimation_converged():
+            self.log(f"\n✓✓✓ ESTIMATION CONVERGED! ✓✓✓")
+            self.log(f"  True source: {self.true_source}")
+            self.log(f"  Estimated: ({mean['x']:.2f}, {mean['y']:.2f})")
+            self.log(f"  Error: {np.sqrt((mean['x']-self.true_source[0])**2 + (mean['y']-self.true_source[1])**2):.3f}m")
+
+            # Save final converged visualization (no RRT since we return early)
+            self.visualizer.save_step(
+                robot_pos=self.robot_pos,
+                trajectory=self.trajectory,
+                est_source=(mean['x'], mean['y']),
+                est_std=(std['x'], std['y']),
+                true_source=self.true_source,
+                step_num=step_num,
+                sigma_p=sigma_p,
+                current_step=step_num,
+                particle_filter=self.particle_filter,
+                distance_to_true=dist_to_true,
+                d_success_thr=self.d_success_thr,
+                occupancy_grid=self.grid,
+                rrt_nodes=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
+            )
+
+            self.search_complete = True
+            return False
+
+        # ==== PLAN PHASE (before visualization for RRT drawing) ====
+        self.log(f"[PLAN] Building RRT with EXTENDED exploration penalty (10-step window, 1.2x decay)...")
         # Update RRT with visited positions and current step for exploration penalty
         self.rrt.visited_positions = self.trajectory_with_steps
         self.rrt.current_step = step_num
 
         # Debug: Show recent visited positions
-        self.log(f"[PLAN] Recent visited positions (for penalty window):")
-        for pos, step in self.trajectory_with_steps[-5:]:
+        self.log(f"[PLAN] Recent visited positions (for extended 10-step penalty window):")
+        for pos, step in self.trajectory_with_steps[-10:]:
             steps_ago = step_num - step
-            if steps_ago >= 0 and steps_ago <= 5:
+            if steps_ago >= 0:
                 self.log(f"[PLAN]   Step {step}: ({pos[0]:.2f}, {pos[1]:.2f}) - {steps_ago} step{'s' if steps_ago != 1 else ''} ago")
 
         debug_info = self.rrt.get_next_move_debug(self.robot_pos, self.particle_filter)
@@ -434,6 +379,15 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         rrt_nodes = debug_info.get('rrt_nodes', None)
         rrt_pruned_paths = debug_info.get('rrt_pruned_paths', None)
         best_idx = len(debug_info.get('all_utilities', [])) - 1  # Default to last if not found
+
+        # Find the best index
+        if 'all_utilities' in debug_info:
+            all_utilities = debug_info['all_utilities']
+            best_utility = debug_info['best_utility']
+            for idx, util in enumerate(all_utilities):
+                if abs(util - best_utility) < 1e-6:
+                    best_idx = idx
+                    break
 
         # ==== SAVE STEP VISUALIZATION (with RRT tree) ====
         self.visualizer.save_step(
@@ -456,23 +410,52 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
             digital_value=discrete_measurement
         )
 
-        # Find the best index
-        if 'all_utilities' in debug_info:
-            all_utilities = debug_info['all_utilities']
-            best_utility = debug_info['best_utility']
-            for idx, util in enumerate(all_utilities):
-                if abs(util - best_utility) < 1e-6:
-                    best_idx = idx
-                    break
-
         # Log all path evaluations with details
         self.log_all_path_evaluations(debug_info, best_idx)
 
         self.log(f"[PLAN] Best utility: {debug_info['best_utility']:.4f}")
-        self.log(f"[PLAN] Information gain (penalized): {debug_info['best_information_gain']:.4f}")
-        self.log(f"[PLAN] Information gain (original): {debug_info['best_information_gain_original']:.4f}")
-        self.log(f"[PLAN] Travel cost: {debug_info['best_travel_cost']:.4f}")
+        self.log(f"[PLAN] J1 (Information gain):")
+        self.log(f"[PLAN]   - Original (before penalty): {debug_info['best_information_gain_original']:.4f}")
+        self.log(f"[PLAN]   - With penalty applied: {debug_info['best_information_gain_penalized']:.4f}")
+        self.log(f"[PLAN]   - Normalized [0-1]: {debug_info['best_information_gain']:.4f}")
+        self.log(f"[PLAN]   - Range in all paths: [{debug_info['norm_info_gain_range'][0]:.4f}, {debug_info['norm_info_gain_range'][1]:.4f}]")
+        self.log(f"[PLAN] J2 (Travel cost):")
+        self.log(f"[PLAN]   - Original: {debug_info['best_travel_cost_original']:.4f}")
+        self.log(f"[PLAN]   - Normalized [0-1]: {debug_info['best_travel_cost']:.4f}")
+        self.log(f"[PLAN]   - Range in all paths: [{debug_info['norm_travel_cost_range'][0]:.4f}, {debug_info['norm_travel_cost_range'][1]:.4f}]")
         self.log(f"[PLAN] Paths analyzed: {debug_info['total_paths']} total | {debug_info['paths_with_penalties']} with penalties")
+
+        # Show penalty information
+        if debug_info['best_penalty_applied']:
+            original = debug_info['best_information_gain_original']
+            penalized = debug_info['best_information_gain_penalized']
+            normalized = debug_info['best_information_gain']
+            penalty_info = debug_info['best_penalty_info']
+            steps_since = self.current_step - penalty_info['visited_step']
+            penalty_divisor = self.rrt.INITIAL_PENALTY / (self.rrt.PENALTY_DECAY_RATE ** (steps_since - 1))
+            visited_pos = penalty_info['visited_pos']
+            visited_step = penalty_info['visited_step']
+            distance = penalty_info['distance']
+
+            if original >= 0:
+                penalty_reduction = (1 - debug_info['best_penalty_factor']) * 100
+                self.log(f"[PLAN] ⚠️  PENALTY APPLIED (visited {steps_since} step{'s' if steps_since != 1 else ''} ago):")
+                self.log(f"[PLAN]    Penalized node: ({next_pos[0]:.2f}, {next_pos[1]:.2f})")
+                self.log(f"[PLAN]    Visited position: ({visited_pos[0]:.2f}, {visited_pos[1]:.2f}) at step {visited_step}")
+                self.log(f"[PLAN]    Distance to visited node: {distance:.3f}m (threshold: 1.0m)")
+                self.log(f"[PLAN]    Original J1: {original:.4f} → Penalized: {penalized:.4f} → Normalized: {normalized:.4f}")
+                self.log(f"[PLAN]    Information gain reduced by {penalty_reduction:.1f}% (divisor: {self.rrt.INITIAL_PENALTY}/({self.rrt.PENALTY_DECAY_RATE}^{steps_since-1}) = {penalty_divisor:.2f}x)")
+            else:
+                penalty_factor_inverse = 1 / debug_info['best_penalty_factor']
+                penalty_increase = (penalty_factor_inverse - 1) * 100
+                self.log(f"[PLAN] ⚠️  PENALTY APPLIED (visited {steps_since} step{'s' if steps_since != 1 else ''} ago):")
+                self.log(f"[PLAN]    Penalized node: ({next_pos[0]:.2f}, {next_pos[1]:.2f})")
+                self.log(f"[PLAN]    Visited position: ({visited_pos[0]:.2f}, {visited_pos[1]:.2f}) at step {visited_step}")
+                self.log(f"[PLAN]    Distance to visited node: {distance:.3f}m (threshold: 1.0m)")
+                self.log(f"[PLAN]    Original J1: {original:.4f} → Penalized: {penalized:.4f} → Normalized: {normalized:.4f}")
+                self.log(f"[PLAN]    Information gain made worse by {penalty_increase:.1f}% (divisor: {self.rrt.INITIAL_PENALTY}/({self.rrt.PENALTY_DECAY_RATE}^{steps_since-1}) = {penalty_divisor:.2f}x)")
+        else:
+            self.log(f"[PLAN] No penalty applied (exploring new areas)")
 
         # ==== MOVE PHASE ====
         self.log(f"[MOVE] Moving to ({next_pos[0]:.2f}, {next_pos[1]:.2f})")
@@ -483,24 +466,23 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         return True
 
     def run(self):
-        """Run the full Adaptive RRT-Infotaxis algorithm."""
+        """Run the full RRT-Infotaxis algorithm with discrete sensor on large map."""
         self.log("=" * 70)
-        self.log("ADAPTIVE RRT-INFOTAXIS WITH IGDM + DISCRETE SENSOR + EXPLORATION PENALTY (Large Map)")
+        self.log("RRT-INFOTAXIS WITH IGDM + DISCRETE SENSOR + EXTENDED PENALTY")
+        self.log("(Large Map - Single Room - 10-step penalty window with 1.2x decay)")
         self.log("=" * 70)
-        self.log(f"Environment: {self.room_width}m × {self.room_height}m (with room walls and door)")
-        self.log(f"Room: x∈[0,5], y∈[20,25] with right wall at x=5 and bottom wall at y=20 (door at x∈[0,2])")
+        self.log(f"Environment: {self.room_width}m × {self.room_height}m (large open area with one room)")
+        self.log(f"Room (top-left): x∈[0,5], y∈[20,25] with door at x∈[0,2]")
+        self.log(f"Room walls: Right wall at x=5, Bottom wall at y=20 with door opening")
         self.log(f"True source: {self.true_source} (Q={self.true_Q}) inside room")
         self.log(f"Robot start: {self.robot_start} in open area")
         self.log(f"Algorithm parameters:")
         self.log(f"  - IGDM sigma_m: {self.sigma_m}m (Dijkstra distance, obstacle-aware)")
         self.log(f"  - Sensor: 5-level DISCRETE (provides ~2.3 bits/measurement vs 1 bit for binary)")
-        self.log(f"  - ADAPTIVE RRT:")
-        self.log(f"    * Obstacle proximity threshold: {self.OBSTACLE_PROXIMITY_THRESHOLD}m")
-        self.log(f"    * Normal (open area): N_tn={self.NORMAL_N_TN}, max_depth={self.NORMAL_MAX_DEPTH}")
-        self.log(f"    * Near obstacle: N_tn={self.NEAR_OBSTACLE_N_TN}, max_depth={self.NEAR_OBSTACLE_MAX_DEPTH}")
-        self.log(f"  - Exploration penalty (time-dependent): 2^(6-steps_since_visit) divisor for visited positions")
-        self.log(f"    * 1 step ago: ÷32  | 2 steps: ÷16  | 3 steps: ÷8  | 4 steps: ÷4  | 5 steps: ÷2")
-        self.log(f"  - Stopping condition: Distance to true source < {self.d_success_thr}m (only)")
+        self.log(f"  - Utility weights: J1 (information gain) = 0.5, J2 (travel cost) = 0.5 (normalized, equal contribution)")
+        self.log(f"  - EXTENDED Exploration penalty (time-dependent): 8 / (1.2^(steps_since_visit-1)) divisor for visited positions")
+        self.log(f"    * 1 step ago: ÷8.00  | 2 steps: ÷6.67  | 3 steps: ÷5.56  | ... | 10 steps: ÷1.55  | 11+ steps: No penalty")
+        self.log(f"  - Success distance threshold: {self.d_success_thr}m")
         self.log(f"  - Max steps: {self.max_steps}")
         self.log("=" * 70)
 
@@ -513,7 +495,7 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         self.log(f"Test completed after {len(self.trajectory)-1} steps")
         self.log(f"{'='*70}")
 
-    def visualize_final(self, filename='adaptive_rrt_infotaxis_igdm_large_map_discrete_result.png'):
+    def visualize_final(self, filename='rrt_infotaxis_igdm_improved_large_map_discrete_extended_penalty_result.png'):
         """Create final summary plot.
 
         Parameters:
@@ -528,12 +510,14 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         ax1.set_xlim(0, self.room_width)
         ax1.set_ylim(0, self.room_height)
         ax1.set_aspect('equal')
-        ax1.set_title('Adaptive RRT-Infotaxis Trajectory (IGDM + Discrete Sensor, Large Map)', fontsize=12, fontweight='bold')
+        ax1.set_title('RRT-Infotaxis Trajectory (IGDM + Discrete Sensor + Extended Penalty)', fontsize=12, fontweight='bold')
         ax1.set_xlabel('X (m)')
         ax1.set_ylabel('Y (m)')
 
-        # Plot room obstacles
+        # Plot room walls
+        # Right wall at x=5
         ax1.add_patch(plt.Rectangle((4.9, 20.0), 0.2, 5.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
+        # Bottom wall at y=20 (with door opening at x: 0-2)
         ax1.add_patch(plt.Rectangle((2.0, 19.9), 3.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
 
         traj = np.array(self.trajectory)
@@ -558,7 +542,7 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         ax2.set_ylabel('Y (m)')
 
         x_grid = np.linspace(0, self.room_width, 100)
-        y_grid = np.linspace(0, self.room_height, 60)
+        y_grid = np.linspace(0, self.room_height, 100)
         X, Y = np.meshgrid(x_grid, y_grid)
 
         # Use the final step number for time-dependent dispersion visualization
@@ -574,7 +558,7 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
 
         im = ax2.contourf(X, Y, Z, levels=20, cmap='hot_r')
         cbar = plt.colorbar(im, ax=ax2, label='Concentration')
-        # Plot room obstacles on concentration field
+        # Plot room walls on concentration field
         ax2.add_patch(plt.Rectangle((4.9, 20.0), 0.2, 5.0, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
         ax2.add_patch(plt.Rectangle((2.0, 19.9), 3.0, 0.2, facecolor='gray', edgecolor='black', linewidth=0.5, alpha=0.7))
         ax2.plot(self.true_source[0], self.true_source[1], 'r*', markersize=10)
@@ -602,18 +586,16 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
             final_error = np.sqrt((final_mean['x']-self.true_source[0])**2 + (final_mean['y']-self.true_source[1])**2)
             final_sigma = max(final_std['x'], final_std['y'])
 
-            info_text = "ADAPTIVE RRT-INFOTAXIS RESULTS\n"
+            info_text = "RRT-INFOTAXIS RESULTS (LARGE MAP + DISCRETE SENSOR + EXTENDED PENALTY)\n"
             info_text += "="*40 + "\n\n"
             info_text += f"Steps taken: {len(self.trajectory)-1}\n"
-            info_text += f"Reached source: {self.search_complete}\n\n"
+            info_text += f"Converged: {self.search_complete}\n\n"
             info_text += f"True source: ({self.true_source[0]:.2f}, {self.true_source[1]:.2f})\n"
             info_text += f"Estimated:  ({final_mean['x']:.2f}, {final_mean['y']:.2f})\n"
             info_text += f"Error: {final_error:.3f} m\n\n"
             info_text += f"Success distance threshold: {self.d_success_thr:.3f} m\n\n"
-            info_text += f"Adaptive RRT Parameters:\n"
-            info_text += f"  Proximity threshold: {self.OBSTACLE_PROXIMITY_THRESHOLD}m\n"
-            info_text += f"  Normal: N_tn={self.NORMAL_N_TN}, depth={self.NORMAL_MAX_DEPTH}\n"
-            info_text += f"  Near obstacle: N_tn={self.NEAR_OBSTACLE_N_TN}, depth={self.NEAR_OBSTACLE_MAX_DEPTH}\n"
+            info_text += f"Penalty Window: 10 steps\n"
+            info_text += f"Decay Rate: 1.2x per step\n"
 
             ax4.text(0.05, 0.95, info_text, transform=ax4.transAxes, fontsize=11,
                     verticalalignment='top', fontfamily='monospace',
@@ -625,16 +607,13 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
 
 
 if __name__ == "__main__":
-    # Setup logging to file
-    log_dir = Path(__file__).parent / "results"
+    # Setup logging
+    log_dir = Path(__file__).parent / "updated_penalty_results"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "adaptive_rrt_infotaxis_igdm_large_map_discrete.log"
-
+    log_file = log_dir / "rrt_infotaxis_igdm_improved_large_map_discrete_less_extended_penalty.log"
     logger = setup_logging(str(log_file))
-    logger.info(f"Log file: {log_file}")
 
     # Run with default sigma_m=1.0
-    infotaxis = AdaptiveRRTInfotaxisIGDMDiscreteLargeMap(sigma_m=1.0, logger=logger)
+    infotaxis = RRTInfotaxisIGDMDiscreteLargeMapExtendedPenalty(sigma_m=1.0, logger=logger)
     infotaxis.run()
-    final_png = log_dir / "adaptive_rrt_infotaxis_igdm_large_map_discrete_result.png"
-    infotaxis.visualize_final(str(final_png))
+    infotaxis.visualize_final()

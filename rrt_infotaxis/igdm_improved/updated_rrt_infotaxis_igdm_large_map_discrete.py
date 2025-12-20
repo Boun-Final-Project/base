@@ -104,7 +104,7 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
         self.room_height = 25.0
-        self.resolution = 0.1
+        self.resolution = 0.25
 
         self.true_source = (2.5, 22.5)
         self.true_Q = 1.0
@@ -141,7 +141,7 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
         )
 
         # Use updated RRT with 4 initial nodes and improved pruning
-        self.rrt = RRTInfotaxisUpdated(self.grid, N_tn=50, R_range=8, delta=1.0, max_depth=3,
+        self.rrt = RRTInfotaxisUpdated(self.grid, N_tn=20, R_range=8, delta=1.0, max_depth=2,
                       discount_factor=0.8, positive_weight=0.60, penalty_radius=0.50)
 
         self.robot_pos = self.robot_start
@@ -153,8 +153,8 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to week-10
-        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10/updated_rrt_igdm_improved_large_map_discrete_steps")
+        # Visualization - save to results folder
+        viz_dir = Path(__file__).parent / "results" / "updated_rrt_igdm_improved_large_map_discrete_steps"
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -616,7 +616,7 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
 
 if __name__ == "__main__":
     # Setup logging
-    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10")
+    log_dir = Path(__file__).parent / "results"
     log_file = log_dir / "updated_rrt_infotaxis_igdm_large_map_discrete.log"
     logger = setup_logging(str(log_file))
 
