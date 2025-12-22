@@ -258,7 +258,6 @@ class RRTInfotaxisIGDM:
         self.rrt.current_step = step_num
         debug_info = self.rrt.get_next_move_debug(self.robot_pos, self.particle_filter)
         next_pos = debug_info['next_position']
-        })
         print(f"[PLAN] Best utility: {debug_info['best_utility']:.4f}")
         print(f"[PLAN] Information gain: {debug_info['best_information_gain']:.4f}")
         print(f"[PLAN] Travel cost: {debug_info['best_travel_cost']:.4f}")

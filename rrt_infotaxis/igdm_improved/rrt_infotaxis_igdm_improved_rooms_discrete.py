@@ -401,7 +401,6 @@ class RRTInfotaxisIGDMRoomsDiscrete:
         next_pos = debug_info['next_position']
         rrt_nodes = debug_info.get('rrt_nodes', None)
         rrt_pruned_paths = debug_info.get('rrt_pruned_paths', None)
-        })
         best_idx = len(debug_info.get('all_utilities', [])) - 1  # Default to last if not found
 
         # Find the best index
