@@ -309,12 +309,12 @@ class RRTInfotaxisNode(Node):
         theta = atan2(siny_cosp, cosy_cosp)
         self.current_position = (x, y)
         self.current_theta = theta
-        
+
         if self.planning_pending and not self.is_moving:
             self.get_logger().debug('Pose received, triggering pending plan...')
             self.planning_pending = False
             self.take_step()
-            
+
         if self.node_initialized and not self.initial_spin_done and not self.is_moving and self.sensor_raw_value is not None and not self.planning_pending:
             self.get_logger().debug('Pose and sensor data ready, triggering initial spin')
             self.take_step()
@@ -628,9 +628,8 @@ class RRTInfotaxisNode(Node):
         Do NOT set planning_pending here. We must wait for the Action Server
         to actually stop the robot (handled in nav_result_callback).
         """
-        # --- FIX: Removed self.planning_pending = True ---
         self.get_logger().debug('Cancel request accepted. Waiting for Nav2 to stop...')
-        
+
         # We can perform global path index update here as it's just bookkeeping
         if self.planner_mode == 'GLOBAL' and self.global_path and self.global_path_index < len(self.global_path):
             self.global_path_index += 1
@@ -687,10 +686,10 @@ class RRTInfotaxisNode(Node):
                 self.in_recovery = False
             else:
                 self.consecutive_failures += 1
-        
+
         self.is_moving = False
         self.goal_handle = None
-        
+
         # --- FIX: Only trigger planning here. ---
         # The robot has fully stopped now.
         self.planning_pending = True
@@ -968,12 +967,7 @@ class RRTInfotaxisNode(Node):
         if self.is_moving:
             return
 
-        # Process any pending callbacks to ensure self.current_position is fresh
-        # This prevents RRT from planning from a stale position (0.5s old)
-        import rclpy
-        rclpy.spin_once(self, timeout_sec=0.0)
-
-        self.get_logger().info(f'[POSITION] Planning from current position: ({self.current_position[0]:.3f}, {self.current_position[1]:.3f})')
+        self.get_logger().info(f'[STEP {self.step_count}] Robot at ({self.current_position[0]:.2f}, {self.current_position[1]:.2f})')
 
         current_measurement = self.sensor_raw_value
         self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement:.4f} ppm (continuous)')
@@ -997,7 +991,7 @@ class RRTInfotaxisNode(Node):
                 self.global_path = []
                 self.global_path_index = 0
                 self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
-                
+
             else:
                 waypoint = self.global_path[self.global_path_index]
                 waypoint_position = tuple(waypoint)
@@ -1011,7 +1005,7 @@ class RRTInfotaxisNode(Node):
                 mutual_info_waypoint = current_entropy - expected_entropy
                 detector_status = self.dead_end_detector.get_status()
                 switch_back_threshold = self.get_parameter('switch_back_threshold').value * detector_status["bi_threshold"]
-                
+
                 if mutual_info_waypoint > switch_back_threshold:
                     self.get_logger().info(f'[SWITCH TO LOCAL] Mutual info I={mutual_info_waypoint:.4f} > threshold={switch_back_threshold:.4f}')
                     self.clear_global_planner_visualizations()
@@ -1019,13 +1013,12 @@ class RRTInfotaxisNode(Node):
                     self.global_path = []
                     self.global_path_index = 0
                     self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
-                    
+
                 else:
                     next_pos = waypoint
                     self.visualize_global_path(self.global_path)
 
         if self.planner_mode == 'LOCAL':
-            self.get_logger().info(f'[LOCAL MODE] Computing RRT paths from ({self.current_position[0]:.3f}, {self.current_position[1]:.3f})')
             debug_info = self.rrt.get_next_move_debug(self.current_position, self.particle_filter)
             next_pos = debug_info["next_position"]
             best_path = debug_info["best_path"]
@@ -1115,7 +1108,7 @@ class RRTInfotaxisNode(Node):
             self.search_complete = True
             return
 
-        self.get_logger().info(f'[MOVE] Sending navigation goal to ({next_pos[0]:.2f}, {next_pos[1]:.2f})')
+        self.get_logger().info(f'Moving to: ({next_pos[0]:.2f}, {next_pos[1]:.2f})')
         self.send_nav_goal(next_pos[0], next_pos[1])
 
     def __del__(self):
