@@ -3,7 +3,7 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from olfaction_msgs.msg import GasSensor
-from geometry_msgs.msg import PoseWithCovarianceStamped, Point, PoseStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, Point, PoseStamped, Twist
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from nav2_msgs.action import NavigateToPose
@@ -23,7 +23,7 @@ import numpy as np
 import csv
 from datetime import datetime
 import os
-
+import time
 
 class RRTInfotaxisNode(Node):
     """RRT Infotaxis node that receives occupancy map."""
@@ -32,64 +32,67 @@ class RRTInfotaxisNode(Node):
         super().__init__('rrt_infotaxis_node')
 
         # Parameters
-        self.declare_parameter('use_fast_rrt', True)  # Use optimized RRT implementation
-        self.declare_parameter('sigma_m', 1.5)  # IGDM constant std dev (meters)
+        self.declare_parameter('use_fast_rrt', True)
+        self.declare_parameter('sigma_m', 1.5)
         self.declare_parameter('number_of_particles', 1000)
         self.declare_parameter('n_tn', 50)
         self.declare_parameter('delta', 0.7)
-        self.declare_parameter('xy_goal_tolerance', 0.3)  # XY distance tolerance in meters
-        self.declare_parameter('robot_radius', 0.35)  # Robot footprint radius for collision checking
-        self.declare_parameter('sigma_threshold', 0.35)  # Std dev threshold for estimation convergence (LOWERED to prevent early convergence)
-        self.declare_parameter('success_distance', 0.5)  # Distance threshold for source localization success (meters)
-        self.declare_parameter('positive_weight', 0.5)  # Weight of information gain compared to travel cost
+        self.declare_parameter('xy_goal_tolerance', 0.3)
+        self.declare_parameter('robot_radius', 0.35)
+        self.declare_parameter('sigma_threshold', 0.35)
+        self.declare_parameter('success_distance', 0.5)
+        self.declare_parameter('positive_weight', 0.5)
 
-        # Dead end detection parameters (Equations 20-21 from paper)
-        self.declare_parameter('dead_end_epsilon', 0.85)  # Weight for threshold update (ε in Eq. 21)
-        self.declare_parameter('dead_end_initial_threshold', 0.1)  # Initial BI threshold
+        # Dead end detection parameters
+        self.declare_parameter('dead_end_epsilon', 0.85)
+        self.declare_parameter('dead_end_initial_threshold', 0.1)
 
-        # Global planner parameters (Section IV.B.3 from paper)
-        self.declare_parameter('prm_samples', 200)  # Number of PRM vertices to sample
-        self.declare_parameter('prm_connection_radius', 2.0)  # Max distance for PRM edges (meters)
-        self.declare_parameter('frontier_min_size', 3)  # Min cells for valid frontier cluster
-        self.declare_parameter('lambda_p', 0.1)  # Weight for path cost in global utility (Eq. 22)
-        self.declare_parameter('lambda_s', 0.05)  # Weight for source distance in global utility (Eq. 22)
-        self.declare_parameter('switch_back_threshold', 1.5)  # Threshold for switching back to local planner
+        # Global planner parameters
+        self.declare_parameter('prm_samples', 200)
+        self.declare_parameter('prm_connection_radius', 2.0)
+        self.declare_parameter('frontier_min_size', 3)
+        self.declare_parameter('lambda_p', 0.1)
+        self.declare_parameter('lambda_s', 0.05)
+        self.declare_parameter('switch_back_threshold', 1.5)
 
         # Particle filter diversity parameters
-        self.declare_parameter('resample_threshold', 0.5)  # Effective sample size threshold for resampling
+        self.declare_parameter('resample_threshold', 0.5)
 
         # Sensor readings
         self.sensor_raw_value = None
         self.current_position = None
-        self.current_theta = None  # Robot orientation (yaw) for laser transformation
+        self.current_theta = None
         self.sensor_initialized = False
 
-        # Node initialization flag (prevent callbacks from triggering during __init__)
+        # Node initialization flag
         self.node_initialized = False
 
-        # State management for measure-plan-move loop
+        # State management
         self.is_moving = False
         self.goal_handle = None
-        self.goal_position = None  # Store target goal position
-        self.search_complete = False  # Flag to indicate if source search is finished
-        self.current_dead_end_status = False  # Track if currently in a dead end
+        self.goal_position = None
+        self.search_complete = False
+        self.current_dead_end_status = False
         
         # Synchronization flag
-        self.planning_pending = False  # Flag to trigger planning on next fresh pose
+        self.planning_pending = False
 
         # Dual-mode planner state
-        self.planner_mode = 'LOCAL'  # 'LOCAL' or 'GLOBAL'
-        self.global_path = []  # Current global path being executed
-        self.global_path_index = 0  # Current waypoint index in global path
+        self.planner_mode = 'LOCAL'
+        self.global_path = []
+        self.global_path_index = 0
 
-        # Data logging for entropy tracking
+        # --- FIX 1: Add variable for settling timer ---
+        self.settling_start_time = None
+
+        # Data logging
         self.step_count = 0
         self.start_time = None
         self.log_file = None
         self.csv_writer = None
         self._setup_data_logging()
 
-        # Track previous marker counts for proper cleanup
+        # Track previous marker counts
         self.prev_num_paths = 0
 
         # SLAM map tracking
@@ -118,7 +121,7 @@ class RRTInfotaxisNode(Node):
             10
         )
 
-        # Publishers for visualization
+        # Publishers
         self.particle_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/particles', 10)
         self.all_paths_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/all_paths', 10)
         self.best_path_pub = self.create_publisher(Marker, '/rrt_infotaxis/best_path', 10)
@@ -126,25 +129,28 @@ class RRTInfotaxisNode(Node):
         self.current_pos_pub = self.create_publisher(Marker, '/rrt_infotaxis/current_position', 10)
         self.text_info_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/source_info_text', 10)
 
-        # Global planner visualization publishers
+        # Publisher for emergency stop
+        self.cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
+
+        # Global planner publishers
         self.frontier_cells_pub = self.create_publisher(Marker, '/rrt_infotaxis/frontier_cells', 10)
         self.frontier_centroids_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/frontier_centroids', 10)
         self.prm_graph_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/prm_graph', 10)
         self.global_path_pub = self.create_publisher(Marker, '/rrt_infotaxis/global_path', 10)
         self.planner_mode_pub = self.create_publisher(Marker, '/rrt_infotaxis/planner_mode', 10)
 
-        # SLAM map publisher with QoS profile compatible with RViz Map display
+        # SLAM map publisher
         map_qos = QoSProfile(
             depth=10,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,  # Keep latest message for late subscribers
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
             reliability=QoSReliabilityPolicy.RELIABLE
         )
         self.slam_map_pub = self.create_publisher(OccupancyGrid, '/rrt_infotaxis/slam_map', map_qos)
 
         self.consecutive_failures = 0
-        self.max_failures_tolerance = 3  # How many fails before triggering recovery
+        self.max_failures_tolerance = 3
         self.in_recovery = False
-        self.recovery_step = 0  # 0: rotate left, 1: rotate right, 2: backup (optional)
+        self.recovery_step = 0
         self.initial_spin_done = False
         self.initial_spin_goal_handle = None
 
@@ -154,7 +160,7 @@ class RRTInfotaxisNode(Node):
         self.nav_to_pose_client.wait_for_server()
         self.get_logger().info('Nav2 action server available!')
 
-        # Load occupancy map from service
+        # Load occupancy map
         try:
             self.occupancy_map = create_occupancy_map_from_service(
                 self,
@@ -163,29 +169,19 @@ class RRTInfotaxisNode(Node):
                 timeout_sec=10.0
             )
             self.get_logger().info('Successfully received occupancy map!')
-
-            # Create empty SLAM map with same dimensions and resolution
             self.slam_map = create_empty_occupancy_map(self.occupancy_map)
-            self.get_logger().info(
-                f'Empty SLAM map initialized '
-                f'(resolution={self.slam_map.resolution}m, '
-                f'size={self.slam_map.width}x{self.slam_map.height})'
-            )
-
+            self.get_logger().info(f'Empty SLAM map initialized (resolution={self.slam_map.resolution}m)')
         except Exception as e:
             self.get_logger().error(f'Failed to load occupancy map: {e}')
             raise
 
-        # Initialize Indoor Gaussian Dispersion Model (IGDM)
-        # NOW USING SLAM MAP for obstacle-aware distance calculations
+        # Initialize models
         self.dispersion_model = IndoorGaussianDispersionModel(
             sigma_m=self.get_parameter('sigma_m').value,
             occupancy_grid=self.slam_map
         )
-        self.get_logger().info(f'IGDM initialized with σ_m={self.get_parameter("sigma_m").value}m (using SLAM map)')
+        self.get_logger().info(f'IGDM initialized with σ_m={self.get_parameter("sigma_m").value}m')
 
-        # Initialize sensor model and particle filter
-        # Using ContinuousGaussianSensorModel (paper's Equation 3)
         self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.0, num_levels=10, max_concentration=20.0)
         self.particle_filter = ParticleFilter(
             num_particles=self.get_parameter('number_of_particles').value,
@@ -195,10 +191,9 @@ class RRTInfotaxisNode(Node):
         )
         self.get_logger().info('Particle filter initialized')
 
-        # Initialize RRT (choose fast or standard implementation)
+        # Initialize RRT
         use_fast = self.get_parameter('use_fast_rrt').value
         RRTClass = RRT
-
         self.rrt = RRTClass(
             occupancy_grid=self.slam_map,
             N_tn=self.get_parameter('n_tn').value,
@@ -208,21 +203,16 @@ class RRTInfotaxisNode(Node):
             positive_weight=self.get_parameter('positive_weight').value
         )
         self.ppm_converter = GasUnitConverter()
-        rrt_type = "Fast RRT" if use_fast else "Standard RRT"
-        self.get_logger().info(f'{rrt_type} initialized (using SLAM map for collision checking)')
-
-        # Initialize text visualizer
+        
         self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
         self.get_logger().info('Text visualizer initialized')
 
-        # Initialize dead end detector (Equations 20-21 from paper)
         self.dead_end_detector = DeadEndDetector(
             epsilon=self.get_parameter('dead_end_epsilon').value,
             initial_threshold=self.get_parameter('dead_end_initial_threshold').value
         )
-        self.get_logger().info(f'Dead end detector initialized (ε={self.get_parameter("dead_end_epsilon").value})')
+        self.get_logger().info(f'Dead end detector initialized')
 
-        # Initialize global planner (Section IV.B.3 from paper)
         self.global_planner = GlobalPlanner(
             occupancy_grid=self.slam_map,
             robot_radius=self.get_parameter('robot_radius').value,
@@ -232,24 +222,15 @@ class RRTInfotaxisNode(Node):
             lambda_p=self.get_parameter('lambda_p').value,
             lambda_s=self.get_parameter('lambda_s').value
         )
-        self.get_logger().info(f'Global planner initialized (PRM: {self.get_parameter("prm_samples").value} samples)')
-
-        # Event-driven search: take_step() will be called when navigation completes
-        # No timer needed - navigation callbacks trigger the next step
+        self.get_logger().info('Global planner initialized')
         self.get_logger().info('Event-driven search mode: planning triggers on goal completion')
 
-        # Timer for publishing SLAM map at 2 Hz for RViz visualization
         self.slam_map_timer = self.create_timer(0.5, self._publish_slam_map_timer)
-
-        # Timer to check if XY goal is reached (to cancel before final rotation)
         self.goal_check_timer = self.create_timer(0.1, self._check_goal_reached)
-
-        # Mark node as fully initialized
         self.node_initialized = True
         self.get_logger().info('Node initialized successfully, waiting for sensor and pose data...')
 
     def _setup_data_logging(self):
-        """Setup CSV file for logging entropy and other metrics."""
         log_dir = os.path.expanduser('~/igdm_logs')
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -268,19 +249,15 @@ class RRTInfotaxisNode(Node):
         self.start_time = self.get_clock().now()
 
     def trigger_recovery(self):
-        """Simple recovery behavior: Rotate the robot to clear costmaps or find a new path when stuck."""
         self.in_recovery = True
         self.consecutive_failures = 0
         self.get_logger().warn('!!! STUCK DETECTED - EXECUTING RECOVERY ROTATION !!!')
-        
         if self.current_position is None:
             return
-
-        target_yaw = self.current_theta + 1.57  # +90 degrees
+        target_yaw = self.current_theta + 1.57
         from math import sin, cos
         qz = sin(target_yaw / 2.0)
         qw = cos(target_yaw / 2.0)
-        
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
         goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
@@ -289,14 +266,12 @@ class RRTInfotaxisNode(Node):
         goal_msg.pose.pose.position.z = 0.0
         goal_msg.pose.pose.orientation.z = float(qz)
         goal_msg.pose.pose.orientation.w = float(qw)
-        
         self.is_moving = True
         self.get_logger().info('Recovery: Spinning in place...')
         send_goal_future = self.nav_to_pose_client.send_goal_async(goal_msg, feedback_callback=self.nav_feedback_callback)
         send_goal_future.add_done_callback(self.nav_goal_response_callback)
     
     def pose_callback(self, msg):
-        """Callback for robot pose updates."""
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         from math import atan2
@@ -320,7 +295,6 @@ class RRTInfotaxisNode(Node):
             self.take_step()
 
     def sensor_callback(self, msg):
-        """Callback for gas sensor readings."""
         self.sensor_raw_value = msg.raw
         self.get_logger().debug(f'Received sensor reading: {self.sensor_raw_value}')
         if self.node_initialized and not self.initial_spin_done and not self.is_moving and self.current_position is not None and not self.planning_pending:
@@ -349,7 +323,6 @@ class RRTInfotaxisNode(Node):
             end_x = robot_x + local_x * np.cos(robot_theta) - local_y * np.sin(robot_theta)
             end_y = robot_y + local_x * np.sin(robot_theta) + local_y * np.cos(robot_theta)
 
-            # Mark free space first (this is where the fix is applied in the helper method)
             self._mark_ray_as_free(robot_x, robot_y, end_x, end_y)
 
             if hit_obstacle:
@@ -360,7 +333,6 @@ class RRTInfotaxisNode(Node):
         self.total_obstacles_marked += obstacles_this_scan
 
     def _mark_obstacle_in_slam_map(self, world_x: float, world_y: float) -> bool:
-        """Mark obstacle in slam_map with small inflation."""
         gx, gy = self.slam_map.world_to_grid(world_x, world_y)
         if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height:
             return False
@@ -373,10 +345,6 @@ class RRTInfotaxisNode(Node):
         return True
 
     def _mark_ray_as_free(self, x0, y0, x1, y1):
-        """
-        Ray trace from robot to endpoint and mark cells as free.
-        FIX: Overwrite obstacles to clear 'ghost walls' caused by timing lag.
-        """
         gx0, gy0 = self.slam_map.world_to_grid(x0, y0)
         gx1, gy1 = self.slam_map.world_to_grid(x1, y1)
         dx = abs(gx1 - gx0)
@@ -388,14 +356,9 @@ class RRTInfotaxisNode(Node):
         err = dx - dy
 
         while True:
-            # Check bounds
             if 0 <= x < self.slam_map.width and 0 <= y < self.slam_map.height:
-                # Stop if we hit the obstacle at the end of the ray
                 if x == gx1 and y == gy1:
                     break
-                
-                # --- CRITICAL FIX ---
-                # Always mark as free (0).
                 self.slam_map.grid[y, x] = 0
 
             if x == gx1 and y == gy1:
@@ -409,7 +372,6 @@ class RRTInfotaxisNode(Node):
                 y += sy
 
     def publish_slam_map(self):
-        """Publish slam_map as OccupancyGrid for RViz visualization."""
         if not hasattr(self, 'slam_map'):
             return
         msg = OccupancyGrid()
@@ -429,7 +391,7 @@ class RRTInfotaxisNode(Node):
     def _publish_slam_map_timer(self):
         self.publish_slam_map()
 
-    # ... (Rest of the visualization and navigation methods are unchanged) ...
+    # Visualization methods (visualize_particles, visualize_all_paths, etc.) remain unchanged
     def visualize_particles(self, particles, weights):
         marker_array = MarkerArray()
         if len(weights) > 0 and weights.max() > 0:
@@ -623,14 +585,7 @@ class RRTInfotaxisNode(Node):
                 self.planning_pending = True
 
     def _goal_cancel_callback(self, future):
-        """
-        Callback when cancel request is ACCEPTED.
-        Do NOT set planning_pending here. We must wait for the Action Server
-        to actually stop the robot (handled in nav_result_callback).
-        """
         self.get_logger().debug('Cancel request accepted. Waiting for Nav2 to stop...')
-
-        # We can perform global path index update here as it's just bookkeeping
         if self.planner_mode == 'GLOBAL' and self.global_path and self.global_path_index < len(self.global_path):
             self.global_path_index += 1
 
@@ -669,10 +624,6 @@ class RRTInfotaxisNode(Node):
         pass
 
     def nav_result_callback(self, future):
-        """
-        Callback when Action Server is completely done (Success, Aborted, or Canceled).
-        This guarantees the robot has stopped.
-        """
         status = future.result().status
         if status == 4:
             self.get_logger().info('Navigation goal reached!')
@@ -686,12 +637,8 @@ class RRTInfotaxisNode(Node):
                 self.in_recovery = False
             else:
                 self.consecutive_failures += 1
-
         self.is_moving = False
         self.goal_handle = None
-
-        # --- FIX: Only trigger planning here. ---
-        # The robot has fully stopped now.
         self.planning_pending = True
 
     def initial_spin_response_callback(self, future):
@@ -712,6 +659,7 @@ class RRTInfotaxisNode(Node):
         self.get_logger().info('Initial spin complete! Starting gas search.')
         self.planning_pending = True
 
+    # Visualization helpers
     def visualize_frontier_cells(self, frontier_cells):
         marker = Marker()
         marker.header.frame_id = "map"
@@ -786,6 +734,7 @@ class RRTInfotaxisNode(Node):
             point.z = 0.2
             vertices_marker.points.append(point)
         marker_array.markers.append(vertices_marker)
+        
         edges_marker = Marker()
         edges_marker.header.frame_id = "map"
         edges_marker.header.stamp = self.get_clock().now().to_msg()
@@ -817,6 +766,7 @@ class RRTInfotaxisNode(Node):
                     edges_marker.points.append(p1)
                     edges_marker.points.append(p2)
         marker_array.markers.append(edges_marker)
+        
         frontier_vertices_marker = Marker()
         frontier_vertices_marker.header.frame_id = "map"
         frontier_vertices_marker.header.stamp = self.get_clock().now().to_msg()
@@ -891,8 +841,6 @@ class RRTInfotaxisNode(Node):
         self.planner_mode_pub.publish(marker)
 
     def clear_global_planner_visualizations(self):
-        """Clear all global planner visualization markers."""
-        # Clear frontier cells
         marker = Marker()
         marker.header.frame_id = "map"
         marker.header.stamp = self.get_clock().now().to_msg()
@@ -901,9 +849,8 @@ class RRTInfotaxisNode(Node):
         marker.action = Marker.DELETE
         self.frontier_cells_pub.publish(marker)
 
-        # Clear frontier centroids
         marker_array = MarkerArray()
-        for i in range(100):  # Clear up to 100 centroid markers
+        for i in range(100):
             marker = Marker()
             marker.header.frame_id = "map"
             marker.header.stamp = self.get_clock().now().to_msg()
@@ -913,10 +860,9 @@ class RRTInfotaxisNode(Node):
             marker_array.markers.append(marker)
         self.frontier_centroids_pub.publish(marker_array)
 
-        # Clear PRM graph (vertices, edges, frontier vertices)
         marker_array = MarkerArray()
         for ns in ["prm_vertices", "prm_edges", "frontier_vertices"]:
-            for i in range(10):  # Clear up to 10 markers per namespace
+            for i in range(10):
                 marker = Marker()
                 marker.header.frame_id = "map"
                 marker.header.stamp = self.get_clock().now().to_msg()
@@ -926,7 +872,6 @@ class RRTInfotaxisNode(Node):
                 marker_array.markers.append(marker)
         self.prm_graph_pub.publish(marker_array)
 
-        # Clear global path
         marker = Marker()
         marker.header.frame_id = "map"
         marker.header.stamp = self.get_clock().now().to_msg()
@@ -967,10 +912,50 @@ class RRTInfotaxisNode(Node):
         if self.is_moving:
             return
 
+        # --- FIX 3: Settling Logic State Machine ---
+        # If settling is active (indicated by start_time being set), we force a stop
+        # and wait until 2.0s have elapsed before processing data and switching mode.
+        if self.settling_start_time is not None:
+            # Enforce Stop
+            stop_msg = Twist()
+            stop_msg.linear.x = 0.0
+            stop_msg.angular.z = 0.0
+            self.cmd_vel_pub.publish(stop_msg)
+
+            now = self.get_clock().now()
+            elapsed_sec = (now - self.settling_start_time).nanoseconds / 1e9
+
+            if elapsed_sec < 2.0:
+                # Keep settling in the next loop
+                self.planning_pending = True
+                return
+            else:
+                self.get_logger().info('[MODE SWITCH] Settling complete (2.0s). Switching to LOCAL.')
+                self.settling_start_time = None
+                
+                # Update PF with fresh static data
+                current_measurement = self.sensor_raw_value
+                self.particle_filter.update(current_measurement, self.current_position)
+                
+                # Switch Mode
+                self.planner_mode = 'LOCAL'
+                self.global_path = []
+                self.global_path_index = 0
+                self.clear_global_planner_visualizations()
+                self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
+                
+                # Return to ensure the next loop starts with fresh state
+                self.planning_pending = True
+                return
+        # ----------------------------------------------
+
         self.get_logger().info(f'[STEP {self.step_count}] Robot at ({self.current_position[0]:.2f}, {self.current_position[1]:.2f})')
 
         current_measurement = self.sensor_raw_value
         self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement:.4f} ppm (continuous)')
+        
+        # Only update PF here if we aren't just coming out of a settling phase (which updates explicitly)
+        # But doing it again is harmless.
         self.particle_filter.update(current_measurement, self.current_position)
         current_means, current_stds = self.particle_filter.get_estimate()
         est_x, est_y, est_Q = current_means["x"], current_means["y"], current_means["Q"]
@@ -985,12 +970,12 @@ class RRTInfotaxisNode(Node):
         if self.planner_mode == 'GLOBAL':
             self.get_logger().info('[GLOBAL MODE] Following frontier path...')
             if not self.global_path or self.global_path_index >= len(self.global_path):
-                self.get_logger().warn('[GLOBAL MODE] Path exhausted, switching to LOCAL mode')
-                self.clear_global_planner_visualizations()
-                self.planner_mode = 'LOCAL'
-                self.global_path = []
-                self.global_path_index = 0
-                self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
+                self.get_logger().warn('[GLOBAL MODE] Path exhausted. Triggering STOP & SETTLE before LOCAL.')
+                
+                # Trigger Settling instead of immediate switch
+                self.settling_start_time = self.get_clock().now()
+                self.planning_pending = True
+                return
 
             else:
                 waypoint = self.global_path[self.global_path_index]
@@ -1007,18 +992,19 @@ class RRTInfotaxisNode(Node):
                 switch_back_threshold = self.get_parameter('switch_back_threshold').value * detector_status["bi_threshold"]
 
                 if mutual_info_waypoint > switch_back_threshold:
-                    self.get_logger().info(f'[SWITCH TO LOCAL] Mutual info I={mutual_info_waypoint:.4f} > threshold={switch_back_threshold:.4f}')
-                    self.clear_global_planner_visualizations()
-                    self.planner_mode = 'LOCAL'
-                    self.global_path = []
-                    self.global_path_index = 0
-                    self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
+                    self.get_logger().info(f'[SWITCH] High MI found (I={mutual_info_waypoint:.4f}). Triggering STOP & SETTLE.')
+                    
+                    # Trigger Settling instead of immediate switch
+                    self.settling_start_time = self.get_clock().now()
+                    self.planning_pending = True
+                    return
 
                 else:
                     next_pos = waypoint
                     self.visualize_global_path(self.global_path)
 
         if self.planner_mode == 'LOCAL':
+            # RRT now plans using data that is guaranteed fresh (if we just settled)
             debug_info = self.rrt.get_next_move_debug(self.current_position, self.particle_filter)
             next_pos = debug_info["next_position"]
             best_path = debug_info["best_path"]
