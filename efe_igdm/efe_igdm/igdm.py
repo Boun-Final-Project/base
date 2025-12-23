@@ -54,6 +54,9 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('lambda_p', 0.1)
         self.declare_parameter('lambda_s', 0.05)
         self.declare_parameter('switch_back_threshold', 1.5)
+        
+        # --- NEW PARAMETER: Minimum distance between stops in Global Mode ---
+        self.declare_parameter('global_step_size', 1.5) 
 
         # Particle filter diversity parameters
         self.declare_parameter('resample_threshold', 0.5)
@@ -82,7 +85,7 @@ class RRTInfotaxisNode(Node):
         self.global_path = []
         self.global_path_index = 0
 
-        # --- FIX 1: Add variable for settling timer ---
+        # Settling timer state
         self.settling_start_time = None
 
         # Data logging
@@ -249,27 +252,38 @@ class RRTInfotaxisNode(Node):
         self.start_time = self.get_clock().now()
 
     def trigger_recovery(self):
-        self.in_recovery = True
+        self.get_logger().warn('!!! STUCK DETECTED - SWITCHING TO GLOBAL PLANNER !!!')
         self.consecutive_failures = 0
-        self.get_logger().warn('!!! STUCK DETECTED - EXECUTING RECOVERY ROTATION !!!')
-        if self.current_position is None:
-            return
-        target_yaw = self.current_theta + 1.57
-        from math import sin, cos
-        qz = sin(target_yaw / 2.0)
-        qw = cos(target_yaw / 2.0)
-        goal_msg = NavigateToPose.Goal()
-        goal_msg.pose.header.frame_id = 'map'
-        goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
-        goal_msg.pose.pose.position.x = float(self.current_position[0])
-        goal_msg.pose.pose.position.y = float(self.current_position[1])
-        goal_msg.pose.pose.position.z = 0.0
-        goal_msg.pose.pose.orientation.z = float(qz)
-        goal_msg.pose.pose.orientation.w = float(qw)
-        self.is_moving = True
-        self.get_logger().info('Recovery: Spinning in place...')
-        send_goal_future = self.nav_to_pose_client.send_goal_async(goal_msg, feedback_callback=self.nav_feedback_callback)
-        send_goal_future.add_done_callback(self.nav_goal_response_callback)
+        self.in_recovery = False
+
+        # Reset dead end detector to allow fresh exploration
+        self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
+
+        # Force switch to Global Mode
+        self.planner_mode = 'GLOBAL'
+        
+        # Plan using Global Planner
+        self.get_logger().info('Planning recovery path...')
+        global_plan_result = self.global_planner.plan(self.current_position, self.particle_filter)
+        
+        if global_plan_result['success']:
+            self.get_logger().info(f'Global recovery plan found with {len(global_plan_result["best_global_path"])} waypoints.')
+            self.global_path = global_plan_result['best_global_path']
+            self.global_path_index = 0
+            
+            # Update Visualizations
+            self.clear_global_planner_visualizations()
+            self.visualize_frontier_cells(global_plan_result['frontier_cells'])
+            self.visualize_frontier_centroids(global_plan_result['frontier_clusters'])
+            self.visualize_prm_graph(global_plan_result['prm_vertices'])
+            self.visualize_global_path(self.global_path)
+            
+            # Trigger immediate execution of the new plan
+            self.planning_pending = True
+        else:
+            self.get_logger().error('Global recovery plan FAILED. Resuming LOCAL mode.')
+            self.planner_mode = 'LOCAL'
+            self.planning_pending = True
     
     def pose_callback(self, msg):
         x = msg.pose.pose.position.x
@@ -306,6 +320,7 @@ class RRTInfotaxisNode(Node):
         if not hasattr(self, 'slam_map') or self.current_position is None or self.current_theta is None:
             return
 
+        # Corrected: Allow map updates while moving to prevent data loss
         robot_x = self.current_position[0]
         robot_y = self.current_position[1]
         robot_theta = self.current_theta
@@ -912,9 +927,7 @@ class RRTInfotaxisNode(Node):
         if self.is_moving:
             return
 
-        # --- FIX 3: Settling Logic State Machine ---
-        # If settling is active (indicated by start_time being set), we force a stop
-        # and wait until 2.0s have elapsed before processing data and switching mode.
+        # --- FIX: Settling Logic State Machine ---
         if self.settling_start_time is not None:
             # Enforce Stop
             stop_msg = Twist()
@@ -978,8 +991,43 @@ class RRTInfotaxisNode(Node):
                 return
 
             else:
+                # --- CORRECTED LOOKAHEAD LOGIC ---
+                min_step_dist = self.get_parameter('global_step_size').value
+                
+                # Use a temp index so we don't mess up the state until we decide
+                search_index = self.global_path_index
+                final_index = len(self.global_path) - 1
+                found_distant_point = False
+
+                # Scan ahead
+                while search_index < final_index:
+                    wp = self.global_path[search_index]
+                    dx = wp[0] - self.current_position[0]
+                    dy = wp[1] - self.current_position[1]
+                    dist = (dx**2 + dy**2)**0.5
+                    
+                    if dist < min_step_dist:
+                        # Too close, look at the next one
+                        search_index += 1
+                    else:
+                        # Found a valid distant point
+                        found_distant_point = True
+                        break
+                
+                # Apply the index
+                self.global_path_index = search_index
+
+                # If we scanned to the end and didn't find a point far enough away,
+                # it means we are approaching the goal. We MUST force the robot 
+                # to go to the final frontier point, even if it's close.
+                if not found_distant_point:
+                    self.global_path_index = final_index
+
+                # ---------------------------------
+
                 waypoint = self.global_path[self.global_path_index]
                 waypoint_position = tuple(waypoint)
+                
                 current_entropy = self.particle_filter.get_entropy()
                 expected_entropy = 0.0
                 num_measurements = self.sensor_model.num_levels
