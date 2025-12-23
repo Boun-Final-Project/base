@@ -586,6 +586,33 @@ class RRTInfotaxisNode(Node):
         xy_tolerance = self.get_parameter('xy_goal_tolerance').value
         return distance <= xy_tolerance
 
+    def is_path_to_waypoint_valid(self, waypoint: tuple) -> bool:
+        """
+        Check if path from current position to waypoint is collision-free.
+        Uses the updated SLAM map for real-time obstacle detection.
+        """
+        if self.current_position is None:
+            return False
+
+        robot_radius = self.get_parameter('robot_radius').value
+        pos1 = np.array(self.current_position)
+        pos2 = np.array(waypoint)
+        dist = np.linalg.norm(pos2 - pos1)
+
+        if dist < 1e-6:
+            return self.slam_map.is_valid(tuple(pos1), radius=robot_radius)
+
+        # Sample along the path at resolution intervals
+        num_samples = int(np.ceil(dist / (self.slam_map.resolution * 0.5)))
+        num_samples = max(num_samples, 2)
+
+        for i in range(num_samples + 1):
+            t = i / num_samples
+            sample_pos = pos1 + t * (pos2 - pos1)
+            if not self.slam_map.is_valid((sample_pos[0], sample_pos[1]), radius=robot_radius):
+                return False
+        return True
+
 
 
     def _goal_cancel_callback(self, future):
@@ -998,7 +1025,7 @@ class RRTInfotaxisNode(Node):
             self.get_logger().info('[GLOBAL MODE] Following frontier path...')
             if not self.global_path or self.global_path_index >= len(self.global_path):
                 self.get_logger().warn('[GLOBAL MODE] Path exhausted. Triggering STOP & SETTLE before LOCAL.')
-                
+
                 # Trigger Settling instead of immediate switch
                 self.settling_start_time = self.get_clock().now()
                 self.planning_pending = True
@@ -1007,7 +1034,7 @@ class RRTInfotaxisNode(Node):
             else:
                 # --- CORRECTED LOOKAHEAD LOGIC ---
                 min_step_dist = self.get_parameter('global_step_size').value
-                
+
                 # Use a temp index so we don't mess up the state until we decide
                 search_index = self.global_path_index
                 final_index = len(self.global_path) - 1
@@ -1019,7 +1046,7 @@ class RRTInfotaxisNode(Node):
                     dx = wp[0] - self.current_position[0]
                     dy = wp[1] - self.current_position[1]
                     dist = (dx**2 + dy**2)**0.5
-                    
+
                     if dist < min_step_dist:
                         # Too close, look at the next one
                         search_index += 1
@@ -1027,12 +1054,12 @@ class RRTInfotaxisNode(Node):
                         # Found a valid distant point
                         found_distant_point = True
                         break
-                
+
                 # Apply the index
                 self.global_path_index = search_index
 
                 # If we scanned to the end and didn't find a point far enough away,
-                # it means we are approaching the goal. We MUST force the robot 
+                # it means we are approaching the goal. We MUST force the robot
                 # to go to the final frontier point, even if it's close.
                 if not found_distant_point:
                     self.global_path_index = final_index
@@ -1041,7 +1068,30 @@ class RRTInfotaxisNode(Node):
 
                 waypoint = self.global_path[self.global_path_index]
                 waypoint_position = tuple(waypoint)
-                
+
+                # --- COLLISION CHECK: Verify path is still valid with updated SLAM map ---
+                if not self.is_path_to_waypoint_valid(waypoint_position):
+                    self.get_logger().warn(f'[GLOBAL MODE] Path to waypoint ({waypoint_position[0]:.2f}, {waypoint_position[1]:.2f}) is BLOCKED!')
+
+                    # Try next best frontier without full replan
+                    fallback_result = self.global_planner.get_next_best_frontier()
+
+                    if fallback_result is not None:
+                        self.get_logger().info(f'[GLOBAL MODE] Switching to frontier {fallback_result["frontier_index"]+1}/{fallback_result["total_frontiers"]}')
+                        self.global_path = fallback_result['best_global_path']
+                        self.global_path_index = 0
+                        self.visualize_global_path(self.global_path)
+
+                        # Retry with new path - trigger planning again
+                        self.planning_pending = True
+                        return
+                    else:
+                        self.get_logger().warn('[GLOBAL MODE] No more frontiers available. Switching to LOCAL.')
+                        self.settling_start_time = self.get_clock().now()
+                        self.planning_pending = True
+                        return
+                # --- END COLLISION CHECK ---
+
                 current_entropy = self.particle_filter.get_entropy()
                 expected_entropy = 0.0
                 num_measurements = self.sensor_model.num_levels
@@ -1055,7 +1105,7 @@ class RRTInfotaxisNode(Node):
 
                 if mutual_info_waypoint > switch_back_threshold:
                     self.get_logger().info(f'[SWITCH] High MI found (I={mutual_info_waypoint:.4f}). Triggering STOP & SETTLE.')
-                    
+
                     # Trigger Settling instead of immediate switch
                     self.settling_start_time = self.get_clock().now()
                     self.planning_pending = True

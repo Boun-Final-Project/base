@@ -100,6 +100,10 @@ class GlobalPlanner:
         self.best_global_path = []
         self.best_utility = -np.inf
 
+        # Store ranked frontiers for fallback when path becomes blocked
+        self.ranked_frontiers = []  # List of (utility, vertex, path_ids) tuples
+        self.current_frontier_index = 0
+
     def _is_valid_optimistic(self, position: Tuple[float, float]) -> bool:
         """
         Check if position is valid using OPTIMISTIC planning.
@@ -350,12 +354,18 @@ class GlobalPlanner:
             candidates.append((utility, f_vertex, path_ids, mi, path_cost, src_dist))
 
         if not candidates:
+            self.ranked_frontiers = []
+            self.current_frontier_index = 0
             return {'best_frontier_vertex': None, 'error': 'No reachable frontiers'}
 
-        # Find best
+        # Sort by utility (highest first)
         candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # Store all ranked candidates for fallback
+        self.ranked_frontiers = [(c[0], c[1], c[2]) for c in candidates]  # (utility, vertex, path_ids)
+        self.current_frontier_index = 0
+
         best = candidates[0]
-        
         self.best_frontier_vertex = best[1]
         self.best_global_path = [self.vertex_dict[vid].position for vid in best[2]]
         self.best_utility = best[0]
@@ -372,6 +382,32 @@ class GlobalPlanner:
             # Debug info needed for visualization
             'frontier_vertices': [c[1] for c in candidates],
             'utilities': [c[0] for c in candidates]
+        }
+
+    def get_next_best_frontier(self) -> Optional[Dict]:
+        """
+        Get the next best frontier when current path is blocked.
+        Returns None if no more frontiers available.
+        """
+        self.current_frontier_index += 1
+
+        if self.current_frontier_index >= len(self.ranked_frontiers):
+            return None
+
+        utility, vertex, path_ids = self.ranked_frontiers[self.current_frontier_index]
+        path = [self.vertex_dict[vid].position for vid in path_ids]
+
+        self.best_frontier_vertex = vertex
+        self.best_global_path = path
+        self.best_utility = utility
+
+        return {
+            'success': True,
+            'best_frontier_vertex': vertex,
+            'best_global_path': path,
+            'best_utility': utility,
+            'frontier_index': self.current_frontier_index,
+            'total_frontiers': len(self.ranked_frontiers)
         }
 
     def plan(self, current_position: Tuple[float, float], particle_filter: ParticleFilterOptimized) -> Dict:
