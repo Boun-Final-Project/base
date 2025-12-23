@@ -1,0 +1,10 @@
+# Goal checker configuration to accept any yaw orientation
+# This allows Nav2 to complete goals based on XY position only
+controller_server:
+  ros__parameters:
+    goal_checker_plugins: ["goal_checker"]
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.3
+      yaw_goal_tolerance: 6.28  # Full circle - accepts any orientation
+      stateful: true

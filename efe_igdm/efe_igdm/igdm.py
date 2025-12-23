@@ -229,7 +229,6 @@ class RRTInfotaxisNode(Node):
         self.get_logger().info('Event-driven search mode: planning triggers on goal completion')
 
         self.slam_map_timer = self.create_timer(0.5, self._publish_slam_map_timer)
-        self.goal_check_timer = self.create_timer(0.1, self._check_goal_reached)
         self.node_initialized = True
         self.get_logger().info('Node initialized successfully, waiting for sensor and pose data...')
 
@@ -587,17 +586,7 @@ class RRTInfotaxisNode(Node):
         xy_tolerance = self.get_parameter('xy_goal_tolerance').value
         return distance <= xy_tolerance
 
-    def _check_goal_reached(self):
-        if not self.is_moving:
-            return
-        if self.is_goal_reached():
-            self.get_logger().info('XY goal reached, canceling navigation to prevent orientation alignment')
-            if self.goal_handle is not None:
-                cancel_future = self.goal_handle.cancel_goal_async()
-                cancel_future.add_done_callback(self._goal_cancel_callback)
-            else:
-                self.is_moving = False
-                self.planning_pending = True
+
 
     def _goal_cancel_callback(self, future):
         self.get_logger().debug('Cancel request accepted. Waiting for Nav2 to stop...')
@@ -636,7 +625,17 @@ class RRTInfotaxisNode(Node):
         result_future.add_done_callback(self.nav_result_callback)
 
     def nav_feedback_callback(self, feedback_msg):
-        pass
+        """Check if XY goal is reached and cancel early to skip orientation alignment."""
+        if self.goal_position is None or self.goal_handle is None:
+            return
+        current_pose = feedback_msg.feedback.current_pose.pose.position
+        dx = current_pose.x - self.goal_position[0]
+        dy = current_pose.y - self.goal_position[1]
+        distance = (dx**2 + dy**2)**0.5
+        if distance <= self.get_parameter('xy_goal_tolerance').value:
+            self.get_logger().info('XY goal reached via feedback, canceling navigation')
+            cancel_future = self.goal_handle.cancel_goal_async()
+            cancel_future.add_done_callback(self._goal_cancel_callback)
 
     def nav_result_callback(self, future):
         status = future.result().status
