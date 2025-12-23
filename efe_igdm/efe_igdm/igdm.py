@@ -44,7 +44,7 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('positive_weight', 0.5)
 
         # Dead end detection parameters
-        self.declare_parameter('dead_end_epsilon', 0.85)
+        self.declare_parameter('dead_end_epsilon', 0.3)
         self.declare_parameter('dead_end_initial_threshold', 0.1)
 
         # Global planner parameters
@@ -927,38 +927,53 @@ class RRTInfotaxisNode(Node):
             return
 
         # --- FIX: Settling Logic State Machine ---
+        # COMMENTED OUT: 2 second settling delay
+        # if self.settling_start_time is not None:
+        #     # Enforce Stop
+        #     stop_msg = Twist()
+        #     stop_msg.linear.x = 0.0
+        #     stop_msg.angular.z = 0.0
+        #     self.cmd_vel_pub.publish(stop_msg)
+
+        #     now = self.get_clock().now()
+        #     elapsed_sec = (now - self.settling_start_time).nanoseconds / 1e9
+
+        #     if elapsed_sec < 2.0:
+        #         # Keep settling in the next loop
+        #         self.planning_pending = True
+        #         return
+        #     else:
+        #         self.get_logger().info('[MODE SWITCH] Settling complete (2.0s). Switching to LOCAL.')
+        #         self.settling_start_time = None
+
+        #         # Update PF with fresh static data
+        #         current_measurement = self.sensor_raw_value
+        #         self.particle_filter.update(current_measurement, self.current_position)
+
+        #         # Switch Mode
+        #         self.planner_mode = 'LOCAL'
+        #         self.global_path = []
+        #         self.global_path_index = 0
+        #         self.clear_global_planner_visualizations()
+        #         self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
+
+        #         # Return to ensure the next loop starts with fresh state
+        #         self.planning_pending = True
+        #         return
+
+        # Immediate mode switch when settling is triggered
         if self.settling_start_time is not None:
-            # Enforce Stop
-            stop_msg = Twist()
-            stop_msg.linear.x = 0.0
-            stop_msg.angular.z = 0.0
-            self.cmd_vel_pub.publish(stop_msg)
-
-            now = self.get_clock().now()
-            elapsed_sec = (now - self.settling_start_time).nanoseconds / 1e9
-
-            if elapsed_sec < 2.0:
-                # Keep settling in the next loop
-                self.planning_pending = True
-                return
-            else:
-                self.get_logger().info('[MODE SWITCH] Settling complete (2.0s). Switching to LOCAL.')
-                self.settling_start_time = None
-                
-                # Update PF with fresh static data
-                current_measurement = self.sensor_raw_value
-                self.particle_filter.update(current_measurement, self.current_position)
-                
-                # Switch Mode
-                self.planner_mode = 'LOCAL'
-                self.global_path = []
-                self.global_path_index = 0
-                self.clear_global_planner_visualizations()
-                self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
-                
-                # Return to ensure the next loop starts with fresh state
-                self.planning_pending = True
-                return
+            self.get_logger().info('[MODE SWITCH] Immediate switch to LOCAL.')
+            self.settling_start_time = None
+            current_measurement = self.sensor_raw_value
+            self.particle_filter.update(current_measurement, self.current_position)
+            self.planner_mode = 'LOCAL'
+            self.global_path = []
+            self.global_path_index = 0
+            self.clear_global_planner_visualizations()
+            self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
+            self.planning_pending = True
+            return
         # ----------------------------------------------
 
         self.get_logger().info(f'[STEP {self.step_count}] Robot at ({self.current_position[0]:.2f}, {self.current_position[1]:.2f})')
@@ -1081,6 +1096,18 @@ class RRTInfotaxisNode(Node):
                     self.visualize_frontier_centroids(global_plan_result['frontier_clusters'])
                     self.visualize_prm_graph(global_plan_result['prm_vertices'])
                     self.visualize_global_path(self.global_path)
+
+                    # Skip waypoints that are too close to current position
+                    min_step_dist = self.get_parameter('global_step_size').value
+                    while self.global_path_index < len(self.global_path) - 1:
+                        wp = self.global_path[self.global_path_index]
+                        dx = wp[0] - self.current_position[0]
+                        dy = wp[1] - self.current_position[1]
+                        dist = (dx**2 + dy**2)**0.5
+                        if dist >= min_step_dist:
+                            break
+                        self.global_path_index += 1
+
                     next_pos = self.global_path[self.global_path_index]
                     self.global_path_index += 1
                 else:
