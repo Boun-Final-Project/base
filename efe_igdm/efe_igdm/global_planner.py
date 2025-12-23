@@ -1,18 +1,22 @@
 """
-Global Planner for Dual-Mode RRT-Infotaxis GSL
+Global Planner for Dual-Mode RRT-Infotaxis GSL - OPTIMIZED VERSION
 
 Based on Section IV.B.3 from:
 "Gas Source Localization in Unknown Indoor Environments Using Dual-Mode
 Information-Theoretic Search" by Kim et al., IEEE RA-L 2025
 
-The global planner guides the robot from dead ends to information-rich areas
-using frontier-based exploration combined with mutual information.
+OPTIMIZATIONS:
+- Replaced Python loop-based frontier detection with scipy.ndimage (Vectorized).
+- Replaced BFS clustering with Connected Components labeling (C-backend).
 """
 
 import numpy as np
 import heapq
 from collections import deque
 from typing import List, Tuple, Optional, Dict, Set
+from scipy.ndimage import binary_dilation, label, find_objects
+
+# Assuming these are in the same directory, keep your relative imports
 from .occupancy_grid import OccupancyGridMap
 from .particle_filter_optimized import ParticleFilterOptimized
 
@@ -27,11 +31,8 @@ class FrontierCluster:
 
     def _compute_centroid(self) -> Tuple[int, int]:
         """
-        Compute 'Safe Centroid' of the cluster.
-        
-        Instead of the geometric mean (which might fall inside an obstacle for 
-        concave shapes), this finds the cell within the cluster that is 
-        closest to the geometric mean (Medoid).
+        Compute 'Safe Centroid' of the cluster (Medoid).
+        Finds the cell within the cluster closest to the geometric mean.
         """
         if not self.cells:
             return (0, 0)
@@ -41,7 +42,6 @@ class FrontierCluster:
         mean_y = np.mean([c[1] for c in self.cells])
 
         # 2. Find the cell in the cluster closest to the mean
-        # This ensures the target is actually a valid frontier cell, not a wall
         best_cell = self.cells[0]
         min_dist_sq = float('inf')
 
@@ -68,17 +68,18 @@ class GlobalPlanner:
     """
     Global planner for frontier-based exploration with information gain.
     
-    Fixes applied:
-    1. Targeted Sampling: Explicitly adds frontier centroids to PRM
-    2. Optimistic Validity: Allows planning through Unknown space (-1)
-    3. Safe Centroids: Uses medoids to avoid targeting walls
+    Optimizations applied:
+    1. Vectorized Frontier Detection (scipy.ndimage)
+    2. Vectorized Clustering (scipy.ndimage.label)
+    3. Targeted Sampling: Explicitly adds frontier centroids to PRM
+    4. Optimistic Validity: Allows planning through Unknown space (-1)
     """
 
     def __init__(self,
                  occupancy_grid: OccupancyGridMap,
                  robot_radius: float = 0.35,
-                 prm_samples: int = 300, # Increased samples for better connectivity
-                 prm_connection_radius: float = 2.5, # Increased radius
+                 prm_samples: int = 300, 
+                 prm_connection_radius: float = 2.5,
                  frontier_min_size: int = 3,
                  lambda_p: float = 0.1,
                  lambda_s: float = 0.05):
@@ -111,7 +112,6 @@ class GlobalPlanner:
         """
         gx, gy = self.occupancy_grid.world_to_grid(*position)
         
-        # Check map bounds
         if gx < 0 or gx >= self.occupancy_grid.width or gy < 0 or gy >= self.occupancy_grid.height:
             return False
 
@@ -129,77 +129,96 @@ class GlobalPlanner:
 
                 if 0 <= check_gx < self.occupancy_grid.width and 0 <= check_gy < self.occupancy_grid.height:
                     cell_val = self.occupancy_grid.grid[check_gy, check_gx]
-                    # FIX: Fail only if strictly occupied (> 0). 
-                    # Allow 0 (Free) and -1 (Unknown).
+                    # Fail only if strictly occupied (> 0). Allow 0 and -1.
                     if cell_val > 0: 
                         return False
         return True
 
     def detect_frontiers(self) -> List[Tuple[int, int]]:
-        """Detect frontier cells (Free cells adjacent to Unknowns)."""
-        frontier_cells = []
+        """
+        Vectorized frontier detection.
+        A frontier is a FREE cell (0) that is adjacent to an UNKNOWN cell (-1).
+        """
         grid = self.occupancy_grid.grid
-        height, width = grid.shape
         
-        # Optimization: use numpy for faster detection instead of loop
-        # Find all free cells
-        free_indices = np.where(grid == 0)
+        # 1. Create Boolean Masks (Operations on full arrays are fast in NumPy)
+        is_free = (grid == 0)
+        is_unknown = (grid == -1)
         
-        # 8-connected neighbors
-        neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1),
-                    (-1, -1), (-1, 1), (1, -1), (1, 1)]
-                    
-        # Check neighbors of free cells
-        for y, x in zip(free_indices[0], free_indices[1]):
-            is_frontier = False
-            for dx, dy in neighbors:
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < width and 0 <= ny < height:
-                    if grid[ny, nx] == -1:  # Unknown
-                        is_frontier = True
-                        break
-            if is_frontier:
-                frontier_cells.append((x, y))
-
-        self.frontier_cells = frontier_cells
-        return frontier_cells
+        # 2. Dilate the Unknown regions
+        # If we expand "Unknown" by 1 pixel (8-connected), the expansion will cover 
+        # the "Free" pixels that are touching the edge.
+        structure = np.ones((3, 3), dtype=bool) # 8-connectivity
+        unknown_dilated = binary_dilation(is_unknown, structure=structure)
+        
+        # 3. Intersection: Frontier = Is Free AND Is touching Unknown
+        frontier_mask = is_free & unknown_dilated
+        
+        # 4. Extract coordinates
+        # np.where returns (row_indices, col_indices) -> (y, x)
+        y_idxs, x_idxs = np.where(frontier_mask)
+        
+        # 5. Convert to list of (x, y) tuples
+        self.frontier_cells = list(zip(x_idxs, y_idxs))
+        
+        return self.frontier_cells
 
     def cluster_frontiers(self) -> List[FrontierCluster]:
-        """Cluster frontier cells and compute safe centroids."""
+        """
+        Cluster frontier cells using Connected Components (Labeling).
+        Replaces slow Python BFS with optimized scipy implementation.
+        """
         if not self.frontier_cells:
+            self.frontier_clusters = []
             return []
 
-        frontier_set = set(self.frontier_cells)
-        visited = set()
+        # 1. Reconstruct the Boolean mask from the list of cells
+        grid_shape = self.occupancy_grid.grid.shape
+        frontier_mask = np.zeros(grid_shape, dtype=bool)
+        
+        if len(self.frontier_cells) > 0:
+            xs, ys = zip(*self.frontier_cells)
+            frontier_mask[ys, xs] = True
+            
+        # 2. Label connected components (8-connectivity)
+        structure = np.ones((3, 3), dtype=int)
+        labeled_array, num_features = label(frontier_mask, structure=structure)
+        
         clusters = []
-        neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-
-        for start_cell in self.frontier_cells:
-            if start_cell in visited:
-                continue
-
-            cluster_cells = []
-            queue = deque([start_cell])
-            visited.add(start_cell)
-
-            while queue:
-                gx, gy = queue.popleft()
-                cluster_cells.append((gx, gy))
-
-                for dx, dy in neighbors:
-                    nx, ny = gx + dx, gy + dy
-                    if (nx, ny) in frontier_set and (nx, ny) not in visited:
-                        visited.add((nx, ny))
-                        queue.append((nx, ny))
-
+        
+        # 3. Iterate over found labels to group cells efficiently
+        # find_objects returns a list of slices for each label
+        slices = find_objects(labeled_array)
+        
+        for i, sl in enumerate(slices):
+            if sl is None: continue
+            
+            # Label IDs start at 1
+            label_id = i + 1
+            
+            # Mask relative to the slice (much faster than masking full grid)
+            local_mask = (labeled_array[sl] == label_id)
+            
+            # Get local coordinates
+            ly, lx = np.where(local_mask)
+            
+            # Convert to global grid coordinates
+            global_y = ly + sl[0].start
+            global_x = lx + sl[1].start
+            
+            # Combine into list of (x, y)
+            cluster_cells = list(zip(global_x, global_y))
+            
+            # Filter small clusters
             if len(cluster_cells) >= self.frontier_min_size:
                 cluster = FrontierCluster(cluster_cells)
-                # Ensure centroid is set
+                
+                # Calculate World Centroid using medoid logic
                 cluster.centroid_world = self.occupancy_grid.grid_to_world(
                     cluster.centroid_grid[0], cluster.centroid_grid[1]
                 )
                 clusters.append(cluster)
-
+                
         self.frontier_clusters = clusters
         return clusters
 
@@ -218,10 +237,8 @@ class GlobalPlanner:
         vertex_id += 1
 
         # 2. Explicitly Add Frontier Centroids (Targeted Sampling)
-        # This fixes the issue where random samples miss the goal
         for cluster in self.frontier_clusters:
             pos = cluster.centroid_world
-            # Use optimistic check for frontiers (they are near unknown space)
             if self._is_valid_optimistic(pos):
                 vertex = PRMVertex(pos, vertex_id)
                 vertex.is_frontier_vertex = True
@@ -245,7 +262,6 @@ class GlobalPlanner:
             x = np.random.uniform(x_min, x_max)
             y = np.random.uniform(y_min, y_max)
 
-            # Use optimistic validity check
             if self._is_valid_optimistic((x, y)):
                 vertex = PRMVertex((x, y), vertex_id)
                 self.vertices.append(vertex)
@@ -253,6 +269,7 @@ class GlobalPlanner:
                 vertex_id += 1
 
         # 4. Connect Vertices
+        # Simple N^2 connection strategy (acceptable for small N ~300)
         for i, vertex_i in enumerate(self.vertices):
             for j in range(i + 1, len(self.vertices)):
                 vertex_j = self.vertices[j]
@@ -265,7 +282,7 @@ class GlobalPlanner:
                         vertex_j.neighbors.append((vertex_i.id, dist))
 
     def _is_path_collision_free(self, pos1: Tuple[float, float], pos2: Tuple[float, float]) -> bool:
-        """Check collision using optimistic check."""
+        """Check collision using optimistic check along the segment."""
         pos1 = np.array(pos1)
         pos2 = np.array(pos2)
         dist = np.linalg.norm(pos2 - pos1)
@@ -273,6 +290,7 @@ class GlobalPlanner:
         if dist < 1e-6:
             return self._is_valid_optimistic(tuple(pos1))
 
+        # Check resolution
         num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution * 0.5)))
         num_samples = max(num_samples, 2)
 
@@ -336,12 +354,11 @@ class GlobalPlanner:
         source_estimate = np.array([estimate['x'], estimate['y']])
         
         frontier_vertices = [v for v in self.vertices if v.is_frontier_vertex]
-        results = {'utilities': [], 'path_costs': [], 'source_dists': [], 'mis': []}
         candidates = []
 
         for f_vertex in frontier_vertices:
-            # 1. Check path
-            path_ids, path_cost = self.dijkstra_in_prm(0, f_vertex.id) # 0 is current_pos
+            # 1. Check path from Current Position (Vertex 0)
+            path_ids, path_cost = self.dijkstra_in_prm(0, f_vertex.id)
             if path_ids is None: continue
 
             # 2. Compute metrics
@@ -379,7 +396,6 @@ class GlobalPlanner:
             'best_source_dist': best[5],
             'num_frontiers': len(frontier_vertices),
             'num_reachable': len(candidates),
-            # Debug info needed for visualization
             'frontier_vertices': [c[1] for c in candidates],
             'utilities': [c[0] for c in candidates]
         }
@@ -433,7 +449,6 @@ class GlobalPlanner:
                 'prm_vertices': self.vertices
             }
 
-        # Merge results
         eval_results['success'] = True
         eval_results['frontier_cells'] = self.frontier_cells
         eval_results['frontier_clusters'] = self.frontier_clusters

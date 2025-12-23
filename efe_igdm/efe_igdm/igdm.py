@@ -39,7 +39,7 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('delta', 0.7)
         self.declare_parameter('xy_goal_tolerance', 0.3)
         self.declare_parameter('robot_radius', 0.35)
-        self.declare_parameter('sigma_threshold', 0.35)
+        self.declare_parameter('sigma_threshold', 0.4)
         self.declare_parameter('success_distance', 0.5)
         self.declare_parameter('positive_weight', 0.5)
 
@@ -172,8 +172,18 @@ class RRTInfotaxisNode(Node):
                 timeout_sec=10.0
             )
             self.get_logger().info('Successfully received occupancy map!')
+            self.get_logger().info(f'  GADEN map origin (raw): ({self.occupancy_map.origin_x:.3f}, {self.occupancy_map.origin_y:.3f})')
+
+            # FIX: GADEN service returns origin (0,0) but actual map starts at (-0.2, -0.2)
+            if self.occupancy_map.origin_x == 0.0 and self.occupancy_map.origin_y == 0.0:
+                self.get_logger().warn('GADEN origin is (0,0) - applying -0.2 offset correction!')
+                self.occupancy_map.origin_x = -0.2
+                self.occupancy_map.origin_y = -0.2
+
+            self.get_logger().info(f'  GADEN map origin (corrected): ({self.occupancy_map.origin_x:.3f}, {self.occupancy_map.origin_y:.3f})')
             self.slam_map = create_empty_occupancy_map(self.occupancy_map)
             self.get_logger().info(f'Empty SLAM map initialized (resolution={self.slam_map.resolution}m)')
+            self.get_logger().info(f'  SLAM map origin: ({self.slam_map.origin_x:.3f}, {self.slam_map.origin_y:.3f})')
         except Exception as e:
             self.get_logger().error(f'Failed to load occupancy map: {e}')
             raise
@@ -282,6 +292,7 @@ class RRTInfotaxisNode(Node):
         else:
             self.get_logger().error('Global recovery plan FAILED. Resuming LOCAL mode.')
             self.planner_mode = 'LOCAL'
+            self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
             self.planning_pending = True
     
     def pose_callback(self, msg):
@@ -350,12 +361,7 @@ class RRTInfotaxisNode(Node):
         gx, gy = self.slam_map.world_to_grid(world_x, world_y)
         if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height:
             return False
-        inflation_cells = 1
-        for dx in range(-inflation_cells, inflation_cells + 1):
-            for dy in range(-inflation_cells, inflation_cells + 1):
-                nx, ny = gx + dx, gy + dy
-                if 0 <= nx < self.slam_map.width and 0 <= ny < self.slam_map.height:
-                    self.slam_map.grid[ny, nx] = 1
+        self.slam_map.grid[gy, gx] = 1
         return True
 
     def _mark_ray_as_free(self, x0, y0, x1, y1):
@@ -593,10 +599,15 @@ class RRTInfotaxisNode(Node):
         """
         if self.current_position is None:
             return False
+        return self._is_segment_valid(self.current_position, waypoint)
 
+    def _is_segment_valid(self, start: tuple, end: tuple) -> bool:
+        """
+        Check if a straight-line segment between two points is collision-free.
+        """
         robot_radius = self.get_parameter('robot_radius').value
-        pos1 = np.array(self.current_position)
-        pos2 = np.array(waypoint)
+        pos1 = np.array(start)
+        pos2 = np.array(end)
         dist = np.linalg.norm(pos2 - pos1)
 
         if dist < 1e-6:
@@ -617,8 +628,8 @@ class RRTInfotaxisNode(Node):
 
     def _goal_cancel_callback(self, future):
         self.get_logger().debug('Cancel request accepted. Waiting for Nav2 to stop...')
-        if self.planner_mode == 'GLOBAL' and self.global_path and self.global_path_index < len(self.global_path):
-            self.global_path_index += 1
+        # NOTE: Do NOT increment global_path_index here - the lookahead logic
+        # in take_step() handles waypoint advancement based on distance.
 
     def send_nav_goal(self, x, y):
         self.goal_position = (float(x), float(y))
@@ -1063,33 +1074,53 @@ class RRTInfotaxisNode(Node):
                 # to go to the final frontier point, even if it's close.
                 if not found_distant_point:
                     self.global_path_index = final_index
+                    
+                    # Check if robot is already AT the final waypoint
+                    final_wp = self.global_path[final_index]
+                    dx_final = final_wp[0] - self.current_position[0]
+                    dy_final = final_wp[1] - self.current_position[1]
+                    dist_to_final = (dx_final**2 + dy_final**2)**0.5
+                    
+                    if dist_to_final < self.get_parameter('xy_goal_tolerance').value:
+                        self.get_logger().info('[GLOBAL MODE] Reached final frontier waypoint. Switching to LOCAL.')
+                        self.settling_start_time = self.get_clock().now()
+                        self.planning_pending = True
+                        return
 
                 # ---------------------------------
 
                 waypoint = self.global_path[self.global_path_index]
                 waypoint_position = tuple(waypoint)
 
-                # --- COLLISION CHECK: Verify path is still valid with updated SLAM map ---
+                # --- COLLISION CHECK: Only check immediate next segment ---
                 if not self.is_path_to_waypoint_valid(waypoint_position):
                     self.get_logger().warn(f'[GLOBAL MODE] Path to waypoint ({waypoint_position[0]:.2f}, {waypoint_position[1]:.2f}) is BLOCKED!')
 
-                    # Try next best frontier without full replan
-                    fallback_result = self.global_planner.get_next_best_frontier()
+                    # Try to skip to next waypoint on same path
+                    self.global_path_index += 1
 
-                    if fallback_result is not None:
-                        self.get_logger().info(f'[GLOBAL MODE] Switching to frontier {fallback_result["frontier_index"]+1}/{fallback_result["total_frontiers"]}')
-                        self.global_path = fallback_result['best_global_path']
-                        self.global_path_index = 0
-                        self.visualize_global_path(self.global_path)
-
-                        # Retry with new path - trigger planning again
+                    # Check if we still have waypoints on this path
+                    if self.global_path_index < len(self.global_path):
+                        self.get_logger().info(f'[GLOBAL MODE] Skipping blocked waypoint, trying next on same path (index {self.global_path_index})')
                         self.planning_pending = True
                         return
                     else:
-                        self.get_logger().warn('[GLOBAL MODE] No more frontiers available. Switching to LOCAL.')
-                        self.settling_start_time = self.get_clock().now()
-                        self.planning_pending = True
-                        return
+                        # Path exhausted, try next frontier
+                        self.get_logger().warn('[GLOBAL MODE] Current path exhausted. Trying next frontier...')
+                        fallback_result = self.global_planner.get_next_best_frontier()
+
+                        if fallback_result is not None:
+                            self.get_logger().info(f'[GLOBAL MODE] Switching to frontier {fallback_result["frontier_index"]+1}/{fallback_result["total_frontiers"]}')
+                            self.global_path = fallback_result['best_global_path']
+                            self.global_path_index = 0
+                            self.visualize_global_path(self.global_path)
+                            self.planning_pending = True
+                            return
+                        else:
+                            self.get_logger().warn('[GLOBAL MODE] No more frontiers available. Switching to LOCAL.')
+                            self.settling_start_time = self.get_clock().now()
+                            self.planning_pending = True
+                            return
                 # --- END COLLISION CHECK ---
 
                 current_entropy = self.particle_filter.get_entropy()
@@ -1135,33 +1166,44 @@ class RRTInfotaxisNode(Node):
             bi_optimal = debug_info.get("best_utility", debug_info.get("best_entropy_gain", 0.0))
             dead_end_detected = self.dead_end_detector.is_dead_end(bi_optimal)
             if dead_end_detected:
-                self.get_logger().warn(f'[DEAD END DETECTED] Switching to GLOBAL mode from ({self.current_position[0]:.3f}, {self.current_position[1]:.3f})')
-                self.clear_global_planner_visualizations()
-                self.planner_mode = 'GLOBAL'
-                global_plan_result = self.global_planner.plan(self.current_position, self.particle_filter)
-                if global_plan_result['success']:
-                    self.global_path = global_plan_result['best_global_path']
-                    self.global_path_index = 0
-                    self.visualize_frontier_cells(global_plan_result['frontier_cells'])
-                    self.visualize_frontier_centroids(global_plan_result['frontier_clusters'])
-                    self.visualize_prm_graph(global_plan_result['prm_vertices'])
-                    self.visualize_global_path(self.global_path)
-
-                    # Skip waypoints that are too close to current position
-                    min_step_dist = self.get_parameter('global_step_size').value
-                    while self.global_path_index < len(self.global_path) - 1:
-                        wp = self.global_path[self.global_path_index]
-                        dx = wp[0] - self.current_position[0]
-                        dy = wp[1] - self.current_position[1]
-                        dist = (dx**2 + dy**2)**0.5
-                        if dist >= min_step_dist:
-                            break
-                        self.global_path_index += 1
-
-                    next_pos = self.global_path[self.global_path_index]
-                    self.global_path_index += 1
+                # Quick check: do frontiers even exist? (~10ms)
+                frontier_cells = self.global_planner.detect_frontiers()
+                if not frontier_cells:
+                    self.get_logger().info('[DEAD END] No frontiers exist. Staying in LOCAL mode.')
+                    self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
                 else:
-                    self.planner_mode = 'LOCAL'
+                    # Frontiers exist, do full planning
+                    self.get_logger().warn(f'[DEAD END DETECTED] {len(frontier_cells)} frontier cells found, planning path...')
+                    global_plan_result = self.global_planner.plan(self.current_position, self.particle_filter)
+                    if global_plan_result['success']:
+                        # Only switch to GLOBAL if there are frontiers to explore
+                        self.get_logger().info('[GLOBAL MODE] Frontiers found, switching to GLOBAL mode.')
+                        self.clear_global_planner_visualizations()
+                        self.planner_mode = 'GLOBAL'
+                        self.global_path = global_plan_result['best_global_path']
+                        self.global_path_index = 0
+                        self.visualize_frontier_cells(global_plan_result['frontier_cells'])
+                        self.visualize_frontier_centroids(global_plan_result['frontier_clusters'])
+                        self.visualize_prm_graph(global_plan_result['prm_vertices'])
+                        self.visualize_global_path(self.global_path)
+
+                        # Skip waypoints that are too close to current position
+                        min_step_dist = self.get_parameter('global_step_size').value
+                        while self.global_path_index < len(self.global_path) - 1:
+                            wp = self.global_path[self.global_path_index]
+                            dx = wp[0] - self.current_position[0]
+                            dy = wp[1] - self.current_position[1]
+                            dist = (dx**2 + dy**2)**0.5
+                            if dist >= min_step_dist:
+                                break
+                            self.global_path_index += 1
+
+                        next_pos = self.global_path[self.global_path_index]
+                        self.global_path_index += 1
+                    else:
+                        # Planning failed even with frontiers
+                        self.get_logger().info('[DEAD END] Planning failed. Staying in LOCAL mode.')
+                        self.dead_end_detector.reset(initial_threshold=self.get_parameter('dead_end_initial_threshold').value)
 
         self.visualize_planner_mode()
         self.visualize_particles(self.particle_filter.particles, self.particle_filter.weights)
@@ -1214,7 +1256,12 @@ class RRTInfotaxisNode(Node):
         self.step_count += 1
         
         if self.is_estimation_converged():
+            elapsed_time = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
+            self.get_logger().info('=' * 50)
             self.get_logger().info('SOURCE SEARCH COMPLETED SUCCESSFULLY!')
+            self.get_logger().info(f'Total time: {elapsed_time:.2f} seconds')
+            self.get_logger().info(f'Total steps: {self.step_count}')
+            self.get_logger().info('=' * 50)
             self.search_complete = True
             return
 
