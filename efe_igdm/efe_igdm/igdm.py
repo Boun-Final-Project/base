@@ -414,31 +414,44 @@ class RRTInfotaxisNode(Node):
     # Visualization methods (visualize_particles, visualize_all_paths, etc.) remain unchanged
     def visualize_particles(self, particles, weights):
         marker_array = MarkerArray()
+        
+        # Create a single marker for ALL particles (much more efficient)
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "particles"
+        marker.id = 0
+        marker.type = Marker.POINTS
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        
+        # Size of the points (in meters)
+        marker.scale.x = 0.1
+        marker.scale.y = 0.1
+        
+        # Normalize weights for color mapping
         if len(weights) > 0 and weights.max() > 0:
             normalized_weights = weights / weights.max()
         else:
             normalized_weights = weights
+
         for i, (particle, weight) in enumerate(zip(particles, normalized_weights)):
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = "particles"
-            marker.id = i
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
-            marker.pose.position.x = float(particle[0])
-            marker.pose.position.y = float(particle[1])
-            marker.pose.position.z = 0.5
-            marker.pose.orientation.w = 1.0
-            marker.scale.x = 0.1
-            marker.scale.y = 0.1
-            marker.scale.z = 0.1
-            marker.color = ColorRGBA()
-            marker.color.r = float(weight)
-            marker.color.g = float(weight * 0.8)
-            marker.color.b = float(1.0 - weight)
-            marker.color.a = 0.6
-            marker_array.markers.append(marker)
+            # Add point
+            p = Point()
+            p.x = float(particle[0])
+            p.y = float(particle[1])
+            p.z = 0.5
+            marker.points.append(p)
+            
+            # Add color for this point
+            c = ColorRGBA()
+            c.r = float(weight)
+            c.g = float(weight * 0.8)
+            c.b = float(1.0 - weight)
+            c.a = 0.8  # slightly more opaque
+            marker.colors.append(c)
+
+        marker_array.markers.append(marker)
         self.particle_pub.publish(marker_array)
 
     def visualize_all_paths(self, all_paths, all_utilities=None):
@@ -601,6 +614,35 @@ class RRTInfotaxisNode(Node):
             return False
         return self._is_segment_valid(self.current_position, waypoint)
 
+    def _is_valid_optimistic(self, position: tuple) -> bool:
+        """
+        Check if position is valid using OPTIMISTIC planning (same as GlobalPlanner).
+        Treats Unknown (-1) as Free (0). Only Occupied (>0) is invalid.
+        """
+        gx, gy = self.slam_map.world_to_grid(*position)
+        
+        if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height:
+            return False
+
+        # Check radius
+        radius_cells = int(np.ceil(self.get_parameter('robot_radius').value / self.slam_map.resolution))
+        radius_sq = radius_cells ** 2
+
+        for dx in range(-radius_cells, radius_cells + 1):
+            for dy in range(-radius_cells, radius_cells + 1):
+                if dx*dx + dy*dy > radius_sq:
+                    continue
+                
+                check_gx = gx + dx
+                check_gy = gy + dy
+
+                if 0 <= check_gx < self.slam_map.width and 0 <= check_gy < self.slam_map.height:
+                    cell_val = self.slam_map.grid[check_gy, check_gx]
+                    # Fail only if strictly occupied (> 0). Allow 0 and -1.
+                    if cell_val > 0: 
+                        return False
+        return True
+
     def _is_segment_valid(self, start: tuple, end: tuple) -> bool:
         """
         Check if a straight-line segment between two points is collision-free.
@@ -611,7 +653,7 @@ class RRTInfotaxisNode(Node):
         dist = np.linalg.norm(pos2 - pos1)
 
         if dist < 1e-6:
-            return self.slam_map.is_valid(tuple(pos1), radius=robot_radius)
+            return self._is_valid_optimistic(tuple(pos1))
 
         # Sample along the path at resolution intervals
         num_samples = int(np.ceil(dist / (self.slam_map.resolution * 0.5)))
@@ -620,7 +662,8 @@ class RRTInfotaxisNode(Node):
         for i in range(num_samples + 1):
             t = i / num_samples
             sample_pos = pos1 + t * (pos2 - pos1)
-            if not self.slam_map.is_valid((sample_pos[0], sample_pos[1]), radius=robot_radius):
+            # Use optimistic check instead of strict is_valid
+            if not self._is_valid_optimistic((sample_pos[0], sample_pos[1])):
                 return False
         return True
 
@@ -1043,51 +1086,52 @@ class RRTInfotaxisNode(Node):
                 return
 
             else:
-                # --- CORRECTED LOOKAHEAD LOGIC ---
-                min_step_dist = self.get_parameter('global_step_size').value
-
-                # Use a temp index so we don't mess up the state until we decide
-                search_index = self.global_path_index
-                final_index = len(self.global_path) - 1
-                found_distant_point = False
-
-                # Scan ahead
-                while search_index < final_index:
-                    wp = self.global_path[search_index]
-                    dx = wp[0] - self.current_position[0]
-                    dy = wp[1] - self.current_position[1]
-                    dist = (dx**2 + dy**2)**0.5
-
-                    if dist < min_step_dist:
-                        # Too close, look at the next one
-                        search_index += 1
-                    else:
-                        # Found a valid distant point
-                        found_distant_point = True
-                        break
-
-                # Apply the index
-                self.global_path_index = search_index
-
-                # If we scanned to the end and didn't find a point far enough away,
-                # it means we are approaching the goal. We MUST force the robot
-                # to go to the final frontier point, even if it's close.
-                if not found_distant_point:
-                    self.global_path_index = final_index
-                    
-                    # Check if robot is already AT the final waypoint
-                    final_wp = self.global_path[final_index]
-                    dx_final = final_wp[0] - self.current_position[0]
-                    dy_final = final_wp[1] - self.current_position[1]
-                    dist_to_final = (dx_final**2 + dy_final**2)**0.5
-                    
-                    if dist_to_final < self.get_parameter('xy_goal_tolerance').value:
-                        self.get_logger().info('[GLOBAL MODE] Reached final frontier waypoint. Switching to LOCAL.')
+                # --- 1.5m LOOKAHEAD DISABLED ---
+                # min_step_dist = self.get_parameter('global_step_size').value
+                # search_index = self.global_path_index
+                # final_index = len(self.global_path) - 1
+                # found_distant_point = False
+                # while search_index < final_index:
+                #     wp = self.global_path[search_index]
+                #     dx = wp[0] - self.current_position[0]
+                #     dy = wp[1] - self.current_position[1]
+                #     dist = (dx**2 + dy**2)**0.5
+                #     if dist < min_step_dist:
+                #         search_index += 1
+                #     else:
+                #         found_distant_point = True
+                #         break
+                # self.global_path_index = search_index
+                # if not found_distant_point:
+                #     self.global_path_index = final_index
+                #     final_wp = self.global_path[final_index]
+                #     dx_final = final_wp[0] - self.current_position[0]
+                #     dy_final = final_wp[1] - self.current_position[1]
+                #     dist_to_final = (dx_final**2 + dy_final**2)**0.5
+                #     if dist_to_final < self.get_parameter('xy_goal_tolerance').value:
+                #         self.get_logger().info('[GLOBAL MODE] Reached final frontier waypoint. Switching to LOCAL.')
+                #         self.settling_start_time = self.get_clock().now()
+                #         self.planning_pending = True
+                #         return
+                # ---------------------------------
+                
+                # Check if current waypoint is already reached
+                waypoint = self.global_path[self.global_path_index]
+                dx = waypoint[0] - self.current_position[0]
+                dy = waypoint[1] - self.current_position[1]
+                dist = (dx**2 + dy**2)**0.5
+                
+                if dist < self.get_parameter('xy_goal_tolerance').value:
+                    self.global_path_index += 1
+                    if self.global_path_index >= len(self.global_path):
+                        self.get_logger().warn('[GLOBAL MODE] Path exhausted. Triggering STOP & SETTLE.')
                         self.settling_start_time = self.get_clock().now()
                         self.planning_pending = True
                         return
-
-                # ---------------------------------
+                    else:
+                        self.get_logger().info(f'[GLOBAL MODE] Reached waypoint, moving to next index {self.global_path_index}')
+                        # Re-evaluate with new index
+                        waypoint = self.global_path[self.global_path_index]
 
                 waypoint = self.global_path[self.global_path_index]
                 waypoint_position = tuple(waypoint)
@@ -1101,26 +1145,15 @@ class RRTInfotaxisNode(Node):
 
                     # Check if we still have waypoints on this path
                     if self.global_path_index < len(self.global_path):
-                        self.get_logger().info(f'[GLOBAL MODE] Skipping blocked waypoint, trying next on same path (index {self.global_path_index})')
+                        self.get_logger().info(f'[GLOBAL MODE] Skipping blocked waypoint, trying next (index {self.global_path_index})')
                         self.planning_pending = True
                         return
                     else:
-                        # Path exhausted, try next frontier
-                        self.get_logger().warn('[GLOBAL MODE] Current path exhausted. Trying next frontier...')
-                        fallback_result = self.global_planner.get_next_best_frontier()
-
-                        if fallback_result is not None:
-                            self.get_logger().info(f'[GLOBAL MODE] Switching to frontier {fallback_result["frontier_index"]+1}/{fallback_result["total_frontiers"]}')
-                            self.global_path = fallback_result['best_global_path']
-                            self.global_path_index = 0
-                            self.visualize_global_path(self.global_path)
-                            self.planning_pending = True
-                            return
-                        else:
-                            self.get_logger().warn('[GLOBAL MODE] No more frontiers available. Switching to LOCAL.')
-                            self.settling_start_time = self.get_clock().now()
-                            self.planning_pending = True
-                            return
+                        # Path exhausted - switch to LOCAL mode
+                        self.get_logger().info('[GLOBAL MODE] Path exhausted. Switching to LOCAL mode.')
+                        self.settling_start_time = self.get_clock().now()
+                        self.planning_pending = True
+                        return
                 # --- END COLLISION CHECK ---
 
                 current_entropy = self.particle_filter.get_entropy()
@@ -1187,19 +1220,19 @@ class RRTInfotaxisNode(Node):
                         self.visualize_prm_graph(global_plan_result['prm_vertices'])
                         self.visualize_global_path(self.global_path)
 
-                        # Skip waypoints that are too close to current position
-                        min_step_dist = self.get_parameter('global_step_size').value
-                        while self.global_path_index < len(self.global_path) - 1:
-                            wp = self.global_path[self.global_path_index]
-                            dx = wp[0] - self.current_position[0]
-                            dy = wp[1] - self.current_position[1]
-                            dist = (dx**2 + dy**2)**0.5
-                            if dist >= min_step_dist:
-                                break
-                            self.global_path_index += 1
+                        # --- 1.5m SKIP DISABLED ---
+                        # min_step_dist = self.get_parameter('global_step_size').value
+                        # while self.global_path_index < len(self.global_path) - 1:
+                        #     wp = self.global_path[self.global_path_index]
+                        #     dx = wp[0] - self.current_position[0]
+                        #     dy = wp[1] - self.current_position[1]
+                        #     dist = (dx**2 + dy**2)**0.5
+                        #     if dist >= min_step_dist:
+                        #         break
+                        #     self.global_path_index += 1
 
                         next_pos = self.global_path[self.global_path_index]
-                        self.global_path_index += 1
+                        # self.global_path_index += 1  # Move this to the next take_step call handling
                     else:
                         # Planning failed even with frontiers
                         self.get_logger().info('[DEAD END] Planning failed. Staying in LOCAL mode.')

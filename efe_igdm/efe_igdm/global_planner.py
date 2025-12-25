@@ -277,17 +277,22 @@ class GlobalPlanner:
                 dist = np.linalg.norm(np.array(vertex_i.position) - np.array(vertex_j.position))
 
                 if dist <= self.prm_connection_radius:
-                    if self._is_path_collision_free(vertex_i.position, vertex_j.position):
+                    # Allow invalid start position for Vertex 0 (Current Robot Pos)
+                    allow_start_invalid = (vertex_i.id == 0)
+                    
+                    if self._is_path_collision_free(vertex_i.position, vertex_j.position, allow_start_invalid=allow_start_invalid):
                         vertex_i.neighbors.append((vertex_j.id, dist))
                         vertex_j.neighbors.append((vertex_i.id, dist))
 
-    def _is_path_collision_free(self, pos1: Tuple[float, float], pos2: Tuple[float, float]) -> bool:
+    def _is_path_collision_free(self, pos1: Tuple[float, float], pos2: Tuple[float, float], allow_start_invalid: bool = False) -> bool:
         """Check collision using optimistic check along the segment."""
         pos1 = np.array(pos1)
         pos2 = np.array(pos2)
         dist = np.linalg.norm(pos2 - pos1)
         
         if dist < 1e-6:
+            if allow_start_invalid:
+                return True
             return self._is_valid_optimistic(tuple(pos1))
 
         # Check resolution
@@ -297,6 +302,11 @@ class GlobalPlanner:
         for i in range(num_samples + 1):
             t = i / num_samples
             sample_pos = pos1 + t * (pos2 - pos1)
+            
+            # If start is allowed invalid, skip the very first point (i=0)
+            if i == 0 and allow_start_invalid:
+                continue
+
             if not self._is_valid_optimistic((sample_pos[0], sample_pos[1])):
                 return False
         return True
