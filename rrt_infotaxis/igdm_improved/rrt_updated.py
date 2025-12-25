@@ -89,12 +89,18 @@ class RRTInfotaxisUpdated:
         root = Node(start_pos)
         self.nodes.append(root)
 
-        # Define 4 cardinal direction nodes
+        # # Define 4 cardinal direction nodes
+        # cardinal_directions = [
+        #     (1.0, 0.0),   # Forward (positive X)
+        #     (-1.0, 0.0),  # Behind (negative X)
+        #     (0.0, 1.0),   # Right (positive Y)
+        #     (0.0, -1.0),  # Left (negative Y)
+        # ]
+
         cardinal_directions = [
-            (1.0, 0.0),   # Forward (positive X)
-            (-1.0, 0.0),  # Behind (negative X)
-            (0.0, 1.0),   # Right (positive Y)
-            (0.0, -1.0),  # Left (negative Y)
+            (0.0, 1.0),
+            ( np.sqrt(3) / 2, -1 / 2),
+            (-np.sqrt(3) / 2, -1 / 2)
         ]
 
         # Add 4 initial nodes in cardinal directions

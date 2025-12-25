@@ -181,7 +181,7 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         )
 
         # Use updated RRT with 4 initial nodes and improved pruning
-        self.rrt = RRTInfotaxisUpdated(self.grid, N_tn=50, R_range=8, delta=1.0, max_depth=3,
+        self.rrt = RRTInfotaxisUpdated(self.grid, N_tn=20, R_range=8, delta=1.0, max_depth=2,
                       discount_factor=0.8, positive_weight=0.60, penalty_radius=0.50)
 
         self.robot_pos = self.robot_start
@@ -193,8 +193,8 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to week-10
-        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10/updated_rrt_igdm_improved_rooms_discrete_weighted_steps")
+        # Visualization - save to week-11
+        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-11/updated_rrt_igdm_improved_rooms_discrete_weighted_steps")
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -491,8 +491,11 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
-                rrt_nodes=None
-            )
+                rrt_nodes=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
+)
 
             self.search_complete = True
             return False
@@ -517,8 +520,11 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
-                rrt_nodes=None
-            )
+                rrt_nodes=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
+)
 
             self.search_complete = True
             return False
@@ -566,8 +572,11 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
             d_success_thr=self.d_success_thr,
             occupancy_grid=self.grid,
             rrt_nodes=rrt_nodes,
-            rrt_pruned_paths=rrt_pruned_paths
-        )
+            rrt_pruned_paths=rrt_pruned_paths,
+            sensor_reading=measurement,
+            threshold_bins=self.sensor.level_thresholds,
+            digital_value=discrete_measurement
+)
 
         # Log all path evaluations with details
         self.log_all_path_evaluations(debug_info, best_idx)
@@ -805,7 +814,7 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
 
 if __name__ == "__main__":
     # Setup logging
-    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10")
+    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-11")
     log_file = log_dir / "updated_weighted_rrt_infotaxis_igdm_rooms_discrete.log"
     logger = setup_logging(str(log_file))
 

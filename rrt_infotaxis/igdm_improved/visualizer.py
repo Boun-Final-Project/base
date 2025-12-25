@@ -54,7 +54,7 @@ class StepVisualizer:
     def save_step(self, robot_pos, trajectory, est_source, est_std, true_source,
                   step_num, sigma_p, current_step=None, particle_filter=None,
                   distance_to_true=None, d_success_thr=None, occupancy_grid=None, rrt_nodes=None,
-                  rrt_pruned_paths=None):
+                  rrt_pruned_paths=None, sensor_reading=None, threshold_bins=None, digital_value=None):
         """Save a step visualization with particle filter visualization and RRT tree.
 
         Parameters:
@@ -87,6 +87,12 @@ class StepVisualizer:
             RRT tree nodes for visualization (all nodes generated during sprawl)
         rrt_pruned_paths : list, optional
             Pruned RRT paths for visualization (only paths reaching max_depth)
+        sensor_reading : float, optional
+            Current raw sensor reading (continuous value)
+        threshold_bins : list, optional
+            Threshold bin boundaries (e.g., [t1, t2, t3, t4] for 5-level discrete)
+        digital_value : int, optional
+            Discretized/digital sensor reading
         """
         # Get map dimensions from occupancy grid, default to 10x6 if not provided
         if occupancy_grid is not None:
@@ -230,11 +236,27 @@ class StepVisualizer:
 
         ax3.grid(True, alpha=0.3)
 
-        # Display distance to true source and success threshold
+        # Build the suptitle with distance and sensor information
+        suptitle_parts = []
+
         if distance_to_true is not None and d_success_thr is not None:
-            plt.suptitle(f'Distance to true source = {distance_to_true:.3f}m (threshold: {d_success_thr:.3f}m)', fontsize=11, y=1.02)
+            suptitle_parts.append(f'Distance to true source = {distance_to_true:.3f}m (threshold: {d_success_thr:.3f}m)')
         else:
-            plt.suptitle(f'sigma_p = {sigma_p:.3f}m', fontsize=11, y=1.02)
+            suptitle_parts.append(f'sigma_p = {sigma_p:.3f}m')
+
+        # Add sensor information if available
+        if sensor_reading is not None or threshold_bins is not None or digital_value is not None:
+            suptitle_parts.append('\n')
+            if sensor_reading is not None:
+                suptitle_parts.append(f'Reading: {sensor_reading:.4f}')
+            if threshold_bins is not None:
+                bins_str = ', '.join([f'{b:.4f}' for b in threshold_bins])
+                suptitle_parts.append(f'  Bins: [{bins_str}]')
+            if digital_value is not None:
+                suptitle_parts.append(f'  Digital: {digital_value}')
+
+        suptitle = ''.join(suptitle_parts)
+        plt.suptitle(suptitle, fontsize=11, y=1.02)
         plt.tight_layout()
 
         filename = self.output_dir / f"step_{self.step_count:04d}.png"

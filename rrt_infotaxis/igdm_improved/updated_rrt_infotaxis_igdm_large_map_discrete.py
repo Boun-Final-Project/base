@@ -153,8 +153,9 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to week-10
-        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10/updated_rrt_igdm_improved_large_map_discrete_steps")
+        # Visualization - use specified directory for visualization steps
+        viz_dir = Path("/Users/simalguven/Desktop/bitirme/updated_rrt_igdm_improved_large_map_discrete_steps")
+        viz_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -326,8 +327,11 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
-                rrt_nodes=None
-            )
+                rrt_nodes=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
+)
 
             self.search_complete = True
             return False
@@ -352,8 +356,11 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
-                rrt_nodes=None
-            )
+                rrt_nodes=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
+)
 
             self.search_complete = True
             return False
@@ -401,8 +408,11 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
             d_success_thr=self.d_success_thr,
             occupancy_grid=self.grid,
             rrt_nodes=rrt_nodes,
-            rrt_pruned_paths=rrt_pruned_paths
-        )
+            rrt_pruned_paths=rrt_pruned_paths,
+            sensor_reading=measurement,
+            threshold_bins=self.sensor.level_thresholds,
+            digital_value=discrete_measurement
+)
 
         # Log all path evaluations with details
         self.log_all_path_evaluations(debug_info, best_idx)
@@ -606,12 +616,14 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
 
 
 if __name__ == "__main__":
-    # Setup logging
-    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10")
+    # Setup logging - use specified directory
+    log_dir = Path("/Users/simalguven/Desktop/bitirme")
+    log_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
     log_file = log_dir / "updated_rrt_infotaxis_igdm_large_map_discrete.log"
     logger = setup_logging(str(log_file))
 
     # Run with default sigma_m=1.0
     infotaxis = RRTInfotaxisIGDMDiscreteLargeMapUpdated(sigma_m=1.0, logger=logger)
     infotaxis.run()
-    infotaxis.visualize_final()
+    final_result_path = log_dir / "updated_rrt_infotaxis_igdm_large_map_discrete_result.png"
+    infotaxis.visualize_final(str(final_result_path))

@@ -31,8 +31,6 @@ Discrete Sensor Levels:
 - Level 2: Medium (threshold[1] <= C < threshold[2])
 - Level 3: High (threshold[2] <= C < threshold[3])
 - Level 4: Very High (C >= threshold[3])
-
-This provides ~2.3 bits of information per measurement vs 1 bit for binary.
 """
 
 import numpy as np
@@ -135,7 +133,7 @@ class RRTInfotaxisIGDMDiscreteLargeMap:
             resample_threshold=0.42
         )
 
-        self.rrt = RRTInfotaxis(self.grid, N_tn=50, R_range=8, delta=1.0, max_depth=3,
+        self.rrt = RRTInfotaxis(self.grid, N_tn=20, R_range=8, delta=1.0, max_depth=2,
                       discount_factor=0.8, positive_weight=0.60, penalty_radius=0.50)
 
         self.robot_pos = self.robot_start
@@ -319,9 +317,11 @@ class RRTInfotaxisIGDMDiscreteLargeMap:
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid
-            )
-
+                occupancy_grid=self.grid,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
+)
             self.search_complete = True
             return False
 
@@ -344,9 +344,11 @@ class RRTInfotaxisIGDMDiscreteLargeMap:
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid
-            )
-
+                occupancy_grid=self.grid,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement
+)
             self.search_complete = True
             return False
 
@@ -384,8 +386,11 @@ class RRTInfotaxisIGDMDiscreteLargeMap:
             d_success_thr=self.d_success_thr,
             occupancy_grid=self.grid,
             rrt_nodes=rrt_nodes,
-            rrt_pruned_paths=rrt_pruned_paths
-        )
+            rrt_pruned_paths=rrt_pruned_paths,
+            sensor_reading=measurement,
+            threshold_bins=self.sensor.level_thresholds,
+            digital_value=discrete_measurement
+)
 
         # Find the best index
         if 'all_utilities' in debug_info:
