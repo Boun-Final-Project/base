@@ -161,8 +161,10 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to results folder
-        viz_dir = Path(__file__).parent / "results" / "adaptive_rrt_igdm_large_map_discrete_steps"
+        # Visualization - save to week-12
+        # Visualization - use specified directory for visualization steps
+        viz_dir = Path("/Users/simalguven/Desktop/bitirme/adaptive_rrt_igdm_large_map_discrete_steps")
+        viz_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -627,9 +629,9 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
 
 
 if __name__ == "__main__":
-    # Setup logging to file
-    log_dir = Path(__file__).parent / "results"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # Setup logging - use specified directory
+    log_dir = Path("/Users/simalguven/Desktop/bitirme")
+    log_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
     log_file = log_dir / "adaptive_rrt_infotaxis_igdm_large_map_discrete.log"
 
     logger = setup_logging(str(log_file))

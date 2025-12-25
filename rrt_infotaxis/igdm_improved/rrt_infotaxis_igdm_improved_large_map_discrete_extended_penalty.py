@@ -151,8 +151,10 @@ class RRTInfotaxisIGDMDiscreteLargeMapExtendedPenalty:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to results folder
-        viz_dir = Path(__file__).parent / "results" / "igdm_improved_large_map_discrete_extended_penalty_steps"
+        # Visualization - save to week-11
+        # Visualization - use specified directory for visualization steps
+        viz_dir = Path("/Users/simalguven/Desktop/bitirme/igdm_improved_large_map_discrete_extended_penalty_steps")
+        viz_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -610,12 +612,14 @@ class RRTInfotaxisIGDMDiscreteLargeMapExtendedPenalty:
 
 
 if __name__ == "__main__":
-    # Setup logging
-    log_dir = Path(__file__).parent / "results"
+    # Setup logging - use specified directory
+    log_dir = Path("/Users/simalguven/Desktop/bitirme")
+    log_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
     log_file = log_dir / "rrt_infotaxis_igdm_improved_large_map_discrete_extended_penalty.log"
     logger = setup_logging(str(log_file))
 
     # Run with default sigma_m=1.0
     infotaxis = RRTInfotaxisIGDMDiscreteLargeMapExtendedPenalty(sigma_m=1.0, logger=logger)
     infotaxis.run()
-    infotaxis.visualize_final()
+    final_result_path = log_dir / "rrt_infotaxis_igdm_improved_large_map_discrete_extended_penalty_result.png"
+    infotaxis.visualize_final(str(final_result_path))

@@ -405,8 +405,42 @@ class ParticleFilterOptimized:
 
     def get_entropy(self):
         """Compute Shannon entropy of particle distribution."""
-        weights_safe = self.weights[self.weights > 1e-10]
+        weights_safe = self.weights[self.weights > 1e-15]
         entropy = -np.sum(weights_safe * np.log(weights_safe))
+        return entropy
+
+    def compute_hypothetical_entropy(self, measurement: int, sensor_position: tuple[float, float]):
+        """
+        Compute hypothetical entropy after a measurement WITHOUT modifying filter state.
+
+        This is used for RRT planning to compute expected entropy gains.
+        According to Eq. (28) in the paper: ŵi_k+n = p(b̂k+n|θi_k) · wi_k
+
+        Args:
+            measurement: Binary sensor measurement (0 or 1)
+            sensor_position: Position where measurement would be taken
+
+        Returns:
+            float: Entropy that would result from this hypothetical measurement
+        """
+        # Compute likelihoods without modifying state
+        likelihoods = self._compute_likelihoods_vectorized(measurement, sensor_position)
+
+        # Compute hypothetical weights (Eq. 28)
+        hypothetical_weights = self.weights * likelihoods
+
+        # Normalize
+        weight_sum = np.sum(hypothetical_weights)
+        if weight_sum > 0:
+            hypothetical_weights /= weight_sum
+        else:
+            # All weights would be zero - return high entropy (maximum uncertainty)
+            return np.log(self.N)
+
+        # Compute entropy from hypothetical weights
+        weights_safe = hypothetical_weights[hypothetical_weights > 1e-15]
+        entropy = -np.sum(weights_safe * np.log(weights_safe))
+
         return entropy
 
     def predict_measurement_probability(self, sensor_position, binary_value=None):
@@ -423,7 +457,7 @@ class ParticleFilterOptimized:
         sigma_g = self.sensor_model.alpha * predicted_concs + self.sensor_model.sigma_env
 
         # Handle division by zero
-        sigma_g = np.maximum(sigma_g, 1e-10)
+        sigma_g = np.maximum(sigma_g, 1e-15)
 
         # Vectorized CDF computation
         phi = scipy_norm.cdf(delta_c / sigma_g)
@@ -463,8 +497,13 @@ class ParticleFilterOptimized:
         new_pf.resample_threshold = self.resample_threshold
         new_pf.mcmc_std = self.mcmc_std
         new_pf.iteration = self.iteration
-        new_pf.last_measurement = self.last_measurement
-        new_pf.last_sensor_position = self.last_sensor_position
+
+        # CRITICAL: Clear last_measurement and last_sensor_position for RRT hypothetical copies
+        # These are only needed for MCMC moves (which are skipped during RRT predictions)
+        # Keeping stale values could interfere with entropy calculations
+        new_pf.last_measurement = None
+        new_pf.last_sensor_position = None
+
         new_pf._concentration_cache = {}  # Fresh cache
         new_pf._cache_hits = 0
         new_pf._cache_misses = 0

@@ -1,0 +1,924 @@
+588
+
+IEEE ROBOTICS AND AUTOMATION LETTERS, VOL. 10, NO. 1, JANUARY 2025
+
+Gas Source Localization in Unknown Indoor
+Environments Using Dual-Mode
+Information-Theoretic Search
+Seunghwan Kim , Student Member, IEEE, Jaemin Seo, Student Member, IEEE,
+Hongro Jang, Graduate Student Member, IEEE, Changseung Kim, Graduate Student Member, IEEE,
+Murim Kim , Senior Member, IEEE, Juhyun Pyo, and Hyondong Oh , Senior Member, IEEE
+
+Abstract—This letter proposes a dual-mode planner for localizing gas sources using a mobile sensor in unknown indoor spaces.
+The complexity of indoor environments creates constraints on
+search paths, leading to situations where no valid paths can be
+generated, which are termed as dead end in this letter. The proposed
+dual-mode planner is designed to effectively address the dead
+end problem while maintaining efficient search paths. In addition,
+the absence of analytical dispersion models that can be used in
+unknown indoor environments presents another critical issue for
+indoor gas source localization (GSL). To address this, we present
+an indoor Gaussian dispersion model (IGDM) that can analytically
+model indoor gas dispersion without a complete map. Finally, we
+establish a GSL framework for indoor environments along with
+real-time mapping, utilizing the dual-mode planner and IGDM.
+This framework is validated in indoor scenarios with the realistic
+gas dispersion simulator. The simulation results show the high
+success rate of the proposed method, its ability to reduce search
+time, and its computational efficiency. Furthermore, through realworld experiments, we demonstrate the potential of the proposed
+approach as a practical solution, evidenced by its satisfactory
+performance.
+Index Terms—Environment monitoring and management, gas
+source localization, planning under uncertainty, robotics in
+hazardous fields.
+
+I. INTRODUCTION
+
+O
+
+VER the past few decades, numerous hazardous gas leaks
+have been reported, highlighting the need for immediate
+
+Received 19 May 2024; accepted 21 November 2024. Date of publication
+4 December 2024; date of current version 11 December 2024. This article
+was recommended for publication by Associate Editor P.-C. Lin and Editor H.
+Moon upon evaluation of the reviewers’ comments. This work was supported
+by the Ministry of Trade, Industry & Energy (MOTIE, Korea) through the
+Technology Innovation Program under Grant 20018110, “Development of a
+wireless teleoperable relief robot for detecting searching and responding in
+narrow space”. (Corresponding author: Hyondong Oh.)
+Seunghwan Kim, Jaemin Seo, Hongro Jang, Changseung Kim, and Hyondong Oh are with the Department of Mechanical Engineering, Ulsan National
+Institute of Science and Technology (UNIST), Ulsan 44919, South Korea
+(e-mail: kevin6960@unist.ac.kr; qkek1019@unist.ac.kr; hlomk@unist.ac.kr;
+pon02124@unist.ac.kr; h.oh@unist.ac.kr).
+Murim Kim and Juhyun Pyo are with the Human-Centered Robotics Research
+and Development Division, Korea Institute of Robot Convergence (KIRO),
+Pohang 37553, South Korea (e-mail: mulimkim@kiro.re.kr; jhpyo@kiro.re.kr).
+This letter has supplementary downloadable material available at
+https://doi.org/10.1109/LRA.2024.3511375, provided by the authors.
+Digital Object Identifier 10.1109/LRA.2024.3511375
+
+response mechanisms to minimize their impact. Consequently,
+gas source localization (GSL) has emerged as a critical method
+for quickly identifying and addressing the sources of gas leaks,
+thereby reducing harm and enhancing public safety. However,
+since the hazardous gases are often invisible and dangerous for
+humans to detect directly, the studies of autonomous GSL with
+mobile sensors have been pursued [1], [2]. These autonomous
+GSL approaches show significant advantages, including extended detection range, flexible investigation, exploration capabilities, and cost efficiency.
+One of the most promising solutions for GSL using mobile
+sensors is the information-theoretic source search, which can be
+adapted to turbulent environments [2]. Unlike general object
+search problems, GSL uses a gas dispersion model that can
+explain the relationship between the measured gas concentrations and the source location. However, accurately estimating the
+source location and enabling the mobile sensor to make efficient
+decisions is challenging due to sensor noise and environmental
+uncertainties. Therefore, a combination of Bayesian inference
+for gas source location estimation and information theory-based
+search strategies has been proposed, with a notable example
+being Infotaxis [3]. These information-theoretic source searches
+have been validated in various settings, proving their efficiency
+in turbulent outdoor environments [4], [5], [6], [7], [8].
+However, unlike outdoor environments, since the application
+of GSL in indoor settings presents more challenges, it has only
+recently begun to attract research attention. In the indoor environments, gas dispersion becomes more complicated due to the
+presence of complex obstacles, which significantly affects the
+behavior of the gas dispersion compared to open outdoor spaces.
+This increased complexity makes it difficult to apply dispersion
+models traditionally used in outdoor GSL. Thus, one of the
+key challenges in indoor GSL is the development of analytical
+dispersion models that can effectively model gas dispersion
+considering indoor obstacles to be used for source parameter
+estimation. Approaches have been developed to approximate the
+likelihood function between gas measurements and gas source
+locations using a kernel density estimator based on a large
+amount of data [9], [10]. However, this methodology necessitates extensive preliminary work, including numerous iterations
+of simulations before it can be implemented. Other studies have
+employed the filament dispersion model to address the above
+issue [11], [12]. The filament dispersion model leverages indoor
+airflow estimated by computational fluid dynamics (CFD) or
+Gaussian Markov random fields (GMRF) [13] to simulate gas
+
+2377-3766 © 2024 IEEE. All rights reserved, including rights for text and data mining, and training of artificial intelligence and similar technologies.
+Personal use is permitted, but republication/redistribution requires IEEE permission. See https://www.ieee.org/publications/rights/index.html for more information.
+
+Authorized licensed use limited to: ULAKBIM UASL - Bogazici Universitesi. Downloaded on October 03,2025 at 08:45:29 UTC from IEEE Xplore. Restrictions apply.
+
+KIM et al.: GAS SOURCE LOCALIZATION IN UNKNOWN INDOOR ENVIRONMENTS USING DUAL-MODE INFORMATION-THEORETIC SEARCH
+
+dispersion. Importantly, the filament dispersion model reduces
+time and resources by eliminating the need for pre-simulation
+while still effectively predicting gas dispersion. Further research
+has utilized neural networks to model indoor gas dispersion
+for GSL. In [14], CNN-based methods have been employed to
+predict indoor gas dispersion, accounting for indoor obstacles,
+flow boundary conditions, and gas source locations. However,
+both the filament dispersion model and neural network-based
+methods are constrained by the requirement of a complete
+map of the indoor environment before implementing GSL. The
+additional indoor mapping task to obtain the complete indoor
+map could delay the GSL process, highlighting a significant
+challenge in the domain of GSL research in fully unknown
+indoor environments.
+Another significant challenge in indoor GSL is efficiently
+generating paths that are suited for complex indoor structures. To
+this end, rapidly-exploring random trees (RRT)-based methods
+have been widely utilized for generating paths that can avoid
+obstacles [7], [15]. However, for real-time operation, the expansion space of the RRT tree needs to be limited; this often
+results in tree branches failing to extend beyond a constrained
+space, leading to what are termed as dead ends. This limitation
+hinders the ability of RRT-based methods to effectively search
+for sources in complex indoor spaces.
+In this letter, we first propose an indoor Gaussian dispersion
+model (IGDM) to effectively model indoor gas dispersion, based
+on the assumption that there is no airflow in indoor environments.
+Most of the indoor environments are insulated from external
+airflow due to the surrounding external walls. Especially if we
+assume that there is no use of the air conditioning system, the
+airflow in an indoor environment could be considered negligible.
+The IGDM disregards airflow, enabling gas dispersion modeling
+even with the incomplete indoor map. We show that the IGDM
+can be a practical solution for GSL in unknown indoor environments, by demonstrating it within a GSL framework that operates alongside real-time (i.e., online) mapping. Furthermore, we
+employ a dual-mode planner to efficiently search the source in
+complex indoor environments. The proposed dual-mode planner generates search paths based on information theory with
+Bayesian inference, which consists of a local planner and a
+global planner. The local planner performs fine-grained search
+locally, generating collision-free and informative paths based on
+the RRT. The global planner, based on frontier exploration [16],
+guides the mobile sensor from dead ends to new information-rich
+search areas. The proposed planner has a similar structure to
+exploration algorithms, but the key difference is that both the
+local planner and the global planner make decisions based on
+mutual information about the source location. Additionally, we
+introduce a specialized dead end detection method for GSL
+to facilitate transitions between the local and global planners
+within the dual-mode planning framework. Lastly, to validate
+the effectiveness of the proposed approach, numerical simulations are conducted using the realistic gas dispersion simulator, GADEN [17]. Further validation is achieved through
+real-world experiments in an indoor environment with actual
+CO2 gas leakage scenarios. The sample result of the real-world
+experiments are depicted in Fig. 1. To our best knowledge, this
+is the first autonomous GSL experimental results in complex
+indoor environments including dead ends (e.g., rooms). The
+main contributions of this study are listed below:
+1) A new gas dispersion model is developed, which is simple
+but effective for unknown indoor environments;
+
+589
+
+Fig. 1. Sample result of autonomous GSL experiments. The proposed GSL
+framework operates with online mapping in unknown environments and generates search paths suitable for complex indoor environments using the proposed
+dual-mode planner.
+
+2) A dual-mode information-theoretic planner is introduced
+to generate efficient search paths in complex indoor environments and solve dead end issues effectively; and
+3) The practical applicability and reliability of the proposed
+approach is demonstrated through real-world experiments.
+II. GAS DISPERSION AND SENSOR MODELING
+To estimate the location of a gas source using gas sensor
+measurements, it is necessary to have a gas dispersion model that
+can represent the relationship between gas concentration and the
+source location, as well as a sensor model that can represent the
+relationship between gas sensor measurements and the actual gas
+concentration. The isotropic plume model [3] and the Gaussian
+dispersion model [6], both designed to analytically describe
+gas dispersion, are widely used in GSL research. Besides, the
+Gaussian sensor model [18] is used as the sensor model due
+to its advantage of being able to account for both gas sensor
+measurements and environmental uncertainties.
+A. Gas Dispersion Model
+A gas dispersion model is typically parameterized by the gas
+source location r0 = [x0 , y0 ]T , the release rate Q0 , the mean
+wind speed V , and the diffusion coefficient ζ. The set of these
+parameters is represented as θ.
+1) Isotropic Plume Model: In the isotropic plume model, an
+analytical model for gas dispersion in an open area, the mean gas
+concentration R(rk |θ) at a sensing location rk = [rx,k , ry,k ]T
+is expressed as:
+
+
+−rk − r0 
+Q0
+exp
+R (rk |θ) =
+rk − r0 
+λ
+
+
+− (ry,k − y0 ) V
+,
+(1)
+· exp
+2ζi
+
+Authorized licensed use limited to: ULAKBIM UASL - Bogazici Universitesi. Downloaded on October 03,2025 at 08:45:29 UTC from IEEE Xplore. Restrictions apply.
+
+590
+
+IEEE ROBOTICS AND AUTOMATION LETTERS, VOL. 10, NO. 1, JANUARY 2025
+
+
+where λ = ζi τ /(1 + V 2 τ /(4ζi )). In the isotropic plume
+model, the y direction aligns with the downwind direction, ζi
+represents the isotropic effective diffusion coefficient, and τ is
+the lifetime of the emitted gas particles.
+2) Gaussian Dispersion Model: The Gaussian dispersion
+model represents the dispersion of a gas from a point source
+in the downwind and crosswind directions. The mean gas concentration R(rk |θ) at a sensing location rk = [rx,k , ry,k ]T is
+expressed as:
+−ck 2
+Q0
+exp
+,
+(2)
+2πσV
+2σ 2
+where the x and y directions align with the downwind and
+crosswind directions, respectively. ck is the crosswind distance
+between the sensing point and the source origin. The standard
+deviation of concentration
+in the crosswind direction is defined
+√
+as σ = ζs dk / 1 + 0.0001dk , where dk is the downwind distance between the sensing point and the source origin and ζs is
+the stochastic diffusion coefficient.
+R (rk |θ) =
+
+the Gaussian dispersion model, Q0 is estimated along with the
+location. In the particle filter, the source parameter state to
+be estimated is defined as θ = [x0 , y0 , Q0 ]T ∈ R3 . Based on
+Bayes’ rule, the posterior probability density function (PDF)
+of the source parameters at time step k, p(θk |z1:k ) can be
+represented as:
+p (θk |z1:k ) = p (zk |θk ) p (θk |z1:k−1 ) /p (zk |z1:k−1 ) ,
+
+where p(θk |z1:k−1 ) is the prior PDF and p(zk |θk ) is the likelihood from the sensor model in (3). The collected measurement
+set up to the time step k is denoted as z1:k = {z1 , z2 , . . ., zk }.
+p(zk |z1:k−1 ) is the marginal likelihood, represented as:
+
+p (zk |z1:k−1 ) = p (zk |θk ) p (θk |z1:k−1 ) dθk .
+(5)
+Since obtaining the analytical solution of (4) is not feasible,
+p(θk |z1:k ) is approximated using random samples, referred to
+as particles. The i-th particle at the time step k is denoted as θki
+and wki is the corresponding weight. The posterior PDF is then
+approximated as:
+
+B. Gaussian Sensor Model
+To account for the uncertainty in a gas measurement zk , the
+gas sensor is modeled as the Gaussian distribution with the
+standard deviation σg,k , expressed as:
+p (zk |θ) =
+
+(z − R (rk |θ))
+1
+√ exp − k
+,
+2
+2σg,k
+σg,k 2π
+
+(3)
+
+where σg,k = α · R(rk |θ) + σenv . And σenv represents the additional noise by environmental conditions.
+III. INFORMATION-THEORETIC SOURCE SEARCH
+For robust source location estimation against the gas sensor
+noise, probabilistic estimation is required. In this work, the particle filter based on the Bayesian inference is utilized to estimate
+source parameters, addressing the non-Gaussian distribution of
+the source parameters and the non-linear sensor model. The
+performance of GSL using mobile sensors depends significantly
+on the strategic selection of sensing points. Such a selection is
+crucial not only for enhancing the accuracy of the estimated
+source location but also for optimizing the efficiency of search.
+In information-theoretic source search [3], [4], the next best
+sensing point is determined based on the mutual information.
+Here, the mutual information quantifies how much the uncertainty in the current estimation result can be decreased at the
+next sensing point. By selecting sensing points that maximize
+the mutual information, collecting new measurements, updating
+the estimation of the source location, and repeating this process,
+the location of the source is estimated efficiently and accurately.
+From the following, source parameter estimation and the computation of the mutual information are briefly explained; this
+will be the foundation of the proposed dual-mode planner in the
+next section.
+A. Source Parameter Estimation
+The Gaussian dispersion model can determine the source
+location from the gas concentration when the release rate Q0 ,
+the stochastic diffusion coefficient ζs , and wind speed V are
+provided. However, unlike ζs and V , Q0 is difficult to know
+beforehand. Therefore, in the source location estimation using
+
+(4)
+
+p (θk |z1:k ) ≈
+
+N
+
+
+
+
+wki δ θk − θki ,
+
+(6)
+
+i=1
+
+where δ(·) indicates the Dirac delta function and N is the total
+number of particles. The particle filter iteratively updates wki
+based on (4) when a new measurement is obtained. Since the
+marginal likelihood in (5) is a constant normalization factor,
+the i-th particle weight can be updated under the assumption of
+the Markov property and time-invariant source parameter (i.e.,
+i
+θk−1
+= θki ) [4] as:
+ i
+
+,
+(7)
+w̄ki = p zk |θki · wk−1
+where w̄ki is the unnormalized weight, p(zk |θki ) is calculated
+from (3), and the particles are sampled from p(θk |zk−1 ). Then,
+the weights are normalized as:
+wki = w̄ki /
+
+N
+
+
+w̄kj .
+
+(8)
+
+j=1
+
+To make more efficient use of samples representing the probability distribution of source parameters, the resampling method
+proposed in [19] is employed.
+B. Mutual Information
+The mutual information I is defined as the reduction of
+Shannon’s entropy Hk , represented as:
+I (rk+1 ) = Hk − E Ĥk+1 (ẑk+1 ) ,
+
+(9)
+
+where rk+1 is the sensing point for the next step and ẑk+1 is
+predicted sensor measurement at rk+1 . When approximating
+the posterior PDF with weights in the particle filter, entropy Hk
+can be represented as:
+Hk ≈ −
+
+N
+
+
+wki log(wki ).
+
+(10)
+
+i=1
+
+The second term of (9) is formulated as:
+
+E Ĥk+1 = p (ẑk+1 |θk ) Ĥk+1 (ẑk+1 ) dẑk+1 .
+
+(11)
+
+Authorized licensed use limited to: ULAKBIM UASL - Bogazici Universitesi. Downloaded on October 03,2025 at 08:45:29 UTC from IEEE Xplore. Restrictions apply.
+
+KIM et al.: GAS SOURCE LOCALIZATION IN UNKNOWN INDOOR ENVIRONMENTS USING DUAL-MODE INFORMATION-THEORETIC SEARCH
+
+591
+
+When approximating Ĥk+1 in the same manner as (10), (11)
+can be represented as:
+
+N
+
+i
+i
+ŵk+1
+log(ŵk+1
+)dẑk+1 ,
+E Ĥk+1 ≈ − p (ẑk+1 |θk )
+i=1
+
+(12)
+i
+where ŵk+1
+represents the weights updated according to (7) and
+(8) for future measurements ẑk+1 . Note that, since we do not
+know what future measurement will be obtained before actually
+moving to the corresponding next sensing point, we consider
+all possible new measurements with the likelihood p(ẑk+1 |θk )
+given the current source estimate in order to calculate the expected entropy. However, (12) is difficult to solve analytically
+due to the integral. Therefore, future measurements ẑk+1 are
+discretized as:
+
+Fig. 2. Comparison of gas concentration maps. (a) is a concentration map created by regressing 119 CO2 concentration values measured with the SEN15112
+gas sensor. (b) is a concentration map generated using the isotropic plume model
+and the Gaussian sensor model. (c) is a concentration map generated using the
+IGDM and the Gaussian sensor model.
+
+ˆmin
+ˆmax
+ˆ2
+ˆNd
+ˆ1
+d̂k+1 = dˆmin
+k+1 , dk+1 +δd, . . ., dk+1 = dk+1 , dk+1 , . . ., dk+1 . researched in the field of autonomous exploration [20], [21].
+(13) We restructure the dual-mode planner to be specialized for the
+max
+min
+ˆ
+ˆ
+Here, dk+1 and dk+1 represent the maximum and minimum GSL problem. The proposed dual-mode planner consists of a
+values of future measurements, respectively, and δd is the dis- local planner and a global planner. The local planner performs
+continuous search for the source, while the global planner repocretization interval. Ultimately, (9) is expressed as:
+sitions the mobile sensor to the information-rich area when the
+N
+local planner encounters the dead end. Additionally, to facilitate
+
+I (rk+1 ) ≈ −
+wki log(wki )
+effective transitions between the global and local planners, we
+i=1
+propose the dead end detection method specialized for the GSL
+problem.
+N
+N
+d
+
+
+ i 
+i
+. (14)
++
+p dˆjk+1 |θk
+ŵk+1
+log ŵk+1
+j=1
+i=1
+A. Indoor Gaussian Dispersion Model
+Since we use the Gaussian sensor model, the likelihood of the
+In this work, the IGDM is proposed to model the gas disdiscretized future measurements p(dˆjk+1 |θk ) can be expressed persion in the indoor environment without airflow. The original
+using the cumulative distribution function of the standard normal Gaussian dispersion model (2) differentiates the dispersion of
+distribution Φ(·) as:
+the gas into downwind and crosswind directions. However, in
+ j
+
+ j 
+situations without airflow, gas disperses isotropically, so in this
+N
+
+Δdˆk+1 + δd
+Δdˆk+1
+i
+letter, the Gaussian dispersion model is restructured into an
+p(dˆjk+1 |θk ) =
+,
+Φ
+−
+Φ
+w
+k
+i
+i
+σg,k+1
+σg,k+1
+isotropic form, represented as:
+i=1
+(15)
+
+
+where
+R (rk |θ) = Qm · exp −cobs (rk , r0 )2 / 2σm 2 ,
+(18)
+j
+j
+i
+ˆ
+ˆ
+Δdk+1 = dk+1 − R(rk+1 |θk ),
+(16)
+where σm is the standard deviation of concentration and Qm
+i
+i
+σg,k+1 = αR(rk+1 |θk ) + σenv .
+(17) represents the release rate in the IGDM. In the IGDM, the
+The method for calculating the mutual information based on the standard deviation of concentration is defined as a constant, and
+particle filter used in this letter is described in more detail in cobs (rk , r0 ) represents the distance between the sensing point
+and the source location in a two-dimensional space, leading
+[4], [7].
+to isotropic dispersion of the gas. To consider the influence of
+obstacles on the gas dispersion, cobs (rk , r0 ) is calculated using
+IV. DUAL-MODE INFORMATION-THEORETIC SEARCH WITH
+the Dijkstra’s algorithm in the occupancy grid map. While the
+INDOOR GAUSSIAN DISPERSION MODEL
+occupancy grid map can be incrementally built using online
+To develop a gas dispersion model applicable in unknown in- mapping, since the mobile sensor’s position changes at each time
+door environments, we assume the indoor setting with no airflow step, cobs needs to be recalculated every time step. However, by
+which is reasonable since most indoor environments are shielded modifying the termination condition of the Dijkstra’s algorithm
+from external winds by walls. By eliminating the influence of to check all grids in the map, the distance between all source
+airflow on indoor gas dispersion, the need for a complete map for location hypotheses (i.e., particle locations in the particle filter)
+modeling gas dispersion disappears. We modify the widely-used and the current mobile sensor can be computed with a single
+Gaussian dispersion model considering the effect of obstacles so execution of the Dijkstra’s algorithm. To verify if the IGDM can
+that it can be effectively used in indoor environments with online effectively model real indoor gas dispersion, gas concentration
+mapping. Besides, the complexity of indoor environments can data measured in an indoor space with an actual CO2 gas was
+lead to local optima during the source search process, referred compared with concentration maps reconstructed through the
+to as a dead end in this work. To address this dead end problem, IGDM as well as the isotropic plume model. This comparison
+we introduce a dual-mode planner, which has been actively is presented in Fig. 2.
+
+Authorized licensed use limited to: ULAKBIM UASL - Bogazici Universitesi. Downloaded on October 03,2025 at 08:45:29 UTC from IEEE Xplore. Restrictions apply.
+
+592
+
+IEEE ROBOTICS AND AUTOMATION LETTERS, VOL. 10, NO. 1, JANUARY 2025
+
+represented as:
+BI ∗ = max BI (Vb ) .
+Vb ∈V
+
+(20)
+
+The local planner is considered to have reached the dead end
+when this optimal branch information value falls below the dead
+end threshold BI thresh . Determining BI thresh in advance is
+challenging as it is not appropriate to classify every dead end
+in the indoor environment with a constant BI thresh . Therefore,
+BI thresh is designed to be updated at every time step, represented as:
+thresh
+= · BIkthresh + (1 − ) BI ∗ , 0 < < 1,
+BIk+1
+
+Fig. 3.
+
+Process of RH RRT-Infotaxis.
+
+B. Dual-Mode Planner
+1) Local Planner: The local planner is designed to incorporate the concept of the receding-horizon based RRTInfotaxis [7]. In this approach, the RRT tree is confined to
+Ntn vertices within a radius Rrange from the current mobile
+sensor location, as illustrated in Fig. 3(a). Vertices are sampled
+from the occupancy grid map to ensure they are free from
+collisions. Then, by the pruning process shown in Fig. 3(b),
+the tree only keeps the branches comprised of m vertices. These
+pruned branches, V = [V1 , V2 , . . ., VNb ], serve as potential action candidates. Each branch is formulated by a vertex set
+Vb = [vb,1 , vb,2 , . . .vb,m ]. Subsequently, as depicted in Fig. 3(c),
+the information of each branch is evaluated and the branch
+with the highest information is chosen. Finally, as illustrated
+in Fig. 3(d), the mobile sensor navigates to the first vertex of the
+selected branch. At the first vertex, a new gas concentration zk+1
+and LiDAR scans are measured, followed by the update of the
+particle filter and the construction of occupancy grid map. After
+the update with the obtained measurement, dead end detection
+is performed. If a dead-end is detected, the dual-mode planner
+switches to the global planner; otherwise, the process of the
+local planner is executed again. The branch information BI is
+designed to accumulate the mutual information of vertices in the
+branch, expressed as:
+BI (Vb ) =
+
+m
+
+
+γ (i−1) I (vb,i ) ,
+
+(19)
+
+i=1
+
+where γ is a discount factor designed to assign higher weights
+to information from the closer future. I(vb,i ) denotes the mutual
+information at vertex vb,i , calculated by (14).
+2) Dead End Detection: When the mobile sensor encounters
+a dead end, the dual-mode planner switches from the local
+planner to the global planner. The determination of the dead
+end is based on the optimal branch information value among the
+local planner branches. The optimal branch information BI ∗ is
+
+(21)
+
+where is a positive weight. Equation (21) functions similarly
+to a low-pass filter and thus BIkthresh trails the optimal branch
+information with a delay. When the optimal branch information
+decreases sharply (i.e., no useful information can be obtained),
+the optimal branch information becomes smaller than BIkthresh ,
+at which point the dual-mode planner transitions to the global
+planner.
+3) Global Planner: The global planner is based on the frontier exploration [16] to guide the mobile sensor towards areas
+rich in information. A frontier is a boundary between known and
+unknown areas, representing regions rich in new information.
+Path planning in the global planner is based on the probabilistic
+road map (PRM) [22] method to efficiently find the path to
+the frontier. For applying PRM to the frontier exploration, we
+modified PRM graph expansion so that the global graph can
+effectively represent frontiers. The expansion process of the
+global graph is as follows. Firstly, frontiers are detected using
+the breadth-first search in the occupancy grid map [23]. These
+detected frontiers are then clustered based on their continuity,
+with each cluster represented by a frontier centroid, which is the
+center point of each cluster. Subsequently, to expand the graph,
+new vertices are sampled and connected to adjacent vertices
+with edges, similar to the typical PRM. The key difference,
+however, is that every time a new vertex is added, those within
+a specified radius from the frontier centroid are designated as
+the frontier vertex vf,i . In the process of repeating new vertex
+sampling, if the vertex closer to the frontier centroid is added
+to the graph, the frontier vertex is updated to this new vertex.
+The expansion of the global graph continues until all frontier
+centroids are designated as frontier vertices. The sample of this
+global graph is represented in Fig. 4.
+When the global planner is activated by dead end detection,
+the utility of the frontier vertices is evaluated by a global utility
+function Ug , defined as:
+Ug (vf,i ) = I (vf,i ) · exp (−λp · cost (rk , vf,i ))
+· exp (−λs · D (vf,i , r̂0 )),
+
+(22)
+
+where cost(rk , vf,i ) is the path length from the current position
+to the frontier vertex found by Dijkstra’s algorithm in the global
+graph and D(vf,i , r̂0 ) is the Euclidean distance between the
+frontier node and the currently estimated gas source location r̂0 .
+Here, r̂0 refers to the location component of θ̂ = [r̂0 , Q̂0 ] where
+
+i i
+the currently estimated gas source parameter θ̂ = N
+i=1 wk θk
+represents the weighted sum of the particles in the particle filter.
+λp and λs are the weights for cost(rk , vf,i ) and D(vf,i , r̂0 ),
+respectively. The global utility function is designed to maximize
+the mutual information while minimizing the total exploration
+path. Once the frontier vertex with the highest global utility is
+
+Authorized licensed use limited to: ULAKBIM UASL - Bogazici Universitesi. Downloaded on October 03,2025 at 08:45:29 UTC from IEEE Xplore. Restrictions apply.
+
+KIM et al.: GAS SOURCE LOCALIZATION IN UNKNOWN INDOOR ENVIRONMENTS USING DUAL-MODE INFORMATION-THEORETIC SEARCH
+
+Fig. 4.
+
+Fig. 5.
+
+593
+
+Sample of the global graph.
+
+Fig. 6.
+
+Illustrative results of source search in the environment B.
+
+Fig. 7.
+
+Illustrative results of source search in the environment C.
+
+Illustrative results of source search in the environment A.
+
+selected, the mobile sensor moves along the global path generated by the Dijkstra’s algorithm in the global graph. During the
+execution of the global path, new gas concentrations and LiDAR
+scans are measured at each waypoint, followed by updates to the
+particle filter and the occupancy grid map. Here, waypoints are
+the vertices of the global graph that exist on the global path.
+If, at the next waypoint to be visited, the mutual information is
+evaluated to be more than 1.5 times of BIkthresh , the dual-mode
+planner reverts back to the local planner to continue the source
+search.
+V. EXPERIMENTAL VALIDATION
+A. Autonomous Source Search Simulation in GADEN
+The proposed method is validated in environments A, B
+and C, as shown in Figs. 5, 6, and 7, through the GADEN
+simulator [17], where the dispersion of ethanol gas is simulated.
+To utilize a more realistic map with the IGDM, the mobile
+sensor is configured as Clearpath robotics Jackal equipped with
+VLP-16 LiDAR in the GAZEBO environment. The occupancy
+grid map is constructed in real-time using the robot’s true
+odometry and LiDAR scan information. Gas concentration measurements are taken through a photoionization detector sensor
+implemented in GADEN. Path following for both local and
+global path is facilitated through the ROS Navigation stack
+package.
+The simulation results in the environments A, B and C are
+presented in Tables II, III, and IV, respectively. Each method
+in the tables was performed 20 times. The performance is
+
+TABLE I
+PARAMETERS SUMMARY
+
+quantified in terms of success rate (SR), search time (ST), travel
+distance (TD), and gas source location estimation error. The SR
+is defined as the proportion of success cases out of total trials.
+Success cases are defined as when the source location estimation
+error is within 2.0m and ST is within 200 steps. The ST is defined
+as the number of gas concentration measurements taken until the
+source search is finished. TD refers to the total distance traveled
+by the robot during the source search. ST, TD, and error represent
+the mean of 20 trials, and the numbers in parentheses indicate
+the standard deviation. The parameters used in the environments
+A, B, and C are presented in Table I.
+In the environment A, the results of source search using the
+local planner, the global planner, frontier exploration, and the
+proposed dual-mode planner are compared. The results from
+the environment A are presented in Table II where RRT 4-step,
+RRT 6-step, and RRT 8-step refer to the use of only the local
+planner with the receding horizon steps set to 4, 6, and 8,
+respectively. Frontier exploration is conducted by moving to the
+
+Authorized licensed use limited to: ULAKBIM UASL - Bogazici Universitesi. Downloaded on October 03,2025 at 08:45:29 UTC from IEEE Xplore. Restrictions apply.
+
+594
+
+IEEE ROBOTICS AND AUTOMATION LETTERS, VOL. 10, NO. 1, JANUARY 2025
+
+TABLE II
+RESULTS IN THE ENVIRONMENT A
+
+TABLE III
+RESULTS OF THE DUAL-MODE PLANNER IN THE ENVIRONMENT B
+
+TABLE IV
+RESULTS OF THE DUAL-MODE PLANNER IN THE ENVIRONMENT C
+
+nearest frontier in the global graph. The global planner performs
+source search by moving to frontiers on the global graph similar
+to frontier exploration, but it selects the frontiers based on a
+global utility function in (22). The dual-mode planner utilizes a
+combination of the local planner with a receding horizon step
+of 4 and the global planner. To demonstrate the effectiveness
+of the proposed IGDM, the dual-mode planner-ISO using the
+isotropic plume model in (1) is simulated. On the other hand, all
+other methods use the IGDM. Note that the original Gaussian
+dispersion model in (2) cannot be used in no-wind conditions.
+The source declaration is made when the standard deviation of
+the source location component in the particle filter falls below
+a specific threshold σt , and the algorithm terminates along with
+it. Besides, in both the global planner and frontier exploration,
+even if the particle filter has not converged yet, the algorithm is
+terminated along with source declaration when the exploration
+of the environment is completed (i.e., no further frontiers are
+found). In Table II, the travel time is time taken to complete
+source search including the computation time.
+In the environment A, both the RRT 4-step and RRT 6-step
+show low success rates with the RRT 4-step showing 75%
+success rate and the RRT 6-step showing 80% success rate. All
+their failure cases resulting from inability to exit dead ends,
+leading to the source search not being completed within 200
+steps. Both frontier exploration and the global planner also
+show low success rates of 80% and 75%, respectively, with all
+failure cases occurring due to source location estimation errors
+exceeding 2.0 meters. The dual-mode planner-ISO also showed
+a significantly low success rate of 35%, with all failure cases
+occurring due to source location estimation errors exceeding 2.0
+meters; this results from the mismatch between the dispersion
+model and reality as shown in Fig. 2. In contrast, the RRT
+8-step and the dual-mode planner exhibited high success rates
+of 95% and 100%, respectively, outperforming other methods.
+The dual-mode planner shows a longer travel distance compared to the RRT 8-step, but the average travel time is nearly
+3 minutes shorter due to much lower computation time per
+step.
+
+Fig. 8.
+
+Setup for the real-world experiments.
+
+In the environment B, to demonstrate the robustness of the proposed dual-mode planner, simulations are conducted 20 times
+for gas sources at four different positions, as shown in Fig. 6.
+The results can be seen in Table III, showing a 100% SR for all
+four positions.
+Even though assuming an environment without the influx of
+strong airflow from outside might be valid, weak airflows can
+still exist indoors. To verify the applicability of the proposed
+method to the real world, simulations are conducted in the
+environment C, both without airflow and with weak airflow, as
+depicted in Fig. 7. The weak airflow environment is simulated
+for the steady-state flow with an inlet velocity of 0.1m/s. In weak
+airflow environments, σenv was set to 4.0ppm to enable robust
+source location estimation despite discrepancies between the
+model and actual dispersion. As seen in Table IV, although the
+proposed method displays a relatively lower success rate and
+longer search time in environments with weak airflow, it still
+maintains reasonable performance.
+B. Real-World Experiments
+In real-world experiments conducted in the environment
+shown in Fig. 8(b), a gas tank with its valve opened is used
+to release CO2 gas. The AgileX Limo UGV is utilized as the
+mobile sensor for the experiments. An Intel NUC with Intel
+i7-1165G7 CPU is used for the computation of the proposed
+method, along with a Livox-Mid360 LiDAR for environmental
+perception. For mobile sensor localization, one of LiDARinertial odometry algorithms, FAST-LIO2 [24], is used. The
+SEN15112 is employed as the gas sensor. The experiments are
+carried out 10 times, with the source search starting 3 minutes
+after the initiation of the CO2 leak to allow the CO2 gas to
+sufficiently disperse throughout the experimental space. In the
+algorithms, the gas measurement is obtained 5 seconds after the
+
+Authorized licensed use limited to: ULAKBIM UASL - Bogazici Universitesi. Downloaded on October 03,2025 at 08:45:29 UTC from IEEE Xplore. Restrictions apply.
+
+KIM et al.: GAS SOURCE LOCALIZATION IN UNKNOWN INDOOR ENVIRONMENTS USING DUAL-MODE INFORMATION-THEORETIC SEARCH
+
+TABLE V
+RESULTS OF REAL-WORLD EXPERIMENTS
+
+mobile sensor reaches the sensing point, taking into account
+the response and recovery time of the gas sensor. After each
+experiment, the CO2 gas was removed using the ventilation
+system before proceeding to the next experiment.
+The sample result of the source search process is shown in
+Fig. 1. As shown in Fig. 1(a), the dual-mode planner first generates a search path based on local RRT. As shown in Fig. 1(b),
+when encountering dead ends that cannot be overcome by the
+local planner, it switches to the global planner to move the mobile
+sensor from the dead end to an area rich in map information,
+thereby continuing source search. The real-world experimental
+results for the RRT 4-step, the global planner and the dual-mode
+planner are presented in Table V. Success cases are defined as
+when the source location estimation error is within 2.0m and ST
+is within 120 steps. The other parameters for the algorithms used
+in the experiment are the same as those shown in Table I, except
+for σenv of 3,000ppm and σt of 0.65m. As seen in the results of
+Table V, the proposed method shows a success rate of 90% with
+the smaller estimation error, significantly outperforming other
+methods. A movie clip showing simulations and experiments
+can be found at https://youtu.be/nJfTkX9naTU.
+VI. CONCLUSION AND FUTURE WORK
+In this study, we proposed the IGDM that, despite its simplicity, effectively models indoor gas dispersion. Additionally, we
+introduced the dual-mode planner that integrates the local planner focused on maximizing information acquisition, with the
+global planner that guides the mobile sensor to information-rich
+areas, particularly useful in dead end scenarios. The effectiveness of this method is validated through simulations using the
+GADEN simulator and real-world experiments, suggesting its
+applicability in actual indoor GSL tasks.
+However, a major limitation of our research lies in its applicability to indoor environments with strong airflows, presenting
+a significant challenge in the field of GSL. Finding a source
+in environments with strong airflows without prior information about the environment remains an unsolved problem. In
+future research, we aim to develop new approaches and models
+that consider these environments. Furthermore, as the size and
+complexity of indoor environments increase, the limitations of
+a single mobile sensor become evident. In such environments,
+expanding to a multi-agent system is crucial for efficient source
+search. Therefore, we are also aiming to extend our approach to
+a multi-agent system. Besides, the use of visual sensors along
+with gas sensors would be helpful to identify the possible source
+location. This effort is crucial in broadening the scope of GSL
+technology and enhancing the ability to detect and respond to
+gas leaks in indoor environments.
+REFERENCES
+[1] M. Hutchinson, H. Oh, and W.-H. Chen, “A review of source term estimation methods for atmospheric dispersion events using static or mobile
+sensors,” Inf. Fusion, vol. 91, pp. 83–100, 2017.
+
+595
+
+[2] X. Chen and J. Huang, “Odor source localization algorithms on mobile
+robots: A review and future outlook,” Robot. Auton. Syst., vol. 112,
+pp. 123–136, 2019.
+[3] M. Vergassola, E. Villermaux, and B. I. Shraiman, “‘Infotaxis’ as a strategy
+for searching without gradients,” Nature, vol. 445, no. 7126, pp. 406–409,
+2007.
+[4] B. Ristic, A. Skvortsov, and A. Gunatilaka, “A study of cognitive strategies
+for an autonomous search,” Inf. Fusion, vol. 28, pp. 1–9, 2016.
+[5] M. Hutchinson, H. Oh, and W.-H. Chen, “Entrotaxis as a strategy for
+autonomous search and source reconstruction in turbulent conditions,”
+Inf. Fusion, vol. 42, pp. 179–189, 2018.
+[6] M. Hutchinson, C. Liu, and W.-H. Chen, “Source term estimation of a
+hazardous airborne release using an unmanned aerial vehicle,” J. Field
+Robot, vol. 36, no. 4, pp. 797–817, 2019.
+[7] S. An, M. Park, and H. Oh, “Receding-horizon RRT-Infotaxis for autonomous source search in urban environments,” Aerosp. Sci. Technol.,
+vol. 120, 2022, Art. no. 107276.
+[8] M. Park, S. An, J. Seo, and H. Oh, “Autonomous source search for UAVs
+using gaussian mixture model-based infotaxis: Algorithm and flight experiments,” IEEE Trans. Aerosp. Electron. Syst., vol. 57, no. 6, pp. 4238–4254,
+Dec. 2021.
+[9] Y. A. Prabowo, R. Ranasinghe, G. Dissanayake, B. Riyanto, and B.
+Yuliarto, “A Bayesian approach for gas source localization in large indoor environments,” in Proc. IEEE Int. Conf. Intell. Robots Syst., 2020,
+pp. 4432–4437.
+[10] Y. A. Prabowo, B. R. Trilaksono, E. M. Hidayat, and B. Yuliarto, “Integration of Bayesian inference and anemotaxis for robotics gas source
+localization in a large cluttered outdoor environment,” IEEE Access,
+vol. 11, pp. 22705–22713, 2023.
+[11] P. Ojeda, J. Monroy, and J. Gonzalez-Jimenez, “Robotic gas source localization with probabilistic mapping and online dispersion simulation,”
+IEEE Trans. Robot., vol. 40, pp. 3551–3564, 2024.
+[12] C. Sánchez-Garrido, J. G. Monroy, and J. G. Jiménez, “Probabilistic
+estimation of the gas source location in indoor environments by combining
+gas and wind observations,” in Proc. Appl. Intell. Syst., 2018, pp. 110–121.
+[13] J. G. Monroy, M. Jaimez, and J. Gonzalez-Jimenez, “Online estimation
+of 2D wind maps for olfactory robots,” in Proc. ISOCS/IEEE Int. Symp.
+Olfaction Electron. Nose, 2017, pp. 1–3.
+[14] W. Jin, F. Rahbar, C. Ercolani, and A. Martinoli, “Towards efficient gas
+leak detection in built environments: Data-driven plume modeling for
+gas sensing robots,” in Proc. IEEE Int. Conf. Robot. Automat., 2023,
+pp. 7749–7755.
+[15] C. Rhodes, C. Liu, P. Westoby, and W.-H. Chen, “Autonomous search of
+an airborne release in urban environments using informed tree planning,”
+Auton. Robots, vol. 47, no. 1, pp. 1–18, 2023.
+[16] B. Yamauchi, “A frontier-based approach for autonomous exploration,” in
+Proc. IEEE Int. Symp. Comput. Intell. Robot. Automat., 1997, pp. 146–151.
+[17] J. Monroy, V. Hernandez-Bennetts, H. Fan, A. Lilienthal, and J. GonzalezJimenez, “GADEN: A 3D gas dispersion simulator for mobile robot olfaction in realistic environments,” Sensors, vol. 17, no. 7, 2017, Art. no. 1479.
+[18] M. Hutchinson, C. Liu, and W.-H. Chen, “Information-based search for
+an atmospheric release using a mobile robot: Algorithm and experiments,” IEEE Trans. Control Syst. Technol., vol. 27, no. 6, pp. 2388–2402,
+Nov. 2019.
+[19] B. Ristic, S. Arulampalam, and N. Gordon, Beyond the Kalman Filter:
+Particle Filters for Tracking Applications. Norwood, MA, USA: Artech
+House, 2003.
+[20] T. Dang, F. Mascarich, S. Khattak, C. Papachristos, and K. Alexis,
+“Graph-based path planning for autonomous robotic exploration in subterranean environments,” in Proc. IEEE Int. Conf. Intell. Robots Syst., 2019,
+pp. 3105–3112.
+[21] H. Zhu, C. Cao, Y. Xia, S. Scherer, J. Zhang, and W. Wang, “DSVP: Dualstage viewpoint planner for rapid exploration by dynamic expansion,” in
+Proc. IEEE Int. Conf. Intell. Robots Syst., 2021, pp. 7623–7630.
+[22] L. E. Kavraki, P. Svestka, J.-C. Latombe, and M. H. Overmars, “Probabilistic roadmaps for path planning in high-dimensional configuration spaces,”
+IEEE Trans. Robot. Automat., vol. 12, no. 4, pp. 566–580, Aug. 1996.
+[23] M. Keidar and G. A. Kaminka, “Robot exploration with fast frontier
+detection: Theory and experiments,” in Proc. Int. Conf. Auton. Agents
+Multiagent Syst., 2012, pp. 113–120.
+[24] W. Xu, Y. Cai, D. He, J. Lin, and F. Zhang, “FAST-LIO2: Fast direct LiDAR-inertial odometry,” IEEE Trans. Robot., vol. 38, no. 4,
+pp. 2053–2073, Aug. 2022.
+
+Authorized licensed use limited to: ULAKBIM UASL - Bogazici Universitesi. Downloaded on October 03,2025 at 08:45:29 UTC from IEEE Xplore. Restrictions apply.
+
+

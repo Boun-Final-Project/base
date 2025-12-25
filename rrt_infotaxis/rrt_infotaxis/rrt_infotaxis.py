@@ -7,7 +7,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from nav2_msgs.action import NavigateToPose
 from .occupancy_grid import create_occupancy_map_from_service
-from .sensor_model import BinarySensorModel
+from .sensor_model import BinarySensorModel, DiscreteSensorModel
 # from .particle_filter import ParticleFilter
 from .particle_filter_optimized import ParticleFilterOptimized as ParticleFilter
 from .gaussian_plume import GaussianPlumeModel
@@ -15,6 +15,9 @@ from .rrt import RRT
 from .unit_conversion import GasUnitConverter
 from .text_visualizer import TextVisualizer
 import numpy as np
+import csv
+from datetime import datetime
+import os
 
 
 class RRTInfotaxisNode(Node):
@@ -27,11 +30,11 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('wind_direction', 0)  # 0°=+X, 90°=+Y, 180°=-X, 270°=-Y
         self.declare_parameter('wind_velocity', 0.1)
         self.declare_parameter('number_of_particles', 1000)
-        self.declare_parameter('n_tn', 30)
-        self.declare_parameter('delta', 0.5)
+        self.declare_parameter('n_tn', 50)
+        self.declare_parameter('delta', 0.7)
         self.declare_parameter('xy_goal_tolerance', 0.3)  # XY distance tolerance in meters
         self.declare_parameter('robot_radius', 0.35)  # Robot footprint radius for collision checking
-        self.declare_parameter('sigma_threshold', 0.35)  # Std dev threshold for estimation convergence (scaled for small map)
+        self.declare_parameter('sigma_threshold', 0.30)  # Std dev threshold for estimation convergence (scaled for small map)
         self.declare_parameter('success_distance', 0.5)  # Distance threshold for source localization success (meters)
         self.declare_parameter('zeta_1', 0.1)  # Gaussian dispersion parameter
         self.declare_parameter('zeta_2', 0.1)  # Gaussian dispersion parameter
@@ -47,6 +50,13 @@ class RRTInfotaxisNode(Node):
         self.goal_handle = None
         self.goal_position = None  # Store target goal position
         self.search_complete = False  # Flag to indicate if source search is finished
+
+        # Data logging for entropy tracking
+        self.step_count = 0
+        self.start_time = None
+        self.log_file = None
+        self.csv_writer = None
+        self._setup_data_logging()
 
         # Subscriptions
         self.pose_subscription = self.create_subscription(
@@ -97,11 +107,11 @@ class RRTInfotaxisNode(Node):
             zeta1=self.get_parameter('zeta_1').value,
             zeta2=self.get_parameter('zeta_2').value
         )
-        self.binary_sensor_model = BinarySensorModel()
+        self.sensor_model = BinarySensorModel()
         self.particle_filter = ParticleFilter(
             num_particles=self.get_parameter('number_of_particles').value,
-            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0, 1)},
-            binary_sensor_model=self.binary_sensor_model,
+            search_bounds={"x": (0, self.occupancy_map.real_world_width), "y": (0, self.occupancy_map.real_world_height), "Q": (0.001, 0.02)},
+            binary_sensor_model=self.sensor_model,
             dispersion_model=self.gaussian_plume_model
         )
         self.get_logger().info('Particle filter initialized')
@@ -121,6 +131,30 @@ class RRTInfotaxisNode(Node):
         # Timer for taking steps (start after all components are initialized)
         self.timer = self.create_timer(0.1, self.take_step)
         self.get_logger().info('Node initialized successfully, starting measure-plan-move loop')
+
+    def _setup_data_logging(self):
+        """Setup CSV file for logging entropy and other metrics."""
+        # Create logs directory if it doesn't exist
+        log_dir = os.path.expanduser('~/rrt_infotaxis_logs')
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Create log file with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_filename = os.path.join(log_dir, f'entropy_log_{timestamp}.csv')
+
+        self.log_file = open(log_filename, 'w', newline='')
+        self.csv_writer = csv.writer(self.log_file)
+
+        # Write header
+        self.csv_writer.writerow([
+            'step', 'elapsed_time', 'entropy', 'std_dev_x', 'std_dev_y', 'std_dev_Q',
+            'est_x', 'est_y', 'est_Q', 'sensor_value', 'binary_value', 'threshold',
+            'num_branches', 'best_utility', 'J1_entropy_gain', 'J2_travel_cost'
+        ])
+        self.log_file.flush()
+
+        self.get_logger().info(f'Data logging to: {log_filename}')
+        self.start_time = self.get_clock().now()
 
     def pose_callback(self, msg):
         """Callback for robot pose updates."""
@@ -420,9 +454,9 @@ class RRTInfotaxisNode(Node):
 
         # Initialize sensor threshold with first measurement
         if not self.sensor_initialized:
-            self.binary_sensor_model.initialize_threshold(self.ppm_converter.ppm_to_ug_m3(self.sensor_raw_value))
+            self.sensor_model.initialize_threshold(self.ppm_converter.ppm_to_ug_m3(self.sensor_raw_value))
             self.sensor_initialized = True
-            self.get_logger().info(f'Sensor initialized with threshold based on measurement: {self.sensor_raw_value}')
+            self.get_logger().info(f'Binary sensor initialized with threshold: {self.sensor_model.threshold:.2f} μg/m³ ({self.sensor_raw_value:.4f} ppm)')
             return
 
         # Check if robot is currently moving to a goal
@@ -448,11 +482,11 @@ class RRTInfotaxisNode(Node):
         current_measurement_ppm = self.sensor_raw_value
         current_measurement = self.ppm_converter.ppm_to_ug_m3(current_measurement_ppm)
 
-        # Update threshold first (Eq. 27), then compute binary measurement
-        self.binary_sensor_model.update_threshold(current_measurement)
-        binary_measurement = self.binary_sensor_model.get_binary_measurement(current_measurement)
+        # Update threshold adaptively, then compute binary measurement
+        self.sensor_model.update_threshold(current_measurement)
+        binary_measurement = self.sensor_model.get_binary_measurement(current_measurement)
 
-        self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement}, Binary: {binary_measurement}')
+        self.get_logger().info(f'[MEASURE] Sensor reading: {current_measurement:.0f} μg/m³, Binary: {binary_measurement}, Threshold: {self.sensor_model.threshold:.2f} μg/m³')
         self.particle_filter.update(binary_measurement, self.current_position)
 
         # Estimate source location
@@ -473,7 +507,10 @@ class RRTInfotaxisNode(Node):
         self.visualize_estimated_source(est_x, est_y)
         self.visualize_current_position(self.current_position)
 
-        # Visualize text info box with branch information
+        # Get entropy for logging and visualization
+        current_entropy = self.particle_filter.get_entropy()
+
+        # Visualize text info box with branch information and entropy
         current_stds = self.particle_filter.get_estimate()[1]
         sigma_p = max(current_stds["x"], current_stds["y"])
         self.text_visualizer.publish_source_info(
@@ -485,14 +522,38 @@ class RRTInfotaxisNode(Node):
             search_complete=self.search_complete,
             sensor_value=current_measurement,
             binary_value=binary_measurement,
-            threshold=self.binary_sensor_model.threshold,
+            threshold=self.sensor_model.threshold if self.sensor_model.threshold is not None else 0,
             # Branch Information (BI) for debugging
             num_branches=debug_info["num_branches"],
             best_utility=debug_info["best_utility"],
             best_entropy_gain=debug_info["best_entropy_gain"],
             best_travel_cost=debug_info["best_travel_cost"],
-            num_tree_nodes=debug_info["num_tree_nodes"]
+            num_tree_nodes=debug_info["num_tree_nodes"],
+            entropy=current_entropy
         )
+
+        # Log data to CSV
+        elapsed_time = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
+        self.csv_writer.writerow([
+            self.step_count,
+            f'{elapsed_time:.2f}',
+            f'{current_entropy:.4f}',
+            f'{current_stds["x"]:.4f}',
+            f'{current_stds["y"]:.4f}',
+            f'{current_stds["Q"]:.4f}',
+            f'{est_x:.4f}',
+            f'{est_y:.4f}',
+            f'{est_Q:.4f}',
+            f'{current_measurement:.4f}',
+            binary_measurement,
+            f'{self.sensor_model.threshold:.4f}' if self.sensor_model.threshold is not None else '0.0',
+            debug_info["num_branches"],
+            f'{debug_info["best_utility"]:.4f}',
+            f'{debug_info["best_entropy_gain"]:.4f}',
+            f'{debug_info["best_travel_cost"]:.4f}'
+        ])
+        self.log_file.flush()
+        self.step_count += 1
 
         self.get_logger().info(f'[PLAN] Next position: {next_pos}, Estimated source: ({est_x:.2f}, {est_y:.2f}, {est_Q:.2f})')
 
@@ -519,6 +580,12 @@ class RRTInfotaxisNode(Node):
         # 3. MOVE: Send goal to Nav2
         self.get_logger().info(f'[MOVE] Sending navigation goal to ({next_pos[0]:.2f}, {next_pos[1]:.2f})')
         self.send_nav_goal(next_pos[0], next_pos[1])
+
+    def __del__(self):
+        """Cleanup: Close log file when node is destroyed."""
+        if self.log_file is not None:
+            self.log_file.close()
+            self.get_logger().info('Closed entropy log file')
 def main(args=None):
     """Main function."""
     rclpy.init(args=args)

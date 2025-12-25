@@ -28,7 +28,7 @@ class TextVisualizer:
     def publish_source_info(self, timestamp, predicted_x, predicted_y, predicted_z,
                            std_dev, search_complete, sensor_value, binary_value, threshold,
                            num_branches=0, best_utility=0.0, best_entropy_gain=0.0,
-                           best_travel_cost=0.0, num_tree_nodes=0):
+                           best_travel_cost=0.0, num_tree_nodes=0, entropy=0.0):
         """
         Publish source estimation information as text in RViz with white background.
 
@@ -47,6 +47,7 @@ class TextVisualizer:
             best_entropy_gain: Best entropy gain (J1)
             best_travel_cost: Best travel cost (J2)
             num_tree_nodes: Total number of nodes in RRT tree
+            entropy: Shannon entropy of particle distribution
         """
         marker_array = MarkerArray()
 
@@ -65,10 +66,10 @@ class TextVisualizer:
         background.pose.position.z = self.position_z
         background.pose.orientation.w = 1.0
 
-        # Background box size (expanded for branch info)
+        # Background box size (expanded for branch info and entropy)
         background.scale.x = 2.2  # Width (wider for longer text)
         background.scale.y = 0.05  # Depth (thin)
-        background.scale.z = 2.6  # Height (taller to fit branch info)
+        background.scale.z = 2.8  # Height (taller to fit all info)
 
         # White color with some transparency
         background.color.r = 1.0
@@ -91,7 +92,7 @@ class TextVisualizer:
         text.pose.position.z = self.position_z
         text.pose.orientation.w = 1.0
 
-        # Build text content with branch information
+        # Build text content with branch information and entropy
         status = "COMPLETE" if search_complete else "SEARCHING"
         text.text = (
             f"Predicted Source:\n"
@@ -99,6 +100,7 @@ class TextVisualizer:
             f"  y: {predicted_y:.2f} m\n"
             f"  z: {predicted_z:.2f} m\n"
             f"Std Dev: {std_dev:.3f}\n"
+            f"Entropy: {entropy:.3f}\n"
             f"Sensor: {sensor_value:.2f}\n"
             f"Binary: {binary_value}\n"
             f"Threshold: {threshold:.2f}\n"
