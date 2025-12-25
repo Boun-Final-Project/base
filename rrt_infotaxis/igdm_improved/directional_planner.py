@@ -65,6 +65,12 @@ class DirectionalPlanner:
         self.visited_positions = visited_positions if visited_positions is not None else []
         self.current_step = current_step
         self.penalty_radius = penalty_radius
+
+        # Penalty parameters
+        self.MAX_PENALTY_STEPS = 5
+        self.INITIAL_PENALTY = 32
+        self.PENALTY_DECAY_RATE = 2.0
+
         self.paths = []
         self.all_nodes = []  # For visualization (all nodes from all paths)
 
@@ -259,13 +265,12 @@ class DirectionalPlanner:
             for visited_pos, visited_step in self.visited_positions:
                 steps_since_visit = self.current_step - visited_step
 
-                # Time-dependent penalty for visits 1-5 steps ago
-                if steps_since_visit in [1, 2, 3, 4, 5]:
+                # Time-dependent penalty for visits within MAX_PENALTY_STEPS
+                if 1 <= steps_since_visit <= self.MAX_PENALTY_STEPS:
                     dist_to_visited = np.linalg.norm(next_step_pos - np.array(visited_pos))
                     if dist_to_visited < self.penalty_radius:
-                        # Calculate exponential penalty: 1 / 2^(6 - steps_since_visit)
-                        exponent = 6 - steps_since_visit
-                        penalty_factor = 1.0 / (2 ** exponent)
+                        # Calculate penalty using decay rate
+                        penalty_factor = 1.0 / (self.INITIAL_PENALTY / (self.PENALTY_DECAY_RATE ** (steps_since_visit - 1)))
                         steps_since = steps_since_visit
                         penalty_info = {
                             'visited_pos': visited_pos,

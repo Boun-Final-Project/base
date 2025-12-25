@@ -111,7 +111,7 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
         self.room_height = 25.0
-        self.resolution = 0.1
+        self.resolution = 0.25
 
         self.true_source = (2.5, 22.5)
         self.true_Q = 1.0
@@ -413,7 +413,8 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
                 occupancy_grid=self.grid,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
             self.search_complete = True
             return False
@@ -455,7 +456,8 @@ class AdaptiveRRTInfotaxisIGDMDiscreteLargeMap:
             rrt_pruned_paths=rrt_pruned_paths,
             sensor_reading=measurement,
             threshold_bins=self.sensor.level_thresholds,
-            digital_value=discrete_measurement
+            digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
         )
 
         # Find the best index

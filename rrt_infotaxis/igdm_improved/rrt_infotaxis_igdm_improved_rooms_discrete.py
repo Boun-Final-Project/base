@@ -103,7 +103,7 @@ class RRTInfotaxisIGDMRoomsDiscrete:
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
         self.room_height = 25.0
-        self.resolution = 0.1
+        self.resolution = 0.25
 
         self.true_source = (5.0, 20.0)
         self.true_Q = 1.0
@@ -171,8 +171,8 @@ class RRTInfotaxisIGDMRoomsDiscrete:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to week-10
-        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10/igdm_improved_rooms_discrete_steps")
+        # Visualization - save to results folder
+        viz_dir = Path(__file__).parent / "results" / "igdm_improved_rooms_discrete_steps"
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -347,7 +347,8 @@ class RRTInfotaxisIGDMRoomsDiscrete:
                 rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+                penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
 
             self.search_complete = True
@@ -376,7 +377,8 @@ class RRTInfotaxisIGDMRoomsDiscrete:
                 rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+                penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
 
             self.search_complete = True
@@ -428,7 +430,8 @@ class RRTInfotaxisIGDMRoomsDiscrete:
             rrt_pruned_paths=rrt_pruned_paths,
             sensor_reading=measurement,
             threshold_bins=self.sensor.level_thresholds,
-            digital_value=discrete_measurement
+            digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
         )
 
         # Log all path evaluations with details
@@ -650,7 +653,7 @@ class RRTInfotaxisIGDMRoomsDiscrete:
 
 if __name__ == "__main__":
     # Setup logging
-    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-10")
+    log_dir = Path(__file__).parent / "results"
     log_file = log_dir / "rrt_infotaxis_igdm_improved_rooms_discrete.log"
     logger = setup_logging(str(log_file))
 

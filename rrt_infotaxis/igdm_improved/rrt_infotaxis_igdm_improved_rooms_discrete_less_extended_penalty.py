@@ -1,5 +1,11 @@
 """
 Standalone RRT-Infotaxis with IGDM (Indoor Gaussian Dispersion Model) with Multiple Rooms.
+Uses 5-level DISCRETE SENSOR instead of binary sensor.
+EXTENDED PENALTY VERSION: 10-step penalty window with geometric decay (divide by 1.2 each step).
+
+Updated RRT with:
+- 4 guaranteed initial nodes (forward, behind, right, left) for better directional coverage
+- Improved pruning that preserves shallow branches and prunes deep branches to max_depth
 
 Implements the complete measure-plan-move loop from the paper with an exploration penalty
 to discourage revisiting recent areas.
@@ -9,15 +15,6 @@ Algorithm:
 2. PLAN: Build RRT, evaluate paths with entropy gain vs travel cost, apply exploration penalty
 3. MOVE: Navigate to next position
 4. Check: If estimation converged, stop
-
-Exploration Penalty (time-dependent):
-- 1 step since visit: Divide info gain by 2^5 = 32
-- 2 steps since visit: Divide info gain by 2^4 = 16
-- 3 steps since visit: Divide info gain by 2^3 = 8
-- 4 steps since visit: Divide info gain by 2^2 = 4
-- 5 steps since visit: Divide info gain by 2^1 = 2
-- For nodes within 1m radius of visited positions
-- Encourages exploration of new areas rather than revisiting recent locations
 
 Building Layout:
 - 25x25 meter map with 3 fully enclosed rooms connected by a central hallway
@@ -29,6 +26,17 @@ Building Layout:
 - Gas source at (5.0, 20.0) inside Room 1 with Q=1.0
 - Robot starts at (12.5, 12.5) in the central hallway
 - IGDM uses Dijkstra distance (obstacle-aware)
+
+Discrete Sensor Levels:
+- Level 0: Very Low (C < threshold[0])
+- Level 1: Low (threshold[0] <= C < threshold[1])
+- Level 2: Medium (threshold[1] <= C < threshold[2])
+- Level 3: High (threshold[2] <= C < threshold[3])
+- Level 4: Very High (C >= threshold[3])
+
+Utility Function:
+- utility = J1 * 0.5 - J2 * 0.5
+- J1 (information gain) and J2 (travel cost) contribute equally
 """
 
 import numpy as np
@@ -45,10 +53,10 @@ warnings.filterwarnings('ignore', category=UserWarning)
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 
 from igdm_model import IGDMModel
-from sensor_model import BinarySensorModel
+from sensor_model_discrete import DiscreteSensorModel
 from particle_filter import ParticleFilter
 from occupancy_grid import OccupancyGrid
-from rrt import RRTInfotaxis
+from rrt_less_extended_penalty import RRTInfotaxis
 from visualizer import StepVisualizer
 
 
@@ -80,8 +88,8 @@ def setup_logging(log_file):
     return logger
 
 
-class RRTInfotaxisIGDMRooms:
-    """Standalone RRT-Infotaxis with IGDM for multi-room building."""
+class RRTInfotaxisIGDMRoomsDiscreteExtendedPenalty:
+    """Standalone RRT-Infotaxis with IGDM and 5-level discrete sensor for multi-room building (Extended Penalty)."""
 
     def __init__(self, sigma_m=1.0, logger=None):
         """
@@ -141,17 +149,18 @@ class RRTInfotaxisIGDMRooms:
         # This ensures measurements change significantly at same locations, providing
         # information for the particle filter to converge
         self.igdm = IGDMModel(sigma_m=sigma_m, occupancy_grid=self.grid, dispersion_rate=3.00)
-        self.sensor = BinarySensorModel()
+        self.sensor = DiscreteSensorModel()
 
         self.particle_filter = ParticleFilter(
-            num_particles=200,  # Reduced for faster computation
+            num_particles=400,
             search_bounds={'x': (0, self.room_width), 'y': (0, self.room_height), 'Q': (0, 2.0)},
             binary_sensor_model=self.sensor,
-            dispersion_model=self.igdm
+            dispersion_model=self.igdm,
+            resample_threshold=0.42
         )
 
         self.rrt = RRTInfotaxis(self.grid, N_tn=20, R_range=8, delta=1.0, max_depth=2,
-                      discount_factor=0.8, positive_weight=0.5, penalty_radius=0.50)
+                      discount_factor=0.8, positive_weight=0.60, penalty_radius=0.50)
 
         self.robot_pos = self.robot_start
         self.trajectory = [self.robot_pos]
@@ -162,8 +171,8 @@ class RRTInfotaxisIGDMRooms:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to results folder
-        viz_dir = Path(__file__).parent / "results" / "igdm_improved_rooms_steps"
+        # Visualization - save to updated_penalty_results folder
+        viz_dir = Path(__file__).parent / "updated_penalty_results" / "igdm_improved_rooms_discrete_less_extended_penalty_steps"
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -212,11 +221,10 @@ class RRTInfotaxisIGDMRooms:
 
                 if penalty_info:
                     steps_since = self.current_step - penalty_info.get('visited_step', 0)
-                    penalty_exponent = 6 - steps_since
-                    penalty_divisor = 2 ** penalty_exponent
+                    penalty_divisor = self.rrt.INITIAL_PENALTY / (self.rrt.PENALTY_DECAY_RATE ** (steps_since - 1))
                     distance = penalty_info.get('distance', 0)
 
-                    self.log(f"[PLAN]         → Original J1={I_gain_original:.4f} → Penalized={I_gain_penalized:.4f} (divisor: 2^{penalty_exponent} = {penalty_divisor}x)")
+                    self.log(f"[PLAN]         → Original J1={I_gain_original:.4f} → Penalized={I_gain_penalized:.4f} (divisor: {self.rrt.INITIAL_PENALTY}/({self.rrt.PENALTY_DECAY_RATE}^{steps_since-1}) = {penalty_divisor:.2f}x)")
                     self.log(f"[PLAN]         → Distance to visited: {distance:.3f}m, {steps_since} steps since visit")
 
         self.log(f"[PLAN] ═══════════════════════════════════════════════════════════════")
@@ -285,12 +293,14 @@ class RRTInfotaxisIGDMRooms:
         # Update threshold (Eq. 27): only increases if measurement > current threshold
         self.sensor.update_threshold(measurement)
 
-        # Convert to binary measurement
-        binary_measurement = self.sensor.get_binary_measurement(measurement)
-        self.log(f"[MEASURE] Binary measurement: {binary_measurement}")
+        # Convert to discrete measurement (5 levels: 0-4)
+        discrete_measurement = self.sensor.get_discrete_measurement(measurement)
+        level_names = ["Very Low (0)", "Low (1)", "Medium (2)", "High (3)", "Very High (4)"]
+        self.log(f"[MEASURE] Discrete measurement: {discrete_measurement} ({level_names[discrete_measurement]})")
+        self.log(f"[MEASURE] Level thresholds: {[f'{t:.4f}' for t in self.sensor.level_thresholds]}")
 
-        # Update particle filter with BINARY measurement
-        self.particle_filter.update(binary_measurement, self.robot_pos, time_step=step_num)
+        # Update particle filter with DISCRETE measurement
+        self.particle_filter.update(discrete_measurement, self.robot_pos, time_step=step_num)
 
         # Debug: Check effective sample size and weight variance
         N_eff = self.particle_filter._effective_sample_size()
@@ -334,8 +344,11 @@ class RRTInfotaxisIGDMRooms:
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
                 rrt_nodes=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement,
             penalty_step_count=self.rrt.MAX_PENALTY_STEPS
-            )
+)
 
             self.search_complete = True
             return False
@@ -361,23 +374,26 @@ class RRTInfotaxisIGDMRooms:
                 d_success_thr=self.d_success_thr,
                 occupancy_grid=self.grid,
                 rrt_nodes=None,
+                sensor_reading=measurement,
+                threshold_bins=self.sensor.level_thresholds,
+                digital_value=discrete_measurement,
             penalty_step_count=self.rrt.MAX_PENALTY_STEPS
-            )
+)
 
             self.search_complete = True
             return False
 
         # ==== PLAN PHASE (before visualization for RRT drawing) ====
-        self.log(f"[PLAN] Building RRT with exploration penalty...")
+        self.log(f"[PLAN] Building RRT with EXTENDED exploration penalty (10-step window, 1.2x decay)...")
         # Update RRT with visited positions and current step for exploration penalty
         self.rrt.visited_positions = self.trajectory_with_steps
         self.rrt.current_step = step_num
 
         # Debug: Show recent visited positions
-        self.log(f"[PLAN] Recent visited positions (for penalty window):")
-        for pos, step in self.trajectory_with_steps[-5:]:
+        self.log(f"[PLAN] Recent visited positions (for extended 10-step penalty window):")
+        for pos, step in self.trajectory_with_steps[-10:]:
             steps_ago = step_num - step
-            if steps_ago >= 0 and steps_ago <= 5:
+            if steps_ago >= 0:
                 self.log(f"[PLAN]   Step {step}: ({pos[0]:.2f}, {pos[1]:.2f}) - {steps_ago} step{'s' if steps_ago != 1 else ''} ago")
 
         debug_info = self.rrt.get_next_move_debug(self.robot_pos, self.particle_filter)
@@ -411,8 +427,11 @@ class RRTInfotaxisIGDMRooms:
             occupancy_grid=self.grid,
             rrt_nodes=rrt_nodes,
             rrt_pruned_paths=rrt_pruned_paths,
+            sensor_reading=measurement,
+            threshold_bins=self.sensor.level_thresholds,
+            digital_value=discrete_measurement,
             penalty_step_count=self.rrt.MAX_PENALTY_STEPS
-        )
+)
 
         # Log all path evaluations with details
         self.log_all_path_evaluations(debug_info, best_idx)
@@ -436,8 +455,7 @@ class RRTInfotaxisIGDMRooms:
             normalized = debug_info['best_information_gain']
             penalty_info = debug_info['best_penalty_info']
             steps_since = self.current_step - penalty_info['visited_step']
-            penalty_exponent = 6 - steps_since
-            penalty_divisor = 2 ** penalty_exponent
+            penalty_divisor = self.rrt.INITIAL_PENALTY / (self.rrt.PENALTY_DECAY_RATE ** (steps_since - 1))
             visited_pos = penalty_info['visited_pos']
             visited_step = penalty_info['visited_step']
             distance = penalty_info['distance']
@@ -449,7 +467,7 @@ class RRTInfotaxisIGDMRooms:
                 self.log(f"[PLAN]    Visited position: ({visited_pos[0]:.2f}, {visited_pos[1]:.2f}) at step {visited_step}")
                 self.log(f"[PLAN]    Distance to visited node: {distance:.3f}m (threshold: 1.0m)")
                 self.log(f"[PLAN]    Original J1: {original:.4f} → Penalized: {penalized:.4f} → Normalized: {normalized:.4f}")
-                self.log(f"[PLAN]    Information gain reduced by {penalty_reduction:.1f}% (2^{penalty_exponent} = {penalty_divisor}x divisor)")
+                self.log(f"[PLAN]    Information gain reduced by {penalty_reduction:.1f}% (divisor: 8/(1.2^{steps_since-1}) = {penalty_divisor:.2f}x)")
             else:
                 penalty_factor_inverse = 1 / debug_info['best_penalty_factor']
                 penalty_increase = (penalty_factor_inverse - 1) * 100
@@ -458,7 +476,7 @@ class RRTInfotaxisIGDMRooms:
                 self.log(f"[PLAN]    Visited position: ({visited_pos[0]:.2f}, {visited_pos[1]:.2f}) at step {visited_step}")
                 self.log(f"[PLAN]    Distance to visited node: {distance:.3f}m (threshold: 1.0m)")
                 self.log(f"[PLAN]    Original J1: {original:.4f} → Penalized: {penalized:.4f} → Normalized: {normalized:.4f}")
-                self.log(f"[PLAN]    Information gain made worse by {penalty_increase:.1f}% (2^{penalty_exponent} = {penalty_divisor}x amplification)")
+                self.log(f"[PLAN]    Information gain made worse by {penalty_increase:.1f}% (divisor: 8/(1.2^{steps_since-1}) = {penalty_divisor:.2f}x)")
         else:
             self.log(f"[PLAN] No penalty applied (exploring new areas)")
 
@@ -471,9 +489,10 @@ class RRTInfotaxisIGDMRooms:
         return True
 
     def run(self):
-        """Run the full RRT-Infotaxis algorithm."""
+        """Run the full RRT-Infotaxis algorithm with discrete sensor."""
         self.log("=" * 70)
-        self.log("RRT-INFOTAXIS WITH IGDM + EXPLORATION PENALTY (Multi-Room Building)")
+        self.log("RRT-INFOTAXIS WITH IGDM + DISCRETE SENSOR + EXTENDED PENALTY")
+        self.log("(Multi-Room Building - 10-step penalty window with 1.2x decay)")
         self.log("=" * 70)
         self.log(f"Environment: {self.room_width}m × {self.room_height}m (with multiple fully enclosed rooms)")
         self.log(f"Room 1 (top-left): x∈[0,10], y∈[15,25] with door at y∈[19,21]")
@@ -485,10 +504,7 @@ class RRTInfotaxisIGDMRooms:
         self.log(f"Robot start: {self.robot_start} in central hallway")
         self.log(f"Algorithm parameters:")
         self.log(f"  - IGDM sigma_m: {self.sigma_m}m (Dijkstra distance, obstacle-aware)")
-        self.log(f"  - Sensor: Binary (0/1 measurement)")
         self.log(f"  - Utility weights: J1 (information gain) = 0.5, J2 (travel cost) = 0.5 (normalized, equal contribution)")
-        self.log(f"  - Exploration penalty (time-dependent): 2^(6-steps_since_visit) divisor for visited positions")
-        self.log(f"    * 1 step ago: ÷32  | 2 steps: ÷16  | 3 steps: ÷8  | 4 steps: ÷4  | 5 steps: ÷2")
         self.log(f"  - Success distance threshold: {self.d_success_thr}m")
         self.log(f"  - Max steps: {self.max_steps}")
         self.log("=" * 70)
@@ -502,7 +518,7 @@ class RRTInfotaxisIGDMRooms:
         self.log(f"Test completed after {len(self.trajectory)-1} steps")
         self.log(f"{'='*70}")
 
-    def visualize_final(self, filename='rrt_infotaxis_igdm_improved_rooms_result.png'):
+    def visualize_final(self, filename='rrt_infotaxis_igdm_improved_rooms_discrete_less_extended_penalty_result.png'):
         """Create final summary plot.
 
         Parameters:
@@ -517,7 +533,7 @@ class RRTInfotaxisIGDMRooms:
         ax1.set_xlim(0, self.room_width)
         ax1.set_ylim(0, self.room_height)
         ax1.set_aspect('equal')
-        ax1.set_title('RRT-Infotaxis Trajectory (IGDM + Exploration Penalty, Multi-Room)', fontsize=12, fontweight='bold')
+        ax1.set_title('RRT-Infotaxis Trajectory (IGDM + Discrete Sensor + Extended Penalty)', fontsize=12, fontweight='bold')
         ax1.set_xlabel('X (m)')
         ax1.set_ylabel('Y (m)')
 
@@ -612,14 +628,16 @@ class RRTInfotaxisIGDMRooms:
             final_error = np.sqrt((final_mean['x']-self.true_source[0])**2 + (final_mean['y']-self.true_source[1])**2)
             final_sigma = max(final_std['x'], final_std['y'])
 
-            info_text = "RRT-INFOTAXIS RESULTS (MULTI-ROOM)\n"
+            info_text = "RRT-INFOTAXIS RESULTS (MULTI-ROOM + DISCRETE SENSOR + EXTENDED PENALTY)\n"
             info_text += "="*40 + "\n\n"
             info_text += f"Steps taken: {len(self.trajectory)-1}\n"
             info_text += f"Converged: {self.search_complete}\n\n"
             info_text += f"True source: ({self.true_source[0]:.2f}, {self.true_source[1]:.2f})\n"
             info_text += f"Estimated:  ({final_mean['x']:.2f}, {final_mean['y']:.2f})\n"
             info_text += f"Error: {final_error:.3f} m\n\n"
-            info_text += f"Success distance threshold: {self.d_success_thr:.3f} m\n"
+            info_text += f"Success distance threshold: {self.d_success_thr:.3f} m\n\n"
+            info_text += f"Penalty Window: 10 steps\n"
+            info_text += f"Decay Rate: 1.2x per step\n"
 
             ax4.text(0.05, 0.95, info_text, transform=ax4.transAxes, fontsize=11,
                     verticalalignment='top', fontfamily='monospace',
@@ -632,11 +650,12 @@ class RRTInfotaxisIGDMRooms:
 
 if __name__ == "__main__":
     # Setup logging
-    log_dir = Path(__file__).parent / "results"
-    log_file = log_dir / "rrt_infotaxis_igdm_improved_rooms.log"
+    log_dir = Path(__file__).parent / "updated_penalty_results"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "rrt_infotaxis_igdm_improved_rooms_discrete_less_extended_penalty.log"
     logger = setup_logging(str(log_file))
 
     # Run with default sigma_m=1.0
-    infotaxis = RRTInfotaxisIGDMRooms(sigma_m=1.0, logger=logger)
+    infotaxis = RRTInfotaxisIGDMRoomsDiscreteExtendedPenalty(sigma_m=1.0, logger=logger)
     infotaxis.run()
     infotaxis.visualize_final()

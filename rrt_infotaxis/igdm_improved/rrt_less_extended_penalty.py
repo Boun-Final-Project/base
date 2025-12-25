@@ -1,6 +1,6 @@
 """
 Rapidly-exploring Random Tree with Infotaxis (RRT-Infotaxis) for motion planning with information gain.
-Extended Penalty Version: 20-step penalty window with geometric decay (divide by 1.1 each step).
+Extended Penalty Version: 10-step penalty window with geometric decay (divide by 1.2 each step).
 """
 
 import numpy as np
@@ -69,10 +69,10 @@ class RRTInfotaxis:
         self.current_step = current_step
         self.penalty_radius = penalty_radius
 
-        # Extended penalty parameters
-        self.MAX_PENALTY_STEPS = 20
-        self.INITIAL_PENALTY = 32
-        self.PENALTY_DECAY_RATE = 1.1
+        # extended penalty parameters
+        self.MAX_PENALTY_STEPS  = 10
+        self.INITIAL_PENALTY    = 8
+        self.PENALTY_DECAY_RATE = 1.2
 
     def sprawl(self, start_pos):
         """Grow the RRT from start position.
@@ -259,17 +259,17 @@ class RRTInfotaxis:
         Checks path[1] which is where the robot will move in the next step, not the endpoint.
 
         Extended Time-dependent penalty: decreases as steps increase since last visit.
-        - Penalty window: 20 steps (instead of 5)
-        - Starting penalty divisor: 32
-        - Decay rate: divide by 1.1 each step
+        - Penalty window: 10 steps
+        - Starting penalty divisor: 8
+        - Decay rate: divide by 1.2 each step
 
         Penalty divisor over time:
-        - 1 step since visit: 32.00 (penalty_factor = 1/32)
-        - 2 steps since visit: 29.09 (penalty_factor = 1/(32/1.1))
-        - 3 steps since visit: 26.45 (penalty_factor = 1/(32/1.1^2))
+        - 1 step since visit: 8.00 
+        - 2 steps since visit: 6.67
+        - 3 steps since visit: 5.56
         - ...
-        - 20 steps since visit: 5.10 (penalty_factor = 1/(32/1.1^19))
-        - 21+ steps since visit: No penalty (penalty_factor = 1.0)
+        - 10 steps since visit: 1.55
+        - 10+ steps since visit: No penalty
 
         Parameters:
         -----------
@@ -303,11 +303,10 @@ class RRTInfotaxis:
             for visited_pos, visited_step in self.visited_positions:
                 steps_since_visit = self.current_step - visited_step
 
-                # EXTENDED Time-dependent penalty for visits within MAX_PENALTY_STEPS
+                # EXTENDED Time-dependent penalty for visits 1-20 steps ago
                 if 1 <= steps_since_visit <= self.MAX_PENALTY_STEPS:
                     dist_to_visited = np.linalg.norm(next_step_pos - np.array(visited_pos))
                     if dist_to_visited < self.penalty_radius:
-                        # Calculate geometric penalty using attributes
                         penalty_divisor = self.INITIAL_PENALTY / (self.PENALTY_DECAY_RATE ** (steps_since_visit - 1))
                         penalty_factor = 1.0 / penalty_divisor
                         steps_since = steps_since_visit

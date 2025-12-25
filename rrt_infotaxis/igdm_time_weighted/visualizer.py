@@ -146,7 +146,7 @@ class StepVisualizer:
             ax1.plot(traj[i, 0], traj[i, 1], 'o', color=color, markersize=4, alpha=0.7)
 
         # Highlight current position
-        ax1.plot(robot_pos[0], robot_pos[1], 'ko', markersize=10)
+        ax1.plot(robot_pos[0], robot_pos[1], 'ko', markersize=8)
         ax1.plot(est_source[0], est_source[1], 'o', color='orange', markersize=10)
         ax1.plot(true_source[0], true_source[1], 'r*', markersize=10)
 

@@ -41,7 +41,7 @@ class RRTInfotaxisIGDMLargeMap(RRTInfotaxisIGDM):
         # Replace room dimensions and grid
         self.room_width = 25.0
         self.room_height = 25.0
-        self.resolution = 0.1
+        self.resolution = 0.25
         self.true_Q = 5.0
 
 

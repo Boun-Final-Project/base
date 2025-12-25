@@ -90,7 +90,7 @@ class RRTInfotaxisIGDM:
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
         self.room_height = 25.0
-        self.resolution = 0.1
+        self.resolution = 0.25
 
         self.true_source = (2.5, 22.5)
         self.true_Q = 1.0
@@ -126,7 +126,7 @@ class RRTInfotaxisIGDM:
             resample_threshold=0.42
         )
 
-        self.rrt = RRTInfotaxis(self.grid, N_tn=50, R_range=8, delta=1.0, max_depth=3,
+        self.rrt = RRTInfotaxis(self.grid, N_tn=20, R_range=8, delta=1.0, max_depth=2,
                       discount_factor=0.8, positive_weight=0.60, penalty_radius=0.50)
 
         self.robot_pos = self.robot_start
@@ -138,8 +138,8 @@ class RRTInfotaxisIGDM:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to week-9
-        viz_dir = Path("/home/hdd/akademia/cmpe/final-project/week-9/igdm_improved_large_map_steps")
+        # Visualization - save to results folder
+        viz_dir = Path(__file__).parent / "results" / "igdm_improved_large_map_steps"
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -308,7 +308,8 @@ class RRTInfotaxisIGDM:
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid
+                occupancy_grid=self.grid,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
 
             self.search_complete = True
@@ -333,7 +334,8 @@ class RRTInfotaxisIGDM:
                 particle_filter=self.particle_filter,
                 distance_to_true=dist_to_true,
                 d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid
+                occupancy_grid=self.grid,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
             )
 
             self.search_complete = True
@@ -373,7 +375,8 @@ class RRTInfotaxisIGDM:
             d_success_thr=self.d_success_thr,
             occupancy_grid=self.grid,
             rrt_nodes=rrt_nodes,
-            rrt_pruned_paths=rrt_pruned_paths
+            rrt_pruned_paths=rrt_pruned_paths,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
         )
 
         # Find the best index
@@ -567,7 +570,7 @@ class RRTInfotaxisIGDM:
 
 if __name__ == "__main__":
     # Setup logging to file
-    log_dir = Path("/home/hdd/akademia/cmpe/final-project/week-9")
+    log_dir = Path(__file__).parent / "results"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "rrt_infotaxis_igdm_improved_large_map.log"
 

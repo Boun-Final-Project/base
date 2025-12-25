@@ -104,7 +104,7 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
         self.room_height = 25.0
-        self.resolution = 0.1
+        self.resolution = 0.25
 
         self.true_source = (2.5, 22.5)
         self.true_Q = 1.0
@@ -141,7 +141,7 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
         )
 
         # Use updated RRT with 4 initial nodes and improved pruning
-        self.rrt = RRTInfotaxisUpdated(self.grid, N_tn=50, R_range=8, delta=1.0, max_depth=3,
+        self.rrt = RRTInfotaxisUpdated(self.grid, N_tn=20, R_range=8, delta=1.0, max_depth=2,
                       discount_factor=0.8, positive_weight=0.60, penalty_radius=0.50)
 
         self.robot_pos = self.robot_start
@@ -330,7 +330,8 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
                 rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
 )
 
             self.search_complete = True
@@ -359,7 +360,8 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
                 rrt_nodes=None,
                 sensor_reading=measurement,
                 threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement
+                digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
 )
 
             self.search_complete = True
@@ -411,7 +413,8 @@ class RRTInfotaxisIGDMDiscreteLargeMapUpdated:
             rrt_pruned_paths=rrt_pruned_paths,
             sensor_reading=measurement,
             threshold_bins=self.sensor.level_thresholds,
-            digital_value=discrete_measurement
+            digital_value=discrete_measurement,
+            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
 )
 
         # Log all path evaluations with details
