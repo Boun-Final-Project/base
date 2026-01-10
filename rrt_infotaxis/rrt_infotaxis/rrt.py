@@ -212,10 +212,69 @@ class RRT:
         paths = self.prune()
 
         if not paths:
-            # Return debug info even if no paths found
+            # FALLBACK BEHAVIOR: No complete paths found
+            # First, try to use any node from the tree (even if not at max depth)
+            if len(self.nodes) > 1:  # More than just the root node
+                # Pick a random non-root node
+                available_nodes = [node for node in self.nodes if node.parent is not None]
+                if available_nodes:
+                    random_node = np.random.choice(available_nodes)
+                    next_position = tuple(random_node.position)
+
+                    return {
+                        'next_position': next_position,
+                        'best_path': [Node(start_pos), random_node],
+                        'best_utility': -np.inf,
+                        'best_entropy_gain': 0.0,
+                        'best_travel_cost': np.inf,
+                        'all_paths': [],
+                        'all_utilities': [],
+                        'all_entropy_gains': [],
+                        'all_travel_costs': [],
+                        'tree_nodes': self.nodes.copy(),
+                        'num_branches': 0,
+                        'estimated_source': (0.0, 0.0),
+                        'start_position': start_pos,
+                        'sampling_radius': self.R_range,
+                        'max_depth': self.max_depth,
+                        'num_tree_nodes': len(self.nodes),
+                        'error': 'No complete paths - using random node from tree'
+                    }
+
+            # GLOBAL MODE: No nodes found at all, explore randomly
+            # Sample a random valid position in exploration radius
+            for _ in range(100):  # Try up to 100 times
+                r = self.R_range * np.sqrt(np.random.random())
+                theta = 2 * np.pi * np.random.random()
+                x = start_pos[0] + r * np.cos(theta)
+                y = start_pos[1] + r * np.sin(theta)
+
+                if self.is_collision_free(start_pos, (x, y)):
+                    next_position = (x, y)
+                    return {
+                        'next_position': next_position,
+                        'best_path': [Node(start_pos), Node(next_position)],
+                        'best_utility': -np.inf,
+                        'best_entropy_gain': 0.0,
+                        'best_travel_cost': np.inf,
+                        'all_paths': [],
+                        'all_utilities': [],
+                        'all_entropy_gains': [],
+                        'all_travel_costs': [],
+                        'tree_nodes': self.nodes.copy(),
+                        'num_branches': 0,
+                        'estimated_source': (0.0, 0.0),
+                        'start_position': start_pos,
+                        'sampling_radius': self.R_range,
+                        'max_depth': self.max_depth,
+                        'num_tree_nodes': len(self.nodes),
+                        'error': 'Global exploration mode - random valid position'
+                    }
+
+            # If all else fails, stay put
             return {
                 'next_position': start_pos,
-                'best_path': [start_pos],
+                'best_path': [Node(start_pos)],
                 'best_utility': -np.inf,
                 'best_entropy_gain': 0.0,
                 'best_travel_cost': np.inf,
@@ -230,7 +289,7 @@ class RRT:
                 'sampling_radius': self.R_range,
                 'max_depth': self.max_depth,
                 'num_tree_nodes': len(self.nodes),
-                'error': 'No valid paths found'
+                'error': 'Completely stuck - no valid moves found'
             }
 
         # Evaluate all paths

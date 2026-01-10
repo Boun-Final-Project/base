@@ -37,29 +37,35 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('number_of_particles', 1000)
         self.declare_parameter('n_tn', 50)
         self.declare_parameter('delta', 0.7)
+        self.declare_parameter('max_depth', 4)
         self.declare_parameter('xy_goal_tolerance', 0.3)
-        self.declare_parameter('robot_radius', 0.35)
-        self.declare_parameter('sigma_threshold', 0.4)
+        self.declare_parameter('robot_radius', 0.25)
+        self.declare_parameter('sigma_threshold', 0.5)
         self.declare_parameter('success_distance', 0.5)
         self.declare_parameter('positive_weight', 0.5)
 
         # Dead end detection parameters
-        self.declare_parameter('dead_end_epsilon', 0.3)
+        self.declare_parameter('dead_end_epsilon', 0.6) # I changed to 0.6
         self.declare_parameter('dead_end_initial_threshold', 0.1)
 
         # Global planner parameters
-        self.declare_parameter('prm_samples', 200)
-        self.declare_parameter('prm_connection_radius', 2.0)
+        self.declare_parameter('enable_global_planner', True)  # Enable/disable global planner
+        self.declare_parameter('prm_samples', 300)
+        self.declare_parameter('prm_connection_radius', 5.0)
         self.declare_parameter('frontier_min_size', 3)
         self.declare_parameter('lambda_p', 0.1)
         self.declare_parameter('lambda_s', 0.05)
         self.declare_parameter('switch_back_threshold', 1.5)
-        
+
         # --- NEW PARAMETER: Minimum distance between stops in Global Mode ---
-        self.declare_parameter('global_step_size', 1.5) 
+        self.declare_parameter('global_fstep_size', 1.5) 
 
         # Particle filter diversity parameters
         self.declare_parameter('resample_threshold', 0.5)
+
+        # Ground truth for error calculation (optional - set via parameters)
+        self.declare_parameter('true_source_x', 2.0)  # -999.0 means not set
+        self.declare_parameter('true_source_y', 4.5)
 
         # Sensor readings
         self.sensor_raw_value = None
@@ -76,7 +82,7 @@ class RRTInfotaxisNode(Node):
         self.goal_position = None
         self.search_complete = False
         self.current_dead_end_status = False
-        
+
         # Synchronization flag
         self.planning_pending = False
 
@@ -93,6 +99,12 @@ class RRTInfotaxisNode(Node):
         self.start_time = None
         self.log_file = None
         self.csv_writer = None
+
+        # Performance metrics tracking
+        self.total_travel_distance = 0.0  # TD: Travel Distance [m]
+        self.previous_position = None
+        self.computation_times = []  # Track computation time for each step
+
         self._setup_data_logging()
 
         # Track previous marker counts
@@ -195,13 +207,20 @@ class RRTInfotaxisNode(Node):
         )
         self.get_logger().info(f'IGDM initialized with σ_m={self.get_parameter("sigma_m").value}m')
 
-        self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.0, num_levels=10, max_concentration=20.0)
+        self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.5, num_levels=10, max_concentration=120.0)
         self.particle_filter = ParticleFilter(
             num_particles=self.get_parameter('number_of_particles').value,
-            search_bounds={"x": (0, self.slam_map.real_world_width), "y": (0, self.slam_map.real_world_height), "Q": (0, 20)},
+            search_bounds={"x": (0, self.slam_map.real_world_width), "y": (0, self.slam_map.real_world_height), "Q": (0, 120.0)},
             binary_sensor_model=self.sensor_model,
             dispersion_model=self.dispersion_model
         )
+        # self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.5, num_levels=10, max_concentration=5.0)
+        # self.particle_filter = ParticleFilter(
+        #     num_particles=self.get_parameter('number_of_particles').value,
+        #     search_bounds={"x": (0, self.slam_map.real_world_width), "y": (0, self.slam_map.real_world_height), "Q": (0, 5.0)},
+        #     binary_sensor_model=self.sensor_model,
+        #     dispersion_model=self.dispersion_model
+        # )
         self.get_logger().info('Particle filter initialized')
 
         # Initialize RRT
@@ -212,6 +231,7 @@ class RRTInfotaxisNode(Node):
             N_tn=self.get_parameter('n_tn').value,
             R_range=self.get_parameter('n_tn').value * self.get_parameter('delta').value,
             delta=self.get_parameter('delta').value,
+            max_depth=self.get_parameter('max_depth').value,
             robot_radius=self.get_parameter('robot_radius').value,
             positive_weight=self.get_parameter('positive_weight').value
         )
@@ -278,7 +298,7 @@ class RRTInfotaxisNode(Node):
         if global_plan_result['success']:
             self.get_logger().info(f'Global recovery plan found with {len(global_plan_result["best_global_path"])} waypoints.')
             self.global_path = global_plan_result['best_global_path']
-            self.global_path_index = 0
+            self.global_path_index = 1  # Skip waypoint 0 (current position)
             
             # Update Visualizations
             self.clear_global_planner_visualizations()
@@ -306,8 +326,17 @@ class RRTInfotaxisNode(Node):
         siny_cosp = 2.0 * (qw * qz + qx * qy)
         cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
         theta = atan2(siny_cosp, cosy_cosp)
+
+        # Track travel distance
+        if self.previous_position is not None:
+            dx = x - self.previous_position[0]
+            dy = y - self.previous_position[1]
+            distance = (dx**2 + dy**2)**0.5
+            self.total_travel_distance += distance
+
         self.current_position = (x, y)
         self.current_theta = theta
+        self.previous_position = (x, y)
 
         if self.planning_pending and not self.is_moving:
             self.get_logger().debug('Pose received, triggering pending plan...')
@@ -379,7 +408,10 @@ class RRTInfotaxisNode(Node):
             if 0 <= x < self.slam_map.width and 0 <= y < self.slam_map.height:
                 if x == gx1 and y == gy1:
                     break
-                self.slam_map.grid[y, x] = 0
+                # BUGFIX: Don't overwrite previously detected obstacles
+                # This prevents holes in walls when laser rays pass through due to max_range or noise
+                if self.slam_map.grid[y, x] != 1:
+                    self.slam_map.grid[y, x] = 0
 
             if x == gx1 and y == gy1:
                 break
@@ -981,6 +1013,9 @@ class RRTInfotaxisNode(Node):
         if self.sensor_raw_value is None or self.current_position is None:
             return
 
+        # Start timing this planning step
+        step_start_time = time.time()
+
         if not self.sensor_initialized:
             self.sensor_initialized = True
             self.get_logger().info(f'Continuous Gaussian sensor model initialized (α={self.sensor_model.alpha}, σ_env={self.sensor_model.sigma_env})')
@@ -1115,23 +1150,24 @@ class RRTInfotaxisNode(Node):
                 #         return
                 # ---------------------------------
                 
-                # Check if current waypoint is already reached
-                waypoint = self.global_path[self.global_path_index]
-                dx = waypoint[0] - self.current_position[0]
-                dy = waypoint[1] - self.current_position[1]
-                dist = (dx**2 + dy**2)**0.5
-                
-                if dist < self.get_parameter('xy_goal_tolerance').value:
-                    self.global_path_index += 1
-                    if self.global_path_index >= len(self.global_path):
-                        self.get_logger().warn('[GLOBAL MODE] Path exhausted. Triggering STOP & SETTLE.')
-                        self.settling_start_time = self.get_clock().now()
-                        self.planning_pending = True
-                        return
+                # Skip all waypoints that are already within tolerance (use while loop)
+                while self.global_path_index < len(self.global_path):
+                    waypoint = self.global_path[self.global_path_index]
+                    dx = waypoint[0] - self.current_position[0]
+                    dy = waypoint[1] - self.current_position[1]
+                    dist = (dx**2 + dy**2)**0.5
+
+                    if dist < self.get_parameter('xy_goal_tolerance').value:
+                        self.get_logger().info(f'[GLOBAL MODE] Waypoint {self.global_path_index} already reached (dist={dist:.2f}m), skipping...')
+                        self.global_path_index += 1
+                        if self.global_path_index >= len(self.global_path):
+                            self.get_logger().warn('[GLOBAL MODE] Path exhausted. Triggering STOP & SETTLE.')
+                            self.settling_start_time = self.get_clock().now()
+                            self.planning_pending = True
+                            return
                     else:
-                        self.get_logger().info(f'[GLOBAL MODE] Reached waypoint, moving to next index {self.global_path_index}')
-                        # Re-evaluate with new index
-                        waypoint = self.global_path[self.global_path_index]
+                        # Found a waypoint that's not yet reached
+                        break
 
                 waypoint = self.global_path[self.global_path_index]
                 waypoint_position = tuple(waypoint)
@@ -1197,7 +1233,13 @@ class RRTInfotaxisNode(Node):
                 if self.consecutive_failures > 0:
                     self.consecutive_failures -= 1
             bi_optimal = debug_info.get("best_utility", debug_info.get("best_entropy_gain", 0.0))
-            dead_end_detected = self.dead_end_detector.is_dead_end(bi_optimal)
+
+            # Check if global planner is enabled
+            if self.get_parameter('enable_global_planner').value:
+                dead_end_detected = self.dead_end_detector.is_dead_end(bi_optimal)
+            else:
+                dead_end_detected = False  # RRT-only mode, no dead-end detection
+
             if dead_end_detected:
                 # Quick check: do frontiers even exist? (~10ms)
                 frontier_cells = self.global_planner.detect_frontiers()
@@ -1214,7 +1256,7 @@ class RRTInfotaxisNode(Node):
                         self.clear_global_planner_visualizations()
                         self.planner_mode = 'GLOBAL'
                         self.global_path = global_plan_result['best_global_path']
-                        self.global_path_index = 0
+                        self.global_path_index = 1  # Skip waypoint 0 (current position)
                         self.visualize_frontier_cells(global_plan_result['frontier_cells'])
                         self.visualize_frontier_centroids(global_plan_result['frontier_clusters'])
                         self.visualize_prm_graph(global_plan_result['prm_vertices'])
@@ -1289,14 +1331,64 @@ class RRTInfotaxisNode(Node):
         self.step_count += 1
         
         if self.is_estimation_converged():
+            # Calculate final metrics
             elapsed_time = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
-            self.get_logger().info('=' * 50)
+            current_means, current_stds = self.particle_filter.get_estimate()
+            est_x, est_y = current_means["x"], current_means["y"]
+
+            # Calculate estimation error if ground truth is provided
+            true_x = self.get_parameter('true_source_x').value
+            true_y = self.get_parameter('true_source_y').value
+            if true_x != -999.0 and true_y != -999.0:
+                error_x = est_x - true_x
+                error_y = est_y - true_y
+                estimation_error = (error_x**2 + error_y**2)**0.5
+            else:
+                estimation_error = -1.0  # Not available
+
+            # Calculate average computation time
+            avg_computation_time = np.mean(self.computation_times) if len(self.computation_times) > 0 else 0.0
+
+            # Log summary
+            self.get_logger().info('=' * 80)
             self.get_logger().info('SOURCE SEARCH COMPLETED SUCCESSFULLY!')
-            self.get_logger().info(f'Total time: {elapsed_time:.2f} seconds')
-            self.get_logger().info(f'Total steps: {self.step_count}')
-            self.get_logger().info('=' * 50)
+            self.get_logger().info('=' * 80)
+            self.get_logger().info('PERFORMANCE METRICS (Table II format):')
+            self.get_logger().info(f'  ST (Search Time):              {self.step_count} steps')
+            self.get_logger().info(f'  TD (Travel Distance):          {self.total_travel_distance:.2f} m')
+            self.get_logger().info(f'  Travel Time:                   {elapsed_time:.2f} s')
+            self.get_logger().info(f'  1-step Computation Time:       {avg_computation_time:.4f} s')
+            if estimation_error >= 0:
+                self.get_logger().info(f'  Estimation Error:              {estimation_error:.3f} m')
+            self.get_logger().info(f'  Estimated Source Location:     ({est_x:.3f}, {est_y:.3f})')
+            if true_x != -999.0 and true_y != -999.0:
+                self.get_logger().info(f'  True Source Location:          ({true_x:.3f}, {true_y:.3f})')
+            self.get_logger().info('=' * 80)
+
+            # Write summary to CSV file
+            summary_filename = self.log_file.name.replace('.csv', '_summary.txt')
+            with open(summary_filename, 'w') as f:
+                f.write('=' * 80 + '\n')
+                f.write('GAS SOURCE LOCALIZATION - FINAL SUMMARY\n')
+                f.write('=' * 80 + '\n')
+                f.write(f'ST (Search Time):              {self.step_count} steps\n')
+                f.write(f'TD (Travel Distance):          {self.total_travel_distance:.2f} m\n')
+                f.write(f'Travel Time:                   {elapsed_time:.2f} s\n')
+                f.write(f'1-step Computation Time:       {avg_computation_time:.4f} s\n')
+                if estimation_error >= 0:
+                    f.write(f'Estimation Error:              {estimation_error:.3f} m\n')
+                f.write(f'Estimated Source: ({est_x:.3f}, {est_y:.3f})\n')
+                if true_x != -999.0 and true_y != -999.0:
+                    f.write(f'True Source: ({true_x:.3f}, {true_y:.3f})\n')
+                f.write('=' * 80 + '\n')
+
+            self.get_logger().info(f'Summary saved to: {summary_filename}')
             self.search_complete = True
             return
+
+        # Record computation time for this step
+        step_computation_time = time.time() - step_start_time
+        self.computation_times.append(step_computation_time)
 
         self.get_logger().info(f'Moving to: ({next_pos[0]:.2f}, {next_pos[1]:.2f})')
         self.send_nav_goal(next_pos[0], next_pos[1])

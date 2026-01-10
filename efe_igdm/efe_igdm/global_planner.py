@@ -78,12 +78,13 @@ class GlobalPlanner:
     def __init__(self,
                  occupancy_grid: OccupancyGridMap,
                  robot_radius: float = 0.35,
-                 prm_samples: int = 300, 
+                 prm_samples: int = 300,
                  prm_connection_radius: float = 2.5,
                  frontier_min_size: int = 3,
                  lambda_p: float = 0.1,
-                 lambda_s: float = 0.05):
-        
+                 lambda_s: float = 0.05,
+                 debug: bool = True):  # NEW: Debug flag
+
         self.occupancy_grid = occupancy_grid
         self.robot_radius = robot_radius
         self.prm_samples = prm_samples
@@ -91,12 +92,13 @@ class GlobalPlanner:
         self.frontier_min_size = frontier_min_size
         self.lambda_p = lambda_p
         self.lambda_s = lambda_s
+        self.debug = debug  # NEW: Debug flag
 
         self.frontier_cells = []
         self.frontier_clusters = []
         self.vertices = []
         self.vertex_dict = {}
-        
+
         self.best_frontier_vertex = None
         self.best_global_path = []
         self.best_utility = -np.inf
@@ -296,7 +298,8 @@ class GlobalPlanner:
             return self._is_valid_optimistic(tuple(pos1))
 
         # Check resolution
-        num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution * 0.5)))
+        #num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution * 0.5)))
+        num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution))) # Relaxed
         num_samples = max(num_samples, 2)
 
         for i in range(num_samples + 1):
@@ -362,31 +365,102 @@ class GlobalPlanner:
         """Evaluate frontiers based on Eq. 22."""
         estimate, _ = pf.get_estimate()
         source_estimate = np.array([estimate['x'], estimate['y']])
-        
+
+        # Get particle positions for diagnostics
+        particle_positions = pf.particles[:, :2]  # (N, 2) array
+        particle_weights = pf.weights
+
         frontier_vertices = [v for v in self.vertices if v.is_frontier_vertex]
         candidates = []
 
-        for f_vertex in frontier_vertices:
+        if self.debug:
+            print("\n" + "="*80)
+            print("GLOBAL PLANNER: EVALUATING FRONTIERS")
+            print("="*80)
+            print(f"Current position: ({current_pos[0]:.2f}, {current_pos[1]:.2f})")
+            print(f"Source estimate: ({source_estimate[0]:.2f}, {source_estimate[1]:.2f})")
+            print(f"Number of frontiers: {len(frontier_vertices)}")
+            print(f"Particle filter entropy: {pf.get_entropy():.4f}")
+            print("-"*80)
+
+        for idx, f_vertex in enumerate(frontier_vertices):
             # 1. Check path from Current Position (Vertex 0)
             path_ids, path_cost = self.dijkstra_in_prm(0, f_vertex.id)
-            if path_ids is None: continue
+            if path_ids is None:
+                if self.debug:
+                    print(f"Frontier {idx} (ID {f_vertex.id}): NO PATH FOUND")
+                continue
 
             # 2. Compute metrics
             mi = self._compute_mutual_information(f_vertex.position, pf)
+
+            # FILTER: Skip frontiers with zero or negligible MI
+            if mi <= 1e-6:
+                if self.debug:
+                    print(f"Frontier {idx} (ID {f_vertex.id}): SKIPPED (MI={mi:.6f} ≈ 0)")
+                continue
+
             src_dist = np.linalg.norm(np.array(f_vertex.position) - source_estimate)
-            
-            # 3. Utility (Eq 22)
+
+            # 3. Particle proximity diagnostics
+            distances_to_particles = np.linalg.norm(
+                particle_positions - np.array(f_vertex.position), axis=1
+            )
+            min_particle_dist = np.min(distances_to_particles)
+
+            # Weight of particles within 2m radius
+            nearby_mask = distances_to_particles < 2.0
+            nearby_particle_weight = np.sum(particle_weights[nearby_mask])
+            num_nearby_particles = np.sum(nearby_mask)
+
+            # Weighted average distance to particles
+            weighted_particle_dist = np.sum(distances_to_particles * particle_weights)
+
+            # 4. Utility (Eq 22)
             utility = mi * np.exp(-self.lambda_p * path_cost) * np.exp(-self.lambda_s * src_dist)
-            
-            candidates.append((utility, f_vertex, path_ids, mi, path_cost, src_dist))
+
+            # Print detailed diagnostics
+            if self.debug:
+                print(f"\nFrontier {idx} (Vertex ID {f_vertex.id}):")
+                print(f"  Position: ({f_vertex.position[0]:.2f}, {f_vertex.position[1]:.2f})")
+                print(f"  Path: {len(path_ids)} waypoints, cost: {path_cost:.2f}m")
+                print(f"  MI: {mi:.6f}")
+                print(f"  Dist to source est: {src_dist:.2f}m")
+                print(f"  Min dist to any particle: {min_particle_dist:.2f}m")
+                print(f"  Particles within 2m: {num_nearby_particles} (total weight: {nearby_particle_weight:.4f})")
+                print(f"  Weighted particle dist: {weighted_particle_dist:.2f}m")
+                print(f"  Utility components:")
+                print(f"    - MI term: {mi:.6f}")
+                print(f"    - Path penalty: exp(-{self.lambda_p}*{path_cost:.2f}) = {np.exp(-self.lambda_p * path_cost):.4f}")
+                print(f"    - Source dist penalty: exp(-{self.lambda_s}*{src_dist:.2f}) = {np.exp(-self.lambda_s * src_dist):.4f}")
+                print(f"  FINAL UTILITY: {utility:.6f}")
+
+            candidates.append((utility, f_vertex, path_ids, mi, path_cost, src_dist,
+                             min_particle_dist, nearby_particle_weight, weighted_particle_dist))
 
         if not candidates:
+            if self.debug:
+                print("\n⚠️  NO REACHABLE FRONTIERS FOUND!")
+                print("="*80 + "\n")
             self.ranked_frontiers = []
             self.current_frontier_index = 0
             return {'best_frontier_vertex': None, 'error': 'No reachable frontiers'}
 
         # Sort by utility (highest first)
         candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # Print ranking summary
+        if self.debug:
+            print("\n" + "-"*80)
+            print("FRONTIER RANKING (by utility):")
+            print("-"*80)
+            for rank, c in enumerate(candidates[:5]):  # Show top 5
+                utility, vertex, _, mi, path_cost, src_dist, min_particle_dist, nearby_weight, weighted_dist = c
+                print(f"  {rank+1}. Vertex {vertex.id} @ ({vertex.position[0]:.2f}, {vertex.position[1]:.2f})")
+                print(f"     Utility: {utility:.6f} | MI: {mi:.6f} | Path: {path_cost:.2f}m | MinPartDist: {min_particle_dist:.2f}m | NearbyWeight: {nearby_weight:.4f}")
+
+            if len(candidates) > 5:
+                print(f"  ... and {len(candidates)-5} more frontiers")
 
         # Store all ranked candidates for fallback
         self.ranked_frontiers = [(c[0], c[1], c[2]) for c in candidates]  # (utility, vertex, path_ids)
@@ -396,6 +470,23 @@ class GlobalPlanner:
         self.best_frontier_vertex = best[1]
         self.best_global_path = [self.vertex_dict[vid].position for vid in best[2]]
         self.best_utility = best[0]
+
+        # Print selected frontier
+        if self.debug:
+            print("\n" + "="*80)
+            print("✓ SELECTED FRONTIER:")
+            print("="*80)
+            print(f"  Vertex ID: {best[1].id}")
+            print(f"  Position: ({best[1].position[0]:.2f}, {best[1].position[1]:.2f})")
+            print(f"  Utility: {best[0]:.6f}")
+            print(f"  MI: {best[3]:.6f}")
+            print(f"  Path cost: {best[4]:.2f}m")
+            print(f"  Dist to source estimate: {best[5]:.2f}m")
+            print(f"  Min dist to particle: {best[6]:.2f}m")
+            print(f"  Nearby particle weight: {best[7]:.4f}")
+            print(f"  Weighted particle dist: {best[8]:.2f}m")
+            print(f"  Path waypoints: {len(best[2])}")
+            print("="*80 + "\n")
 
         return {
             'best_frontier_vertex': best[1],

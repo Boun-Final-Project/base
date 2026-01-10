@@ -230,13 +230,21 @@ class OccupancyGridMap:
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
 
-        # Create custom colormap
-        cmap = ListedColormap(['white', 'gray', 'lightblue'])
+        # Create custom colormap with transparency for unknown cells
+        # Colors: unknown (-1), free (0), occupied (1)
+        # RGBA format: (R, G, B, Alpha) where Alpha=0 is transparent
+        cmap = ListedColormap([
+            (1.0, 1.0, 1.0, 0.0),  # Unknown (-1): Transparent (was orange)
+            (1.0, 1.0, 1.0, 1.0),  # Free (0): White
+            (0.5, 0.5, 0.5, 1.0)   # Occupied (1): Gray
+        ])
 
         # Display grid with correct world coordinates
         extent = [self.origin_x, self.origin_x + self.width * self.resolution,
                   self.origin_y, self.origin_y + self.height * self.resolution]
-        ax.imshow(self.grid, origin='lower', extent=extent, cmap=cmap, alpha=0.7)
+        # Shift grid values: -1→0, 0→1, 1→2 for correct colormap indexing
+        display_grid = self.grid + 1
+        ax.imshow(display_grid, origin='lower', extent=extent, cmap=cmap, alpha=1.0, vmin=0, vmax=2)
 
         ax.set_xlabel('X (meters)')
         ax.set_ylabel('Y (meters)')

@@ -1,0 +1,82 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+
+Visualization Manager:
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: false
+
+    - Class: rviz_default_plugins/Map
+      Name: Occupancy Grid
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map
+      Enabled: true
+      Alpha: 0.7
+      Color Scheme: map
+
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Gas Concentration
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /gaden_player/gas_concentration
+      Enabled: true
+
+    - Class: rviz_default_plugins/Path
+      Name: Search Path - Best
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rrt_infotaxis/best_path
+      Enabled: true
+      Color: 255; 0; 255
+      Alpha: 1.0
+      Line Style: Lines
+      Line Width: 0.05
+
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Particles
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rrt_infotaxis/particles
+      Enabled: true
+
+    - Class: rviz_default_plugins/Marker
+      Name: Estimated Source
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rrt_infotaxis/estimated_source
+      Enabled: true
+
+  Global Options:
+    Background Color: 255; 255; 255
+    Fixed Frame: map
+    Frame Rate: 30
+
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: TopDownOrtho
+      Angle: 0
+      Enable Stereo Rendering:
+        Value: false
+      Scale: 10
+      X: 0
+      Y: 0
