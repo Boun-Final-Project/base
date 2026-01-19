@@ -147,6 +147,15 @@ class OccupancyGridMap:
         gx = int(np.floor((x - self.origin_x) / self.resolution))
         gy = int(np.floor((y - self.origin_y) / self.resolution))
         return gx, gy
+    
+    def is_cell_free(self, gx, gy):
+        """
+        Fast check if a specific grid cell is free.
+        Useful for pathfinders (A*, Dijkstra) that work on grid indices.
+        """
+        if 0 <= gx < self.grid_width and 0 <= gy < self.grid_height:
+            return self.grid[gy, gx] == 0
+        return False
 
     def grid_to_world(self, gx, gy):
         """Convert grid indices to world coordinates (cell center)."""
@@ -157,60 +166,92 @@ class OccupancyGridMap:
     def is_valid(self, position: tuple[float, float], radius: float = 0.2) -> bool:
         """
         Check if position is valid (within bounds and collision-free).
-
-        Parameters:
-        -----------
-        position : tuple[float, float]
-            World coordinates (x, y)
-        radius : float
-            Safety radius to check around the position (default: 0.1m)
-
-        Returns:
-        --------
-        valid : bool
-            True if position is valid and collision-free
+        Optimized to use squared distances for speed.
         """
-        # gx, gy = self.world_to_grid(*position)
-        # if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
-        #     return False
-
-        # # Check surrounding cells within the radius
-        # radius_cells = int(np.ceil(radius / self.resolution))
-        # for dx in range(-radius_cells, radius_cells + 1):
-        #     for dy in range(-radius_cells, radius_cells + 1):
-        #         if 0 <= gx + dx < self.grid_width and 0 <= gy + dy < self.grid_height:
-        #             if self.grid[gy + dy, gx + dx] != 0:
-        #                 return False
-        # return True
         gx, gy = self.world_to_grid(*position)
+        
+        # Fast bounds check
         if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
             return False
 
-        # Check surrounding cells within the radius
+        # Calculate radius in cells
         radius_cells = int(np.ceil(radius / self.resolution))
+        radius_sq_cells = radius_cells**2  # Optimization: compare squares
         
-        # --- START OF FIX ---
-        # Pre-calculate the squared radius in grid cells for comparison
-        radius_sq_cells = radius_cells**2
-        # --- END OF FIX ---
-
+        # Check surrounding cells
         for dx in range(-radius_cells, radius_cells + 1):
             for dy in range(-radius_cells, radius_cells + 1):
-                
-                # --- START OF FIX ---
-                # Check if the grid cell (dx, dy) is within the circular radius
-                # by comparing squared distances.
+                # Optimization: Skip corners of the square bounding box
+                # to approximate a circle without using sqrt()
                 if dx*dx + dy*dy > radius_sq_cells:
-                    continue  # Skip this cell, it's in the "corner" of the square
-                # --- END OF FIX ---
+                    continue
                 
                 check_gx = gx + dx
                 check_gy = gy + dy
 
+                # Check grid bounds and occupancy
                 if 0 <= check_gx < self.grid_width and 0 <= check_gy < self.grid_height:
                     if self.grid[check_gy, check_gx] != 0:
                         return False
         return True
+
+    # def is_valid(self, position: tuple[float, float], radius: float = 0.2) -> bool:
+    #     """
+    #     Check if position is valid (within bounds and collision-free).
+
+    #     Parameters:
+    #     -----------
+    #     position : tuple[float, float]
+    #         World coordinates (x, y)
+    #     radius : float
+    #         Safety radius to check around the position (default: 0.1m)
+
+    #     Returns:
+    #     --------
+    #     valid : bool
+    #         True if position is valid and collision-free
+    #     """
+    #     # gx, gy = self.world_to_grid(*position)
+    #     # if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
+    #     #     return False
+
+    #     # # Check surrounding cells within the radius
+    #     # radius_cells = int(np.ceil(radius / self.resolution))
+    #     # for dx in range(-radius_cells, radius_cells + 1):
+    #     #     for dy in range(-radius_cells, radius_cells + 1):
+    #     #         if 0 <= gx + dx < self.grid_width and 0 <= gy + dy < self.grid_height:
+    #     #             if self.grid[gy + dy, gx + dx] != 0:
+    #     #                 return False
+    #     # return True
+    #     gx, gy = self.world_to_grid(*position)
+    #     if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
+    #         return False
+
+    #     # Check surrounding cells within the radius
+    #     radius_cells = int(np.ceil(radius / self.resolution))
+        
+    #     # --- START OF FIX ---
+    #     # Pre-calculate the squared radius in grid cells for comparison
+    #     radius_sq_cells = radius_cells**2
+    #     # --- END OF FIX ---
+
+    #     for dx in range(-radius_cells, radius_cells + 1):
+    #         for dy in range(-radius_cells, radius_cells + 1):
+                
+    #             # --- START OF FIX ---
+    #             # Check if the grid cell (dx, dy) is within the circular radius
+    #             # by comparing squared distances.
+    #             if dx*dx + dy*dy > radius_sq_cells:
+    #                 continue  # Skip this cell, it's in the "corner" of the square
+    #             # --- END OF FIX ---
+                
+    #             check_gx = gx + dx
+    #             check_gy = gy + dy
+
+    #             if 0 <= check_gx < self.grid_width and 0 <= check_gy < self.grid_height:
+    #                 if self.grid[check_gy, check_gx] != 0:
+    #                     return False
+    #     return True
 
     def add_rectangle_obstacle(self, x_min, y_min, x_max, y_max):
         """Add a rectangular obstacle to the map."""
