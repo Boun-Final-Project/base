@@ -30,7 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             "start = efe_igdm.igdm:main",
-            "clear_viz = efe_igdm.clear_visualization:main",
+            "clear_viz = efe_igdm.tools.clear_visualization:main",
         ],
     },
 )
