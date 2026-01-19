@@ -217,13 +217,6 @@ class RRTInfotaxisNode(Node):
             binary_sensor_model=self.sensor_model,
             dispersion_model=self.dispersion_model
         )
-        # self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.5, num_levels=10, max_concentration=5.0)
-        # self.particle_filter = ParticleFilter(
-        #     num_particles=self.get_parameter('number_of_particles').value,
-        #     search_bounds={"x": (0, self.slam_map.real_world_width), "y": (0, self.slam_map.real_world_height), "Q": (0, 5.0)},
-        #     binary_sensor_model=self.sensor_model,
-        #     dispersion_model=self.dispersion_model
-        # )
         self.get_logger().info('Particle filter initialized')
 
         # Initialize RRT

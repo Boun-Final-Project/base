@@ -512,102 +512,54 @@ class ParticleFilterOptimized:
         entropy = -np.sum(weights_safe * np.log(weights_safe))
 
         return entropy
-
+    
     def predict_measurement_probability(self, sensor_position, binary_value=None):
         """
-        Predict probability of future measurement (VECTORIZED).
-        Works with BinarySensorModel, DiscreteSensorModel, and ContinuousGaussianSensorModel.
+        Predict probability of future measurement using ContinuousGaussianSensorModel (FULLY VECTORIZED).
 
-        This is the critical hotspot for RRT-Infotaxis!
+        Uses dynamic discretization for RRT entropy calculation.
+
+        Optimizations:
+        1. Eliminates Python loops over 'num_levels'
+        2. Uses matrix broadcasting to compute all bin probabilities in one step
+        3. Uses dot product for weighted summation
         """
         # Compute all concentrations at once (VECTORIZED)
         predicted_concs = self._compute_concentrations_batch(sensor_position)
 
-        # Check sensor model type
-        if hasattr(self.sensor_model, 'threshold'):
-            # BinarySensorModel: single threshold
-            delta_c = self.sensor_model.threshold - predicted_concs
-            sigma_g = self.sensor_model.alpha * predicted_concs + self.sensor_model.sigma_env
-            sigma_g = np.maximum(sigma_g, 1e-15)
+        # 1. Get dynamic thresholds based on current prediction range
+        # shape: (num_levels - 1,)
+        inner_thresholds = self.sensor_model.create_discretization_thresholds(predicted_concs)
 
-            phi = scipy_norm.cdf(delta_c / sigma_g)
-            beta = np.sum(phi * self.weights)
+        # 2. Create full bin edges: [-inf, t1, t2, ..., tn, +inf]
+        # shape: (num_levels + 1,)
+        bin_edges = np.concatenate([[-np.inf], inner_thresholds, [np.inf]])
 
-            if binary_value is None:
-                return beta, 1 - beta
-            elif binary_value == 0:
-                return beta
-            else:
-                return 1 - beta
+        # 3. Compute Sigma for all particles
+        # shape: (N,)
+        sigma_g = self.sensor_model.alpha * predicted_concs + self.sensor_model.sigma_env
+        sigma_g = np.maximum(sigma_g, 1e-15)
 
-        elif hasattr(self.sensor_model, 'create_discretization_thresholds'):
-            # ContinuousGaussianSensorModel: use dynamic discretization (Eq. 13-15)
-            thresholds = self.sensor_model.create_discretization_thresholds(predicted_concs)
+        # 4. Compute Z-scores matrix (Broadcasting)
+        # (num_levels+1, 1) - (1, N) -> (num_levels+1, N)
+        # We transpose the result to get (N, num_levels+1)
+        z_scores = (bin_edges[:, None] - predicted_concs[None, :]) / sigma_g[None, :]
 
-            num_levels = self.sensor_model.num_levels
-            level_probs = []
+        # 5. Compute CDFs
+        cdfs = scipy_norm.cdf(z_scores)
 
-            for level in range(num_levels):
-                # Compute P(level | concentration) for each particle
-                prob_per_particle = self.sensor_model.compute_bin_likelihood_vec(
-                    level, predicted_concs, thresholds
-                )
+        # 6. Compute bin probabilities: P(bin_i) = CDF(edge_i+1) - CDF(edge_i)
+        # result shape: (num_levels, N)
+        bin_probs_per_particle = cdfs[1:, :] - cdfs[:-1, :]
 
-                # Weight by particle weights and sum (Eq. 29)
-                level_prob = np.sum(prob_per_particle * self.weights)
-                level_probs.append(level_prob)
+        # 7. Weighted sum over particles (Matrix-Vector Dot Product)
+        # (num_levels, N) @ (N,) -> (num_levels,)
+        level_probs = bin_probs_per_particle @ self.weights
 
-            # Return requested probability
-            if binary_value is None:
-                return level_probs
-            else:
-                return level_probs[binary_value]
-
+        if binary_value is None:
+            return level_probs
         else:
-            # DiscreteSensorModel with fixed thresholds
-            if not self.sensor_model.initialized:
-                # If not initialized, return uniform probabilities
-                num_levels = self.sensor_model.num_levels
-                probs = [1.0 / num_levels] * num_levels
-                return probs if binary_value is None else probs[binary_value]
-
-            # Compute sigma_g for each particle
-            sigma_g = self.sensor_model.alpha * predicted_concs + self.sensor_model.sigma_env
-            sigma_g = np.maximum(sigma_g, 1e-15)
-
-            # Compute probability for each discrete level
-            num_levels = self.sensor_model.num_levels
-            level_probs = []
-
-            for level in range(num_levels):
-                # Get bin boundaries for this level
-                if level == 0:
-                    lower_bound = 0
-                    upper_bound = self.sensor_model.thresholds[0]
-                elif level == num_levels - 1:
-                    lower_bound = self.sensor_model.thresholds[-1]
-                    upper_bound = np.inf
-                else:
-                    lower_bound = self.sensor_model.thresholds[level - 1]
-                    upper_bound = self.sensor_model.thresholds[level]
-
-                # Compute P(level | concentration) for each particle
-                if upper_bound == np.inf:
-                    prob_per_particle = 1.0 - scipy_norm.cdf((lower_bound - predicted_concs) / sigma_g)
-                else:
-                    prob_upper = scipy_norm.cdf((upper_bound - predicted_concs) / sigma_g)
-                    prob_lower = scipy_norm.cdf((lower_bound - predicted_concs) / sigma_g)
-                    prob_per_particle = prob_upper - prob_lower
-
-                # Weight by particle weights and sum
-                level_prob = np.sum(prob_per_particle * self.weights)
-                level_probs.append(level_prob)
-
-            # Return requested probability
-            if binary_value is None:
-                return level_probs
-            else:
-                return level_probs[binary_value]
+            return level_probs[binary_value]
 
     def get_particles(self):
         """Get current particles and weights."""
