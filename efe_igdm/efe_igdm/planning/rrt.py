@@ -1,6 +1,6 @@
 import numpy as np
-from .particle_filter_optimized import ParticleFilterOptimized
-from .occupancy_grid import OccupancyGridMap
+from ..estimation.particle_filter_optimized import ParticleFilterOptimized
+from ..mapping.occupancy_grid import OccupancyGridMap
 from typing import List
 
 class Node:

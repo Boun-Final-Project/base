@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.stats import multivariate_normal, norm as scipy_norm
-from .igdm_gas_model import IndoorGaussianDispersionModel
+from ..models.igdm_gas_model import IndoorGaussianDispersionModel
 from .sensor_model import ContinuousGaussianSensorModel
 from copy import deepcopy
 

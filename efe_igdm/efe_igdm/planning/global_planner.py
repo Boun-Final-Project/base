@@ -17,8 +17,8 @@ from typing import List, Tuple, Optional, Dict, Set
 from scipy.ndimage import binary_dilation, label, find_objects
 
 # Assuming these are in the same directory, keep your relative imports
-from .occupancy_grid import OccupancyGridMap
-from .particle_filter_optimized import ParticleFilterOptimized
+from ..mapping.occupancy_grid import OccupancyGridMap
+from ..estimation.particle_filter_optimized import ParticleFilterOptimized
 
 
 class FrontierCluster:
