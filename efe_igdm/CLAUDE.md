@@ -181,7 +181,6 @@ igdm/
 │   ├── sensor_model.py                # Binary sensor model
 │   ├── occupancy_grid.py              # Occupancy grid management
 │   ├── text_visualizer.py             # RViz text visualization
-│   ├── unit_conversion.py             # Gas unit conversions
 │   ├── dijkstra.py                    # Dijkstra pathfinding (unused)
 │   └── test_ideal.py                  # Testing utilities
 ├── test/                              # Unit tests

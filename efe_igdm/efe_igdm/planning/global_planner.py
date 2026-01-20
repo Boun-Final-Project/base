@@ -1,22 +1,20 @@
 """
-Global Planner for Dual-Mode RRT-Infotaxis GSL - OPTIMIZED VERSION
+Global Planner for Dual-Mode RRT-Infotaxis GSL - HIGH PERFORMANCE VERSION
 
-Based on Section IV.B.3 from:
-"Gas Source Localization in Unknown Indoor Environments Using Dual-Mode
-Information-Theoretic Search" by Kim et al., IEEE RA-L 2025
-
-OPTIMIZATIONS:
-- Replaced Python loop-based frontier detection with scipy.ndimage (Vectorized).
-- Replaced BFS clustering with Connected Components labeling (C-backend).
+Optimizations:
+1. KD-Tree for PRM connectivity: Reduces graph building from O(N^2) to O(N log N).
+2. Single-Source Dijkstra: Computes paths to ALL frontiers in one pass.
+3. Vectorized Frontier Detection: Uses scipy.ndimage for fast grid operations.
+4. Optimistic Validity Checks: Allows planning through Unknown space (-1).
 """
 
 import numpy as np
 import heapq
-from collections import deque
-from typing import List, Tuple, Optional, Dict, Set
+from scipy.spatial import KDTree
 from scipy.ndimage import binary_dilation, label, find_objects
+from typing import List, Tuple, Optional, Dict, Set
 
-# Assuming these are in the same directory, keep your relative imports
+# Relative imports (keep these matching your file structure)
 from ..mapping.occupancy_grid import OccupancyGridMap
 from ..estimation.particle_filter_optimized import ParticleFilterOptimized
 
@@ -59,7 +57,9 @@ class PRMVertex:
     def __init__(self, position: Tuple[float, float], vertex_id: int):
         self.position = position  # World coordinates (x, y)
         self.id = vertex_id
-        self.neighbors = []  # List of (neighbor_id, edge_cost) tuples
+        # Neighbors list is now populated via KD-Tree query results
+        # Format: List of (neighbor_id, edge_cost)
+        self.neighbors = []  
         self.is_frontier_vertex = False
         self.frontier_cluster = None  # Reference to FrontierCluster if is_frontier_vertex
 
@@ -67,12 +67,6 @@ class PRMVertex:
 class GlobalPlanner:
     """
     Global planner for frontier-based exploration with information gain.
-    
-    Optimizations applied:
-    1. Vectorized Frontier Detection (scipy.ndimage)
-    2. Vectorized Clustering (scipy.ndimage.label)
-    3. Targeted Sampling: Explicitly adds frontier centroids to PRM
-    4. Optimistic Validity: Allows planning through Unknown space (-1)
     """
 
     def __init__(self,
@@ -83,7 +77,7 @@ class GlobalPlanner:
                  frontier_min_size: int = 3,
                  lambda_p: float = 0.1,
                  lambda_s: float = 0.05,
-                 debug: bool = True):  # NEW: Debug flag
+                 debug: bool = True):
 
         self.occupancy_grid = occupancy_grid
         self.robot_radius = robot_radius
@@ -92,19 +86,23 @@ class GlobalPlanner:
         self.frontier_min_size = frontier_min_size
         self.lambda_p = lambda_p
         self.lambda_s = lambda_s
-        self.debug = debug  # NEW: Debug flag
+        self.debug = debug
 
         self.frontier_cells = []
         self.frontier_clusters = []
         self.vertices = []
         self.vertex_dict = {}
+        
+        # Adjacency list for efficient graph algorithms: {id: [(neighbor_id, cost), ...]}
+        self.adj_list = {} 
 
         self.best_frontier_vertex = None
         self.best_global_path = []
         self.best_utility = -np.inf
 
         # Store ranked frontiers for fallback when path becomes blocked
-        self.ranked_frontiers = []  # List of (utility, vertex, path_ids) tuples
+        # List of dicts containing 'vertex', 'utility', 'path_ids'
+        self.ranked_frontiers = []
         self.current_frontier_index = 0
 
     def _is_valid_optimistic(self, position: Tuple[float, float]) -> bool:
@@ -143,24 +141,19 @@ class GlobalPlanner:
         """
         grid = self.occupancy_grid.grid
         
-        # 1. Create Boolean Masks (Operations on full arrays are fast in NumPy)
+        # 1. Create Boolean Masks
         is_free = (grid == 0)
         is_unknown = (grid == -1)
         
-        # 2. Dilate the Unknown regions
-        # If we expand "Unknown" by 1 pixel (8-connected), the expansion will cover 
-        # the "Free" pixels that are touching the edge.
-        structure = np.ones((3, 3), dtype=bool) # 8-connectivity
+        # 2. Dilate the Unknown regions (8-connectivity)
+        structure = np.ones((3, 3), dtype=bool)
         unknown_dilated = binary_dilation(is_unknown, structure=structure)
         
         # 3. Intersection: Frontier = Is Free AND Is touching Unknown
         frontier_mask = is_free & unknown_dilated
         
         # 4. Extract coordinates
-        # np.where returns (row_indices, col_indices) -> (y, x)
         y_idxs, x_idxs = np.where(frontier_mask)
-        
-        # 5. Convert to list of (x, y) tuples
         self.frontier_cells = list(zip(x_idxs, y_idxs))
         
         return self.frontier_cells
@@ -168,13 +161,12 @@ class GlobalPlanner:
     def cluster_frontiers(self) -> List[FrontierCluster]:
         """
         Cluster frontier cells using Connected Components (Labeling).
-        Replaces slow Python BFS with optimized scipy implementation.
         """
         if not self.frontier_cells:
             self.frontier_clusters = []
             return []
 
-        # 1. Reconstruct the Boolean mask from the list of cells
+        # 1. Reconstruct the Boolean mask
         grid_shape = self.occupancy_grid.grid.shape
         frontier_mask = np.zeros(grid_shape, dtype=bool)
         
@@ -188,34 +180,26 @@ class GlobalPlanner:
         
         clusters = []
         
-        # 3. Iterate over found labels to group cells efficiently
-        # find_objects returns a list of slices for each label
+        # 3. Iterate over found labels using find_objects for speed
         slices = find_objects(labeled_array)
         
         for i, sl in enumerate(slices):
             if sl is None: continue
             
-            # Label IDs start at 1
             label_id = i + 1
-            
-            # Mask relative to the slice (much faster than masking full grid)
+            # Mask relative to the slice
             local_mask = (labeled_array[sl] == label_id)
-            
-            # Get local coordinates
             ly, lx = np.where(local_mask)
             
             # Convert to global grid coordinates
             global_y = ly + sl[0].start
             global_x = lx + sl[1].start
             
-            # Combine into list of (x, y)
             cluster_cells = list(zip(global_x, global_y))
             
-            # Filter small clusters
             if len(cluster_cells) >= self.frontier_min_size:
                 cluster = FrontierCluster(cluster_cells)
-                
-                # Calculate World Centroid using medoid logic
+                # Calculate World Centroid
                 cluster.centroid_world = self.occupancy_grid.grid_to_world(
                     cluster.centroid_grid[0], cluster.centroid_grid[1]
                 )
@@ -226,65 +210,87 @@ class GlobalPlanner:
 
     def build_prm_graph(self, current_position: Tuple[float, float]) -> None:
         """
-        Build PRM graph with guaranteed connectivity to frontiers.
+        Build PRM graph utilizing KD-Tree for O(N log N) connections.
         """
         self.vertices = []
         self.vertex_dict = {}
-        vertex_id = 0
+        self.adj_list = {}
+        
+        # --- 1. Collect Sample Points ---
+        sample_points = []
+        vertex_ids = []
+        types = [] # 'start', 'frontier_X', 'sample'
 
-        # 1. Add Current Position (Vertex 0)
-        current_vertex = PRMVertex(current_position, vertex_id)
-        self.vertices.append(current_vertex)
-        self.vertex_dict[vertex_id] = current_vertex
-        vertex_id += 1
+        # 1a. Start Position (ID 0)
+        sample_points.append(current_position)
+        vertex_ids.append(0)
+        types.append('start')
 
-        # 2. Explicitly Add Frontier Centroids (Targeted Sampling)
-        for cluster in self.frontier_clusters:
+        # 1b. Frontier Centroids
+        for i, cluster in enumerate(self.frontier_clusters):
             pos = cluster.centroid_world
             if self._is_valid_optimistic(pos):
-                vertex = PRMVertex(pos, vertex_id)
-                vertex.is_frontier_vertex = True
-                vertex.frontier_cluster = cluster
-                
-                self.vertices.append(vertex)
-                self.vertex_dict[vertex_id] = vertex
-                vertex_id += 1
+                sample_points.append(pos)
+                vertex_ids.append(len(sample_points)-1)
+                types.append(f'frontier_{i}')
 
-        # 3. Add Random Samples
+        # 1c. Random Sampling
         attempts = 0
         max_attempts = self.prm_samples * 5
-        
-        x_min = self.occupancy_grid.origin_x
-        y_min = self.occupancy_grid.origin_y
+        x_min, y_min = self.occupancy_grid.origin_x, self.occupancy_grid.origin_y
         x_max = x_min + self.occupancy_grid.real_world_width
         y_max = y_min + self.occupancy_grid.real_world_height
 
-        while len(self.vertices) < self.prm_samples + len(self.frontier_clusters) and attempts < max_attempts:
+        target_count = self.prm_samples + len(self.frontier_clusters)
+        
+        while len(sample_points) < target_count and attempts < max_attempts:
             attempts += 1
             x = np.random.uniform(x_min, x_max)
             y = np.random.uniform(y_min, y_max)
-
             if self._is_valid_optimistic((x, y)):
-                vertex = PRMVertex((x, y), vertex_id)
-                self.vertices.append(vertex)
-                self.vertex_dict[vertex_id] = vertex
-                vertex_id += 1
+                sample_points.append((x, y))
+                vertex_ids.append(len(sample_points)-1)
+                types.append('sample')
 
-        # 4. Connect Vertices
-        # Simple N^2 connection strategy (acceptable for small N ~300)
-        for i, vertex_i in enumerate(self.vertices):
-            for j in range(i + 1, len(self.vertices)):
-                vertex_j = self.vertices[j]
+        # --- 2. Build KD-Tree ---
+        if not sample_points:
+            return
+
+        points_array = np.array(sample_points)
+        tree = KDTree(points_array)
+
+        # --- 3. Create Vertex Objects ---
+        for idx, pos, v_type in zip(vertex_ids, sample_points, types):
+            v = PRMVertex(pos, idx)
+            if v_type.startswith('frontier'):
+                v.is_frontier_vertex = True
+                cluster_idx = int(v_type.split('_')[1])
+                v.frontier_cluster = self.frontier_clusters[cluster_idx]
+            
+            self.vertices.append(v)
+            self.vertex_dict[idx] = v
+            self.adj_list[idx] = [] # Initialize adjacency
+
+        # --- 4. Connect Vertices Efficiently ---
+        # query_pairs returns all pairs (i, j) with dist < r
+        pairs = tree.query_pairs(self.prm_connection_radius)
+
+        for i, j in pairs:
+            pos_i = sample_points[i]
+            pos_j = sample_points[j]
+            dist = np.linalg.norm(np.array(pos_i) - np.array(pos_j))
+
+            # Allow start node (0) to be slightly invalid to escape walls
+            allow_start = (i == 0 or j == 0)
+            
+            if self._is_path_collision_free(pos_i, pos_j, allow_start_invalid=allow_start):
+                # Add to Vertex objects (legacy support)
+                self.vertex_dict[i].neighbors.append((j, dist))
+                self.vertex_dict[j].neighbors.append((i, dist))
                 
-                dist = np.linalg.norm(np.array(vertex_i.position) - np.array(vertex_j.position))
-
-                if dist <= self.prm_connection_radius:
-                    # Allow invalid start position for Vertex 0 (Current Robot Pos)
-                    allow_start_invalid = (vertex_i.id == 0)
-                    
-                    if self._is_path_collision_free(vertex_i.position, vertex_j.position, allow_start_invalid=allow_start_invalid):
-                        vertex_i.neighbors.append((vertex_j.id, dist))
-                        vertex_j.neighbors.append((vertex_i.id, dist))
+                # Add to Adjacency List (for fast Dijkstra)
+                self.adj_list[i].append((j, dist))
+                self.adj_list[j].append((i, dist))
 
     def _is_path_collision_free(self, pos1: Tuple[float, float], pos2: Tuple[float, float], allow_start_invalid: bool = False) -> bool:
         """Check collision using optimistic check along the segment."""
@@ -293,60 +299,70 @@ class GlobalPlanner:
         dist = np.linalg.norm(pos2 - pos1)
         
         if dist < 1e-6:
-            if allow_start_invalid:
-                return True
+            if allow_start_invalid: return True
             return self._is_valid_optimistic(tuple(pos1))
 
-        # Check resolution
-        #num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution * 0.5)))
-        num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution))) # Relaxed
+        # Relaxed sampling: Check every resolution unit
+        num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution)))
         num_samples = max(num_samples, 2)
 
         for i in range(num_samples + 1):
             t = i / num_samples
-            sample_pos = pos1 + t * (pos2 - pos1)
             
             # If start is allowed invalid, skip the very first point (i=0)
             if i == 0 and allow_start_invalid:
                 continue
 
+            sample_pos = pos1 + t * (pos2 - pos1)
             if not self._is_valid_optimistic((sample_pos[0], sample_pos[1])):
                 return False
         return True
 
-    def dijkstra_in_prm(self, start_vertex_id: int, goal_vertex_id: int) -> Tuple[Optional[List[int]], float]:
-        """Standard Dijkstra implementation."""
-        distances = {vid: float('inf') for vid in self.vertex_dict.keys()}
-        distances[start_vertex_id] = 0.0
-        previous = {vid: None for vid in self.vertex_dict.keys()}
-        pq = [(0.0, start_vertex_id)]
-        visited = set()
-
+    def compute_all_paths_from_start(self, start_id: int = 0) -> Tuple[Dict[int, float], Dict[int, int]]:
+        """
+        Run One-to-All Dijkstra. 
+        Returns distances and predecessor map for ALL reachable nodes from start_id.
+        """
+        distances = {vid: float('inf') for vid in self.vertex_dict}
+        previous = {vid: None for vid in self.vertex_dict}
+        distances[start_id] = 0.0
+        
+        # Priority Queue: (distance, vertex_id)
+        pq = [(0.0, start_id)]
+        
         while pq:
             current_dist, current_id = heapq.heappop(pq)
-            if current_id in visited: continue
-            visited.add(current_id)
+            
+            # Optimization: If we found a shorter path already, skip
+            if current_dist > distances[current_id]:
+                continue
+            
+            # Use adj_list for fast iteration
+            if current_id in self.adj_list:
+                for neighbor_id, weight in self.adj_list[current_id]:
+                    new_dist = current_dist + weight
+                    
+                    if new_dist < distances[neighbor_id]:
+                        distances[neighbor_id] = new_dist
+                        previous[neighbor_id] = current_id
+                        heapq.heappush(pq, (new_dist, neighbor_id))
+                    
+        return distances, previous
 
-            if current_id == goal_vertex_id: break
-            if current_dist > distances[current_id]: continue
-
-            for neighbor_id, edge_cost in self.vertex_dict[current_id].neighbors:
-                new_dist = current_dist + edge_cost
-                if new_dist < distances[neighbor_id]:
-                    distances[neighbor_id] = new_dist
-                    previous[neighbor_id] = current_id
-                    heapq.heappush(pq, (new_dist, neighbor_id))
-
-        if distances[goal_vertex_id] == float('inf'):
-            return None, float('inf')
-
+    def reconstruct_path(self, goal_id: int, previous: Dict[int, int]) -> Optional[List[int]]:
+        """Reconstruct path from previous map."""
+        if goal_id not in previous or (previous[goal_id] is None and goal_id != 0):
+            return None # Unreachable
+            
         path = []
-        current = goal_vertex_id
-        while current is not None:
-            path.append(current)
-            current = previous[current]
-        path.reverse()
-        return path, distances[goal_vertex_id]
+        curr = goal_id
+        while curr is not None:
+            path.append(curr)
+            curr = previous[curr]
+            # Safety break
+            if len(path) > len(previous): break 
+            
+        return path[::-1] # Reverse to get Start -> Goal
 
     def _compute_mutual_information(self, position: Tuple[float, float], pf: ParticleFilterOptimized) -> float:
         """Compute MI using particle filter."""
@@ -356,189 +372,145 @@ class GlobalPlanner:
         expected_entropy = 0.0
         for m in range(num_measurements):
             prob = pf.predict_measurement_probability(position, m)
-            hyp_entropy = pf.compute_hypothetical_entropy(m, position)
-            expected_entropy += prob * hyp_entropy
+            if prob > 1e-4: # Skip negligible probabilities
+                hyp_entropy = pf.compute_hypothetical_entropy(m, position)
+                expected_entropy += prob * hyp_entropy
             
         return current_entropy - expected_entropy
 
     def evaluate_frontier_vertices(self, current_pos: Tuple[float, float], pf: ParticleFilterOptimized) -> Dict:
-        """Evaluate frontiers based on Eq. 22."""
+        """
+        Evaluate frontiers based on utility function (Eq. 22).
+        Uses Single-Source Dijkstra for efficiency.
+        """
+        # 1. Run Dijkstra ONCE from robot position (ID 0)
+        dists, prevs = self.compute_all_paths_from_start(0)
+        
         estimate, _ = pf.get_estimate()
         source_estimate = np.array([estimate['x'], estimate['y']])
-
-        # Get particle positions for diagnostics
-        particle_positions = pf.particles[:, :2]  # (N, 2) array
-        particle_weights = pf.weights
-
         frontier_vertices = [v for v in self.vertices if v.is_frontier_vertex]
+        
         candidates = []
 
         if self.debug:
-            print("\n" + "="*80)
-            print("GLOBAL PLANNER: EVALUATING FRONTIERS")
-            print("="*80)
-            print(f"Current position: ({current_pos[0]:.2f}, {current_pos[1]:.2f})")
-            print(f"Source estimate: ({source_estimate[0]:.2f}, {source_estimate[1]:.2f})")
-            print(f"Number of frontiers: {len(frontier_vertices)}")
-            print(f"Particle filter entropy: {pf.get_entropy():.4f}")
-            print("-"*80)
+            print(f"DEBUG: Evaluating {len(frontier_vertices)} frontiers...")
 
-        for idx, f_vertex in enumerate(frontier_vertices):
-            # 1. Check path from Current Position (Vertex 0)
-            path_ids, path_cost = self.dijkstra_in_prm(0, f_vertex.id)
-            if path_ids is None:
-                if self.debug:
-                    print(f"Frontier {idx} (ID {f_vertex.id}): NO PATH FOUND")
-                continue
+        for f_vertex in frontier_vertices:
+            # 2. Check Reachability using pre-computed Dijkstra map
+            path_cost = dists[f_vertex.id]
+            if path_cost == float('inf'):
+                continue # Unreachable
 
-            # 2. Compute metrics
+            # 3. Compute Metrics
             mi = self._compute_mutual_information(f_vertex.position, pf)
-
-            # FILTER: Skip frontiers with zero or negligible MI
-            if mi <= 1e-6:
-                if self.debug:
-                    print(f"Frontier {idx} (ID {f_vertex.id}): SKIPPED (MI={mi:.6f} ≈ 0)")
-                continue
+            
+            # Filter low info
+            if mi <= 1e-6: continue
 
             src_dist = np.linalg.norm(np.array(f_vertex.position) - source_estimate)
 
-            # 3. Particle proximity diagnostics
-            distances_to_particles = np.linalg.norm(
-                particle_positions - np.array(f_vertex.position), axis=1
-            )
-            min_particle_dist = np.min(distances_to_particles)
-
-            # Weight of particles within 2m radius
-            nearby_mask = distances_to_particles < 2.0
-            nearby_particle_weight = np.sum(particle_weights[nearby_mask])
-            num_nearby_particles = np.sum(nearby_mask)
-
-            # Weighted average distance to particles
-            weighted_particle_dist = np.sum(distances_to_particles * particle_weights)
-
-            # 4. Utility (Eq 22)
+            # 4. Compute Utility (Eq 22)
             utility = mi * np.exp(-self.lambda_p * path_cost) * np.exp(-self.lambda_s * src_dist)
 
-            # Print detailed diagnostics
-            if self.debug:
-                print(f"\nFrontier {idx} (Vertex ID {f_vertex.id}):")
-                print(f"  Position: ({f_vertex.position[0]:.2f}, {f_vertex.position[1]:.2f})")
-                print(f"  Path: {len(path_ids)} waypoints, cost: {path_cost:.2f}m")
-                print(f"  MI: {mi:.6f}")
-                print(f"  Dist to source est: {src_dist:.2f}m")
-                print(f"  Min dist to any particle: {min_particle_dist:.2f}m")
-                print(f"  Particles within 2m: {num_nearby_particles} (total weight: {nearby_particle_weight:.4f})")
-                print(f"  Weighted particle dist: {weighted_particle_dist:.2f}m")
-                print(f"  Utility components:")
-                print(f"    - MI term: {mi:.6f}")
-                print(f"    - Path penalty: exp(-{self.lambda_p}*{path_cost:.2f}) = {np.exp(-self.lambda_p * path_cost):.4f}")
-                print(f"    - Source dist penalty: exp(-{self.lambda_s}*{src_dist:.2f}) = {np.exp(-self.lambda_s * src_dist):.4f}")
-                print(f"  FINAL UTILITY: {utility:.6f}")
-
-            candidates.append((utility, f_vertex, path_ids, mi, path_cost, src_dist,
-                             min_particle_dist, nearby_particle_weight, weighted_particle_dist))
+            # Defer path reconstruction until selection to save time
+            candidates.append({
+                'utility': utility,
+                'vertex': f_vertex,
+                'path_cost': path_cost,
+                'mi': mi,
+                'src_dist': src_dist
+            })
 
         if not candidates:
-            if self.debug:
-                print("\n⚠️  NO REACHABLE FRONTIERS FOUND!")
-                print("="*80 + "\n")
             self.ranked_frontiers = []
-            self.current_frontier_index = 0
-            return {'best_frontier_vertex': None, 'error': 'No reachable frontiers'}
+            return {'best_frontier_vertex': None, 'error': 'No reachable high-info frontiers'}
 
-        # Sort by utility (highest first)
-        candidates.sort(key=lambda x: x[0], reverse=True)
+        # 5. Sort Candidates
+        candidates.sort(key=lambda x: x['utility'], reverse=True)
 
-        # Print ranking summary
-        if self.debug:
-            print("\n" + "-"*80)
-            print("FRONTIER RANKING (by utility):")
-            print("-"*80)
-            for rank, c in enumerate(candidates[:5]):  # Show top 5
-                utility, vertex, _, mi, path_cost, src_dist, min_particle_dist, nearby_weight, weighted_dist = c
-                print(f"  {rank+1}. Vertex {vertex.id} @ ({vertex.position[0]:.2f}, {vertex.position[1]:.2f})")
-                print(f"     Utility: {utility:.6f} | MI: {mi:.6f} | Path: {path_cost:.2f}m | MinPartDist: {min_particle_dist:.2f}m | NearbyWeight: {nearby_weight:.4f}")
+        # 6. Reconstruct path for the BEST candidate
+        best = candidates[0]
+        best_path_ids = self.reconstruct_path(best['vertex'].id, prevs)
+        self.best_global_path = [self.vertex_dict[vid].position for vid in best_path_ids]
+        
+        self.best_frontier_vertex = best['vertex']
+        self.best_utility = best['utility']
 
-            if len(candidates) > 5:
-                print(f"  ... and {len(candidates)-5} more frontiers")
-
-        # Store all ranked candidates for fallback
-        self.ranked_frontiers = [(c[0], c[1], c[2]) for c in candidates]  # (utility, vertex, path_ids)
+        # 7. Store ranked list for fallback (lazily storing the predecessors map)
+        self.ranked_frontiers = []
+        for c in candidates:
+            self.ranked_frontiers.append({
+                'utility': c['utility'],
+                'vertex': c['vertex'],
+                'prev_map': prevs # Store map reference to reconstruct path later if needed
+            })
         self.current_frontier_index = 0
 
-        best = candidates[0]
-        self.best_frontier_vertex = best[1]
-        self.best_global_path = [self.vertex_dict[vid].position for vid in best[2]]
-        self.best_utility = best[0]
-
-        # Print selected frontier
         if self.debug:
-            print("\n" + "="*80)
-            print("✓ SELECTED FRONTIER:")
-            print("="*80)
-            print(f"  Vertex ID: {best[1].id}")
-            print(f"  Position: ({best[1].position[0]:.2f}, {best[1].position[1]:.2f})")
-            print(f"  Utility: {best[0]:.6f}")
-            print(f"  MI: {best[3]:.6f}")
-            print(f"  Path cost: {best[4]:.2f}m")
-            print(f"  Dist to source estimate: {best[5]:.2f}m")
-            print(f"  Min dist to particle: {best[6]:.2f}m")
-            print(f"  Nearby particle weight: {best[7]:.4f}")
-            print(f"  Weighted particle dist: {best[8]:.2f}m")
-            print(f"  Path waypoints: {len(best[2])}")
-            print("="*80 + "\n")
+            print(f"DEBUG: Selected Vertex {best['vertex'].id}, Utility: {best['utility']:.4f}")
 
         return {
-            'best_frontier_vertex': best[1],
+            'best_frontier_vertex': best['vertex'],
             'best_global_path': self.best_global_path,
-            'best_utility': best[0],
-            'best_mutual_info': best[3],
-            'best_path_cost': best[4],
-            'best_source_dist': best[5],
+            'best_utility': best['utility'],
+            'best_mutual_info': best['mi'],
+            'best_path_cost': best['path_cost'],
+            'best_source_dist': best['src_dist'],
             'num_frontiers': len(frontier_vertices),
-            'num_reachable': len(candidates),
-            'frontier_vertices': [c[1] for c in candidates],
-            'utilities': [c[0] for c in candidates]
+            'num_reachable': len(candidates)
         }
 
     def get_next_best_frontier(self) -> Optional[Dict]:
         """
         Get the next best frontier when current path is blocked.
-        Returns None if no more frontiers available.
         """
         self.current_frontier_index += 1
 
         if self.current_frontier_index >= len(self.ranked_frontiers):
             return None
 
-        utility, vertex, path_ids = self.ranked_frontiers[self.current_frontier_index]
+        # Retrieve candidate info
+        candidate = self.ranked_frontiers[self.current_frontier_index]
+        vertex = candidate['vertex']
+        prev_map = candidate['prev_map']
+        
+        # Reconstruct path on demand
+        path_ids = self.reconstruct_path(vertex.id, prev_map)
+        if not path_ids:
+            return self.get_next_best_frontier() # Skip if reconstruction fails (shouldn't happen)
+
         path = [self.vertex_dict[vid].position for vid in path_ids]
 
         self.best_frontier_vertex = vertex
         self.best_global_path = path
-        self.best_utility = utility
+        self.best_utility = candidate['utility']
 
         return {
             'success': True,
             'best_frontier_vertex': vertex,
             'best_global_path': path,
-            'best_utility': utility,
+            'best_utility': candidate['utility'],
             'frontier_index': self.current_frontier_index,
             'total_frontiers': len(self.ranked_frontiers)
         }
 
     def plan(self, current_position: Tuple[float, float], particle_filter: ParticleFilterOptimized) -> Dict:
         """Execute global planning pipeline."""
+        
+        # 1. Detect
         frontier_cells = self.detect_frontiers()
         if not frontier_cells:
             return {'success': False, 'error': 'No frontiers detected'}
 
+        # 2. Cluster
         clusters = self.cluster_frontiers()
         if not clusters:
             return {'success': False, 'error': 'No valid clusters'}
 
+        # 3. Build Graph (PRM)
         self.build_prm_graph(current_position)
         
+        # 4. Evaluate & Select
         eval_results = self.evaluate_frontier_vertices(current_position, particle_filter)
         
         if eval_results.get('best_frontier_vertex') is None:

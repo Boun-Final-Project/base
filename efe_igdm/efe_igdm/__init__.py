@@ -30,9 +30,6 @@ from .mapping.occupancy_grid import (
 # Visualization
 from .visualization.text_visualizer import TextVisualizer
 
-# Utilities
-from .utils.unit_conversion import GasUnitConverter
-
 __all__ = [
     # Main node
     'RRTInfotaxisNode',
@@ -56,7 +53,4 @@ __all__ = [
 
     # Visualization
     'TextVisualizer',
-
-    # Utilities
-    'GasUnitConverter',
 ]
