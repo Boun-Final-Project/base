@@ -22,6 +22,7 @@ from .planning.rrt import RRT
 from .planning.global_planner import GlobalPlanner
 from .visualization.text_visualizer import TextVisualizer
 from .planning.dead_end_detector import DeadEndDetector
+from .visualization.marker_visualizer import MarkerVisualizer
 
 import numpy as np
 import csv
@@ -140,22 +141,9 @@ class RRTInfotaxisNode(Node):
         self.laser_subscription = self.create_subscription(
             LaserScan, '/PioneerP3DX/laser_scanner', self.laser_callback, 10)
 
-        # Publishers
-        self.particle_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/particles', 10)
-        self.all_paths_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/all_paths', 10)
-        self.best_path_pub = self.create_publisher(Marker, '/rrt_infotaxis/best_path', 10)
-        self.estimated_source_pub = self.create_publisher(Marker, '/rrt_infotaxis/estimated_source', 10)
-        self.current_pos_pub = self.create_publisher(Marker, '/rrt_infotaxis/current_position', 10)
         self.text_info_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/source_info_text', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
         self.initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, '/PioneerP3DX/initialpose', 10)
-
-        # Global planner publishers
-        self.frontier_cells_pub = self.create_publisher(Marker, '/rrt_infotaxis/frontier_cells', 10)
-        self.frontier_centroids_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/frontier_centroids', 10)
-        self.prm_graph_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/prm_graph', 10)
-        self.global_path_pub = self.create_publisher(Marker, '/rrt_infotaxis/global_path', 10)
-        self.planner_mode_pub = self.create_publisher(Marker, '/rrt_infotaxis/planner_mode', 10)
 
         # SLAM map publisher
         map_qos = QoSProfile(depth=10, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL, reliability=QoSReliabilityPolicy.RELIABLE)
@@ -185,6 +173,8 @@ class RRTInfotaxisNode(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to load occupancy map: {e}')
             raise
+
+        self.marker_viz = MarkerVisualizer(self, self.slam_map)
 
         self.dispersion_model = IndoorGaussianDispersionModel(
             sigma_m=self.params['sigma_m'], occupancy_grid=self.slam_map
@@ -326,7 +316,7 @@ class RRTInfotaxisNode(Node):
         self.planner_mode = 'LOCAL'
         self.global_path = []
         self.global_path_index = 0
-        self.clear_global_planner_visualizations()
+        self.marker_viz.clear_global_planner_visualizations()
         self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
         self.planning_pending = True
 
@@ -387,7 +377,7 @@ class RRTInfotaxisNode(Node):
             self.planning_pending = True
             return None, True
             
-        self.visualize_global_path(self.global_path)
+        self.marker_viz.visualize_global_path(self.global_path)
         return waypoint, False
 
     def _run_local_planning(self) -> Tuple[Optional[Tuple[float, float]], dict, bool, float]:
@@ -436,16 +426,16 @@ class RRTInfotaxisNode(Node):
         
         if result['success']:
             self.get_logger().info('[GLOBAL MODE] Activated.')
-            self.clear_global_planner_visualizations()
+            self.marker_viz.clear_global_planner_visualizations()
             self.planner_mode = 'GLOBAL'
             self.global_path = result['best_global_path']
             self.global_path_index = 1
             
             # Viz
-            self.visualize_frontier_cells(result['frontier_cells'])
-            self.visualize_frontier_centroids(result['frontier_clusters'])
-            self.visualize_prm_graph(result['prm_vertices'])
-            self.visualize_global_path(self.global_path)
+            self.marker_viz.visualize_frontier_cells(result['frontier_cells'])
+            self.marker_viz.visualize_frontier_centroids(result['frontier_clusters'])
+            self.marker_viz.visualize_prm_graph(result['prm_vertices'],self.global_planner.vertex_dict)
+            self.marker_viz.visualize_global_path(self.global_path)
         else:
             self.get_logger().info('[DEAD END] Global plan failed. Staying LOCAL.')
             self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
@@ -512,8 +502,8 @@ class RRTInfotaxisNode(Node):
         if res['success']:
             self.global_path = res['best_global_path']
             self.global_path_index = 1
-            self.clear_global_planner_visualizations()
-            self.visualize_global_path(self.global_path)
+            self.marker_viz.clear_global_planner_visualizations()
+            self.marker_viz.visualize_global_path(self.global_path)
             self.planning_pending = True
         else:
             self.get_logger().error('Global recovery failed. Staying LOCAL.')
@@ -637,14 +627,14 @@ class RRTInfotaxisNode(Node):
     # =========================================================================
 
     def _update_visualizations(self, est_x, est_y, current_stds, debug_info, bi_optimal, dead_end_detected):
-        self.visualize_planner_mode()
-        self.visualize_particles(self.particle_filter.particles, self.particle_filter.weights)
-        self.visualize_estimated_source(est_x, est_y)
-        self.visualize_current_position(self.current_position)
+        self.marker_viz.visualize_planner_mode(self.planner_mode)
+        self.marker_viz.visualize_particles(self.particle_filter.particles, self.particle_filter.weights)
+        self.marker_viz.visualize_estimated_source(est_x, est_y)
+        self.marker_viz.visualize_current_position(self.current_position)
         
         if self.planner_mode == 'LOCAL' and debug_info:
-            self.visualize_all_paths(debug_info.get("all_paths", []), debug_info.get("all_utilities", None))
-            self.visualize_best_path(debug_info.get("best_path", []))
+            self.marker_viz.visualize_all_paths(debug_info.get("all_paths", []), debug_info.get("all_utilities", None))
+            self.marker_viz.visualize_best_path(debug_info.get("best_path", []))
 
         # Text Viz
         sigma_p = max(current_stds["x"], current_stds["y"])
@@ -881,219 +871,6 @@ class RRTInfotaxisNode(Node):
             if not self._is_valid_optimistic((sample_pos[0], sample_pos[1])):
                 return False
         return True
-
-    # --- Visualization Wrappers (Condensed) ---
-    def visualize_particles(self, particles, weights):
-        marker_array = MarkerArray()
-        marker = Marker()
-        marker.header.frame_id = "map"
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns, marker.id, marker.type, marker.action = "particles", 0, Marker.POINTS, Marker.ADD
-        marker.scale.x = marker.scale.y = 0.1
-        marker.pose.orientation.w = 1.0
-        
-        norm_w = weights / weights.max() if (len(weights) > 0 and weights.max() > 0) else weights
-        
-        for p_val, w in zip(particles, norm_w):
-            p = Point()
-            p.x, p.y, p.z = float(p_val[0]), float(p_val[1]), 0.5
-            marker.points.append(p)
-            c = ColorRGBA()
-            c.r, c.g, c.b, c.a = float(w), float(w * 0.8), float(1.0 - w), 0.8
-            marker.colors.append(c)
-        
-        marker_array.markers.append(marker)
-        self.particle_pub.publish(marker_array)
-
-    def visualize_all_paths(self, all_paths, all_utilities=None):
-        marker_array = MarkerArray()
-        # Delete old
-        for i in range(self.prev_num_paths):
-            m = Marker()
-            m.action = Marker.DELETE
-            m.ns, m.id = "all_paths", i
-            marker_array.markers.append(m)
-        
-        norm_utils = None
-        if all_utilities and len(all_utilities) > 0:
-            utils = np.array(all_utilities)
-            rng = utils.max() - utils.min()
-            norm_utils = (utils - utils.min()) / rng if rng > 1e-6 else np.ones_like(utils)*0.5
-
-        count = 0
-        for i, path in enumerate(all_paths):
-            if len(path) < 2: continue
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns, marker.id, marker.type, marker.action = "all_paths", i, Marker.LINE_STRIP, Marker.ADD
-            marker.scale.x = 0.08
-            for node in path:
-                p = Point()
-                p.x, p.y, p.z = float(node.position[0]), float(node.position[1]), 0.5
-                marker.points.append(p)
-            
-            c = ColorRGBA()
-            if norm_utils is not None and i < len(norm_utils):
-                val = norm_utils[i] ** 0.5
-                c.r = 1.0 if val < 0.5 else float(2.0 * (1.0 - val))
-                c.g = float(2.0 * val) if val < 0.5 else 1.0
-                c.b = 0.0
-                c.a = 0.9
-            else:
-                c.r, c.g, c.b, c.a = 0.6, 0.6, 0.6, 0.5
-            marker.color = c
-            marker_array.markers.append(marker)
-            count += 1
-        self.prev_num_paths = count
-        self.all_paths_pub.publish(marker_array)
-
-    def visualize_best_path(self, best_path):
-        marker = Marker()
-        marker.header.frame_id, marker.ns, marker.id = "map", "best_path", 0
-        marker.header.stamp = self.get_clock().now().to_msg()
-        if len(best_path) < 2:
-            marker.action = Marker.DELETE
-        else:
-            marker.type, marker.action = Marker.LINE_STRIP, Marker.ADD
-            marker.scale.x = 0.20
-            marker.color = ColorRGBA(r=0.0, g=0.5, b=1.0, a=1.0)
-            for node in best_path:
-                p = Point()
-                p.x, p.y, p.z = float(node.position[0]), float(node.position[1]), 0.6
-                marker.points.append(p)
-        self.best_path_pub.publish(marker)
-
-    def visualize_estimated_source(self, est_x, est_y):
-        marker = Marker()
-        marker.header.frame_id, marker.ns, marker.id = "map", "estimated_source", 0
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.type, marker.action = Marker.SPHERE, Marker.ADD
-        marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = float(est_x), float(est_y), 0.5
-        marker.scale.x = marker.scale.y = marker.scale.z = 0.4
-        marker.color = ColorRGBA(r=1.0, g=0.65, b=0.0, a=1.0)
-        self.estimated_source_pub.publish(marker)
-
-    def visualize_current_position(self, position):
-        marker = Marker()
-        marker.header.frame_id, marker.ns, marker.id = "map", "current_position", 0
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.type, marker.action = Marker.SPHERE, Marker.ADD
-        marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = float(position[0]), float(position[1]), 0.5
-        marker.scale.x = marker.scale.y = marker.scale.z = 0.4
-        marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
-        self.current_pos_pub.publish(marker)
-
-    def visualize_frontier_cells(self, frontier_cells):
-        marker = Marker()
-        marker.header.frame_id, marker.ns, marker.id = "map", "frontier_cells", 0
-        marker.type, marker.action = Marker.CUBE_LIST, Marker.ADD
-        marker.scale.x = marker.scale.y = marker.scale.z = 0.1
-        marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.6)
-        for gx, gy in frontier_cells:
-            wx, wy = self.slam_map.grid_to_world(gx, gy)
-            p = Point()
-            p.x, p.y, p.z = wx, wy, 0.1
-            marker.points.append(p)
-        self.frontier_cells_pub.publish(marker)
-
-    def visualize_frontier_centroids(self, frontier_clusters):
-        marker_array = MarkerArray()
-        for i, cluster in enumerate(frontier_clusters):
-            marker = Marker()
-            marker.header.frame_id, marker.ns, marker.id = "map", "frontier_centroids", i
-            marker.type, marker.action = Marker.SPHERE, Marker.ADD
-            marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = cluster.centroid_world[0], cluster.centroid_world[1], 0.3
-            marker.scale.x = marker.scale.y = marker.scale.z = 0.3
-            marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.9)
-            marker_array.markers.append(marker)
-        self.frontier_centroids_pub.publish(marker_array)
-
-    def visualize_prm_graph(self, prm_vertices):
-        # Implementation identical to original, just ensuring correct indent/imports
-        marker_array = MarkerArray()
-        # Vertices
-        v_marker = Marker()
-        v_marker.header.frame_id, v_marker.ns, v_marker.id = "map", "prm_vertices", 0
-        v_marker.type, v_marker.action = Marker.SPHERE_LIST, Marker.ADD
-        v_marker.scale.x = v_marker.scale.y = v_marker.scale.z = 0.15
-        v_marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.5)
-        
-        # Edges
-        e_marker = Marker()
-        e_marker.header.frame_id, e_marker.ns, e_marker.id = "map", "prm_edges", 1
-        e_marker.type, e_marker.action = Marker.LINE_LIST, Marker.ADD
-        e_marker.scale.x = 0.02
-        e_marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.3)
-        
-        added_edges = set()
-        for v in prm_vertices:
-            p = Point()
-            p.x, p.y, p.z = v.position[0], v.position[1], 0.2
-            v_marker.points.append(p)
-            
-            for nid, _ in v.neighbors:
-                edge = tuple(sorted([v.id, nid]))
-                if edge not in added_edges:
-                    added_edges.add(edge)
-                    neighbor = self.global_planner.vertex_dict[nid]
-                    p2 = Point()
-                    p2.x, p2.y, p2.z = neighbor.position[0], neighbor.position[1], 0.2
-                    e_marker.points.append(p)
-                    e_marker.points.append(p2)
-        
-        marker_array.markers.append(v_marker)
-        marker_array.markers.append(e_marker)
-        self.prm_graph_pub.publish(marker_array)
-
-    def visualize_global_path(self, global_path):
-        marker = Marker()
-        marker.header.frame_id, marker.ns, marker.id = "map", "global_path", 0
-        marker.type, marker.action = Marker.LINE_STRIP, Marker.ADD
-        marker.scale.x = 0.15
-        marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)
-        for pos in global_path:
-            p = Point()
-            p.x, p.y, p.z = pos[0], pos[1], 0.4
-            marker.points.append(p)
-        self.global_path_pub.publish(marker)
-
-    def visualize_planner_mode(self):
-        marker = Marker()
-        marker.header.frame_id, marker.ns, marker.id = "map", "planner_mode", 0
-        marker.type, marker.action = Marker.TEXT_VIEW_FACING, Marker.ADD
-        marker.pose.position.x = self.slam_map.origin_x + 1.0
-        marker.pose.position.y = self.slam_map.origin_y + self.slam_map.real_world_height - 1.0
-        marker.pose.position.z = 2.0
-        marker.scale.z = 0.5
-        if self.planner_mode == 'LOCAL':
-            marker.text = "MODE: LOCAL (RRT-Infotaxis)"
-            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
-        else:
-            marker.text = "MODE: GLOBAL (Frontier Exploration)"
-            marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)
-        self.planner_mode_pub.publish(marker)
-
-    def clear_global_planner_visualizations(self):
-        # Simple delete triggers
-        m = Marker()
-        m.action = Marker.DELETE
-        m.header.frame_id = "map"
-        
-        m.ns = "frontier_cells"
-        self.frontier_cells_pub.publish(m)
-        m.ns = "global_path"
-        self.global_path_pub.publish(m)
-        
-        ma = MarkerArray()
-        for ns in ["prm_vertices", "prm_edges", "frontier_vertices", "frontier_centroids"]:
-            for i in range(100):
-                dm = Marker()
-                dm.header.frame_id = "map"
-                dm.ns, dm.id, dm.action = ns, i, Marker.DELETE
-                ma.markers.append(dm)
-        self.prm_graph_pub.publish(ma)
-        self.frontier_centroids_pub.publish(ma)
 
     def __del__(self):
         if self.log_file is not None:
