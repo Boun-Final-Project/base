@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.stats import multivariate_normal, norm as scipy_norm
-from ..models.igdm_gas_model import IndoorGaussianDispersionModel
-from ..interfaces.sensor_interface import SensorModel
+from .igdm_gas_model import IndoorGaussianDispersionModel
+from .sensor_interface import SensorModel
 from .sensor_model import ContinuousGaussianSensorModel
 from copy import deepcopy
 

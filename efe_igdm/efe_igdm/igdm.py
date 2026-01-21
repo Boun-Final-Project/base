@@ -13,7 +13,7 @@ from visualization_msgs.msg import MarkerArray
 from .mapping.occupancy_grid import create_occupancy_map_from_service, create_empty_occupancy_map
 from .estimation.sensor_model import ContinuousGaussianSensorModel
 from .estimation.particle_filter import ParticleFilter
-from .models.igdm_gas_model import IndoorGaussianDispersionModel
+from .estimation.igdm_gas_model import IndoorGaussianDispersionModel
 from .planning.rrt import RRT
 from .planning.global_planner import GlobalPlanner
 from .visualization.text_visualizer import TextVisualizer
@@ -21,7 +21,7 @@ from .planning.dead_end_detector import DeadEndDetector
 
 # --- NEW MODULES ---
 from .visualization.marker_visualizer import MarkerVisualizer
-from .navigation.navigator import Navigator
+from .planning.navigator import Navigator
 from .mapping.lidar_mapper import LidarMapper
 from .utils.experiment_logger import ExperimentLogger
 

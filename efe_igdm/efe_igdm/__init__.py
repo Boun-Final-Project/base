@@ -18,7 +18,7 @@ from .estimation.particle_filter import ParticleFilter
 from .estimation.sensor_model import ContinuousGaussianSensorModel
 
 # Gas dispersion models
-from .models.igdm_gas_model import IndoorGaussianDispersionModel
+from .estimation.igdm_gas_model import IndoorGaussianDispersionModel
 
 # Mapping
 from .mapping.occupancy_grid import (

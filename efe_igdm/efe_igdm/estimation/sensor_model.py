@@ -1,5 +1,5 @@
 from scipy.stats import norm
-from ..interfaces.sensor_interface import SensorModel
+from .sensor_interface import SensorModel
 import numpy as np
 
 class ContinuousGaussianSensorModel(SensorModel):
