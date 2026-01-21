@@ -1,22 +1,24 @@
 import numpy as np
 from scipy.stats import multivariate_normal, norm as scipy_norm
 from ..models.igdm_gas_model import IndoorGaussianDispersionModel
+from ..interfaces.sensor_interface import SensorModel
 from .sensor_model import ContinuousGaussianSensorModel
 from copy import deepcopy
 
 class ParticleFilter:
     """
-    Optimized particle filter for gas source term estimation.
-
-    Key optimizations:
-    1. Vectorized operations for likelihoods and resampling (np.searchsorted).
-    2. Lightweight copy for prediction (avoids deepcopy).
-    3. Cached computations for repeated queries.
-    4. NumPy broadcasting for batch operations.
+    A particle filter for localizing an indoor gas source using continuous measurements.
+    Each particle represents a hypothesis of the source location (x₀, y₀) and release rate (Q₀).
+    Attributes:
+        N: Number of particles
+        bounds: Search space bounds for x, y, Q
+        sensor_model: Instance of ContinuousGaussianSensorModel
+        dispersion_model: Instance of IndoorGaussianDispersionModel
+        resample_threshold: Effective sample size threshold for resampling
+        mcmc_std: Standard deviations for MCMC proposal distributions
     """
-
     def __init__(self, num_particles: int, search_bounds: dict[str, list[float]],
-                 sensor_model: ContinuousGaussianSensorModel,
+                 sensor_model: SensorModel,
                  dispersion_model: IndoorGaussianDispersionModel,
                  resample_threshold: float = 0.5, mcmc_std=None):
         self.N = num_particles
@@ -24,7 +26,7 @@ class ParticleFilter:
         self.sensor_model = sensor_model
         self.dispersion_model = dispersion_model
         self.resample_threshold = resample_threshold
-
+        self.mcmc_std = mcmc_std
         # Set MCMC standard deviations
         if mcmc_std is None:
             x_range = search_bounds['x'][1] - search_bounds['x'][0]
@@ -49,11 +51,6 @@ class ParticleFilter:
         # Store last measurement for MCMC
         self.last_measurement = None
         self.last_sensor_position = None
-
-        # Cache for concentration computations
-        self._concentration_cache = {}
-        self._cache_hits = 0
-        self._cache_misses = 0
 
         # IGDM: Store precomputed distance map from current sensor position
         self._current_distance_map = None
@@ -114,7 +111,7 @@ class ParticleFilter:
 
     def _compute_concentrations(self, particles: np.ndarray, sensor_position: tuple[float, float]) -> np.ndarray:
         """
-        Compute concentrations for a specific array of particles (VECTORIZED).
+        Compute concentrations for a specific array of particle beliefs.
         Args:
             particles: Array of shape (N, 3) containing [x, y, Q]
             sensor_position: Tuple (x, y) of sensor location
@@ -129,7 +126,7 @@ class ParticleFilter:
 
     def _compute_likelihoods_vectorized(self, measurement: float, sensor_position: tuple[float, float]):
         """
-        Compute Gaussian measurement likelihood for all particles (VECTORIZED).
+        Compute Gaussian measurement likelihood for all particle beliefs.
         """
         # Compute all predicted concentrations at once
         predicted_concs = self._compute_concentrations(self.particles, sensor_position)
@@ -144,7 +141,7 @@ class ParticleFilter:
 
     def _resample(self):
         """
-        Resample particles using systematic resampling (VECTORIZED).
+        Resample particle beliefs using systematic resampling.
         """
         # 1. Perform systematic resampling
         indices = self._systematic_resample()
@@ -156,7 +153,7 @@ class ParticleFilter:
     def _systematic_resample(self):
         """
         This puts something like a ruler with N evenly spaced marks over the cumulative sum
-        Therefore high weight particles get multiple samples, low weight particles get none.
+        Therefore high weight particle beliefs get multiple samples, low weight particle beliefs get none.
         """
         # 1. Generate cumulative weights
         cumulative_sum = np.cumsum(self.weights)
@@ -310,10 +307,6 @@ class ParticleFilter:
         new_pf.last_measurement = None
         new_pf.last_sensor_position = None
 
-        new_pf._concentration_cache = {}
-        new_pf._cache_hits = 0
-        new_pf._cache_misses = 0
-
         new_pf._current_distance_map = None
         new_pf._current_sensor_position = None
 
@@ -321,3 +314,35 @@ class ParticleFilter:
 
     def deep_copy(self):
         return deepcopy(self)
+
+    def compute_expected_entropy(self, sensor_position: tuple[float, float]) -> float:
+        """
+        OPTIMIZED: Compute Expected Entropy (Information Gain) in one pass.
+        Replaces the slow loop over sensor bins.
+        """
+        # 1. Compute concentrations ONCE (The expensive part)
+        predicted_concs = self._compute_concentrations(self.particles, sensor_position)
+
+        # 2. Get probabilities for ALL bins at once
+        # Shape: (Num_Bins, N_Particles)
+        bin_probs_matrix = self.sensor_model.compute_predictive_distribution(predicted_concs)
+
+        # 3. Compute P(z) for each bin (marginalized over particles)
+        # Shape: (Num_Bins,)
+        bin_total_probs = bin_probs_matrix @ self.weights
+
+        # 4. Compute posterior weights for ALL scenarios simultaneously
+        # Bayes Rule: P(x|z) = P(z|x) * P(x) / P(z)
+        # Avoid division by zero
+        safe_denominators = bin_total_probs[:, None] + 1e-15
+        posterior_weights = (bin_probs_matrix * self.weights[None, :]) / safe_denominators
+
+        # 5. Compute Entropy for each bin scenario
+        # H(X|Z=k) = -Σ w_new * log(w_new)
+        posterior_weights_safe = np.maximum(posterior_weights, 1e-15)
+        entropies = -np.sum(posterior_weights * np.log(posterior_weights_safe), axis=1)
+
+        # 6. Compute Expected Entropy: E[H] = Σ P(z) * H(X|Z=z)
+        expected_entropy = np.sum(bin_total_probs * entropies)
+
+        return expected_entropy

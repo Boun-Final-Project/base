@@ -1,7 +1,8 @@
 from scipy.stats import norm
+from ..interfaces.sensor_interface import SensorModel
 import numpy as np
 
-class ContinuousGaussianSensorModel:
+class ContinuousGaussianSensorModel(SensorModel):
     """
     Continuous Gaussian sensor model from the paper (Equation 3, page 3).
 
@@ -238,3 +239,13 @@ class ContinuousGaussianSensorModel:
         bin_probs_per_particle = cdfs[1:, :] - cdfs[:-1, :]
 
         return bin_probs_per_particle
+
+    def compute_likelihood(self, measurement: float, predictions: np.ndarray) -> np.ndarray:
+        return self.probability_continuous_vec(measurement, predictions)
+
+    def compute_predictive_distribution(self, predictions: np.ndarray) -> np.ndarray:
+        return self.compute_discretized_distribution(predictions)
+
+    def compute_likelihood_for_bin(self, bin_index: int, predictions: np.ndarray) -> np.ndarray:
+        thresholds = self.create_discretization_thresholds(predictions)
+        return self.compute_bin_likelihood_vec(bin_index, predictions, thresholds)

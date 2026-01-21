@@ -371,13 +371,11 @@ class RRTInfotaxisNode(Node):
             return None, True
 
         # Entropy / Information Gain Check
-        # Calculate expected entropy reduction if we were to measure at the waypoint
+        # Calculate expected entropy reduction (Vectorized Optimization)
         current_entropy = self.particle_filter.get_entropy()
-        expected_entropy = 0.0
-        for m in range(self.sensor_model.num_levels):
-            prob_z = self.particle_filter.predict_measurement_probability(waypoint, m)
-            hyp_entropy = self.particle_filter.compute_hypothetical_entropy(m, waypoint)
-            expected_entropy += prob_z * hyp_entropy
+        
+        # CHANGED: Use the new single-pass vectorized method
+        expected_entropy = self.particle_filter.compute_expected_entropy(waypoint)
         
         mutual_info = current_entropy - expected_entropy
         detector_status = self.dead_end_detector.get_status()
