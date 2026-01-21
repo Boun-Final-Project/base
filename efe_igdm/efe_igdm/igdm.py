@@ -7,7 +7,7 @@ from olfaction_msgs.msg import GasSensor
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid
-from visualization_msgs.msg import Marker, MarkerArray
+from visualization_msgs.msg import MarkerArray
 
 # Custom Modules
 from .mapping.occupancy_grid import create_occupancy_map_from_service, create_empty_occupancy_map
@@ -19,19 +19,21 @@ from .planning.global_planner import GlobalPlanner
 from .visualization.text_visualizer import TextVisualizer
 from .planning.dead_end_detector import DeadEndDetector
 
-# NEW MODULES
+# --- NEW MODULES ---
 from .visualization.marker_visualizer import MarkerVisualizer
 from .navigation.navigator import Navigator
+from .mapping.lidar_mapper import LidarMapper
+from .utils.experiment_logger import ExperimentLogger
 
 import numpy as np
-import csv
-from datetime import datetime
-import os
 import time
 from typing import Tuple, List, Optional
 
 class RRTInfotaxisNode(Node):
-    """RRT Infotaxis node (Refactored Coordinator)."""
+    """
+    RRT Infotaxis node (Refactored Coordinator).
+    Delegates Visualization, Navigation, Mapping, and Logging to helper classes.
+    """
 
     def __init__(self):
         super().__init__('rrt_infotaxis_node')
@@ -116,6 +118,12 @@ class RRTInfotaxisNode(Node):
         self.previous_position = None
         self.computation_times = []
 
+    def _setup_data_logging(self):
+        """Initialize Experiment Logger."""
+        self.logger = ExperimentLogger()
+        self.get_logger().info(f'Data logging to: {self.logger.log_filename}')
+        self.start_time = self.get_clock().now()
+
     def _init_ros_interfaces(self):
         """Initialize Publishers and Subscribers."""
         # Subscriptions
@@ -128,10 +136,6 @@ class RRTInfotaxisNode(Node):
 
         # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
-        # Note: Marker publishers moved to MarkerVisualizer
-        # Note: Initialpose publisher moved to Navigator
-
-        # Text Info Publisher (still needed for TextVisualizer)
         self.text_info_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/source_info_text', 10)
 
         # SLAM map publisher
@@ -155,9 +159,10 @@ class RRTInfotaxisNode(Node):
             self.get_logger().error(f'Failed to load occupancy map: {e}')
             raise
 
-        # 1. Initialize Helpers (Viz & Nav)
+        # 1. Initialize Helper Modules
         self.marker_viz = MarkerVisualizer(self, self.slam_map)
         self.navigator = Navigator(self, on_complete_callback=self._on_navigation_complete)
+        self.lidar_mapper = LidarMapper(self.slam_map)
         self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
 
         # 2. Initialize Models
@@ -198,23 +203,6 @@ class RRTInfotaxisNode(Node):
             lambda_s=self.get_parameter('lambda_s').value
         )
 
-    def _setup_data_logging(self):
-        log_dir = os.path.expanduser('~/igdm_logs')
-        os.makedirs(log_dir, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_filename = os.path.join(log_dir, f'igdm_log_{timestamp}.csv')
-        self.log_file = open(log_filename, 'w', newline='')
-        self.csv_writer = csv.writer(self.log_file)
-        self.csv_writer.writerow([
-            'step', 'elapsed_time', 'entropy', 'std_dev_x', 'std_dev_y', 'std_dev_Q',
-            'est_x', 'est_y', 'est_Q', 'sensor_value', 'continuous_measurement', 'threshold',
-            'num_branches', 'best_utility', 'J1_entropy_gain', 'J2_travel_cost',
-            'robot_x', 'robot_y', 'sigma_m', 'bi_optimal', 'bi_threshold', 'dead_end_detected',
-            'planner_mode', 'global_path_length', 'global_waypoint_index'
-        ])
-        self.log_file.flush()
-        self.start_time = self.get_clock().now()
-
     def _on_navigation_complete(self):
         """Callback from Navigator when a move finishes."""
         self.planning_pending = True
@@ -234,12 +222,12 @@ class RRTInfotaxisNode(Node):
             self.sensor_initialized = True
             self.get_logger().info(f'Sensor initialized (α={self.sensor_model.alpha})')
 
-        # 1. Handle Initialization Spin (Delegated)
+        # 1. Handle Initialization Spin (Delegated to Navigator)
         if not self.navigator.initial_spin_done:
             self.navigator.perform_initial_spin(self.current_position, self.current_theta)
             return
 
-        # 2. Block if moving (Delegated)
+        # 2. Block if moving (Delegated to Navigator)
         if self.navigator.is_moving:
             return
 
@@ -276,7 +264,7 @@ class RRTInfotaxisNode(Node):
         if self._check_convergence(current_stds):
             return
 
-        # 8. Execute Move (Delegated)
+        # 8. Execute Move (Delegated to Navigator)
         if next_pos is not None:
             step_computation_time = time.time() - step_start_time
             self.computation_times.append(step_computation_time)
@@ -332,7 +320,7 @@ class RRTInfotaxisNode(Node):
             self.planning_pending = True
             return None, True
 
-        # Entropy Check (Optimized Vectorized Call)
+        # Entropy Check (Using Optimized Vectorized Call)
         current_entropy = self.particle_filter.get_entropy()
         expected_entropy = self.particle_filter.compute_expected_entropy(waypoint)
         
@@ -404,13 +392,12 @@ class RRTInfotaxisNode(Node):
             self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
 
     def trigger_recovery(self):
-        # 1. Attempt Teleport (Delegated)
+        # 1. Attempt Teleport (Delegated to Navigator)
         success = self.navigator.attempt_teleport_recovery(
             self.current_position, self.slam_map, self.dead_end_detector
         )
         if success:
-            # Main node just needs to ensure state is clean
-            self.current_position = None 
+            self.current_position = None # Force update from pose callback
             return
 
         # 2. Fallback to Global Planner
@@ -450,20 +437,12 @@ class RRTInfotaxisNode(Node):
 
         avg_comp_time = np.mean(self.computation_times) if self.computation_times else 0.0
 
-        summary = (
-            f"ST: {self.step_count} steps\n"
-            f"TD: {self.total_travel_distance:.2f} m\n"
-            f"Time: {elapsed_time:.2f} s\n"
-            f"Avg Comp: {avg_comp_time:.4f} s\n"
-            f"Error: {est_error:.3f} m\n"
-            f"Est Source: ({est_x:.3f}, {est_y:.3f})"
+        # Delegate summary writing to Logger
+        summary_text = self.logger.save_summary(
+            self.step_count, self.total_travel_distance, elapsed_time, 
+            avg_comp_time, est_x, est_y, est_error
         )
-        self.get_logger().info('\n' + summary)
-        
-        summary_filename = self.log_file.name.replace('.csv', '_summary.txt')
-        with open(summary_filename, 'w') as f:
-            f.write(summary)
-        
+        self.get_logger().info('\n' + summary_text)
         self.search_complete = True
 
     # =========================================================================
@@ -506,80 +485,30 @@ class RRTInfotaxisNode(Node):
             self.take_step()
 
     def laser_callback(self, msg: LaserScan):
-        """Process laser scan (Simple Map Update)."""
-        if not hasattr(self, 'slam_map') or self.current_position is None or self.current_theta is None:
+        """Process laser scan via LidarMapper."""
+        if self.current_position is None or self.current_theta is None:
             return
 
-        robot_x = self.current_position[0]
-        robot_y = self.current_position[1]
-        robot_theta = self.current_theta
-        obstacles_this_scan = 0
-
-        for i, range_val in enumerate(msg.ranges):
-            if not np.isfinite(range_val):
-                continue
-            range_val = min(range_val, msg.range_max)
-            angle = msg.angle_min + i * msg.angle_increment
-            hit_obstacle = (range_val >= msg.range_min and range_val < msg.range_max)
-
-            local_x = range_val * np.cos(angle)
-            local_y = range_val * np.sin(angle)
-            end_x = robot_x + local_x * np.cos(robot_theta) - local_y * np.sin(robot_theta)
-            end_y = robot_y + local_x * np.sin(robot_theta) + local_y * np.cos(robot_theta)
-
-            self._mark_ray_as_free(robot_x, robot_y, end_x, end_y)
-
-            if hit_obstacle:
-                if self._mark_obstacle_in_slam_map(end_x, end_y):
-                    obstacles_this_scan += 1
-
+        obstacles_found = self.lidar_mapper.update_from_scan(
+            msg, 
+            self.current_position[0], 
+            self.current_position[1], 
+            self.current_theta
+        )
         self.laser_scan_count += 1
-        self.total_obstacles_marked += obstacles_this_scan
+        self.total_obstacles_marked += obstacles_found
 
     # =========================================================================
     # HELPERS
     # =========================================================================
 
-    def _mark_obstacle_in_slam_map(self, world_x: float, world_y: float) -> bool:
-        gx, gy = self.slam_map.world_to_grid(world_x, world_y)
-        if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height:
-            return False
-        self.slam_map.grid[gy, gx] = 1
-        return True
-
-    def _mark_ray_as_free(self, x0, y0, x1, y1):
-        # Raytracing logic
-        gx0, gy0 = self.slam_map.world_to_grid(x0, y0)
-        gx1, gy1 = self.slam_map.world_to_grid(x1, y1)
-        dx = abs(gx1 - gx0)
-        dy = abs(gy1 - gy0)
-        x, y = gx0, gy0
-        sx = 1 if gx0 < gx1 else -1
-        sy = 1 if gy0 < gy1 else -1
-        err = dx - dy
-
-        while True:
-            if 0 <= x < self.slam_map.width and 0 <= y < self.slam_map.height:
-                if x == gx1 and y == gy1:
-                    break
-                if self.slam_map.grid[y, x] != 1:
-                    self.slam_map.grid[y, x] = 0
-
-            if x == gx1 and y == gy1:
-                break
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                x += sx
-            if e2 < dx:
-                err += dx
-                y += sy
-
     def is_path_to_waypoint_valid(self, waypoint: tuple) -> bool:
+        """Check valid path using internal simple checker."""
         if self.current_position is None: return False
         return self._is_segment_valid(self.current_position, waypoint)
 
     def _is_valid_optimistic(self, position: tuple) -> bool:
+        """Lightweight optimistic check used by RRT/GlobalPlanner integration."""
         gx, gy = self.slam_map.world_to_grid(*position)
         if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height: return False
         
@@ -596,6 +525,7 @@ class RRTInfotaxisNode(Node):
         return True
 
     def _is_segment_valid(self, start: tuple, end: tuple) -> bool:
+        """Simple line check."""
         pos1, pos2 = np.array(start), np.array(end)
         dist = np.linalg.norm(pos2 - pos1)
         if dist < 1e-6: return self._is_valid_optimistic(tuple(pos1))
@@ -644,29 +574,14 @@ class RRTInfotaxisNode(Node):
         self.publish_slam_map()
 
     def _log_step_data(self, means, stds, debug_info, bi_optimal, dead_end_detected):
-        debug_info = debug_info or {}
-        row = [
-            self.step_count, 
-            0, # elapsed time placeholder
-            f'{self.particle_filter.get_entropy():.4f}',
-            f'{stds["x"]:.4f}', f'{stds["y"]:.4f}', f'{stds["Q"]:.4f}',
-            f'{means["x"]:.4f}', f'{means["y"]:.4f}', f'{means["Q"]:.4f}',
-            f'{self.sensor_raw_value:.4f}', f'{self.sensor_raw_value:.4f}', '0.0',
-            debug_info.get("num_branches", 0),
-            f'{debug_info.get("best_utility", 0.0):.4f}',
-            f'{debug_info.get("best_entropy_gain", 0.0):.4f}',
-            f'{debug_info.get("best_travel_cost", 0.0):.4f}',
-            f'{self.current_position[0]:.4f}', f'{self.current_position[1]:.4f}',
-            f'{self.params["sigma_m"]:.4f}',
-            f'{bi_optimal:.4f}',
-            f'{self.dead_end_detector.get_status()["bi_threshold"]:.4f}',
-            1 if dead_end_detected else 0,
-            self.planner_mode,
+        self.logger.log_step(
+            self.step_count, self.particle_filter, self.sensor_raw_value, 
+            self.current_position, self.params, debug_info, 
+            bi_optimal, dead_end_detected, 
+            self.planner_mode, 
             len(self.global_path) if self.planner_mode == 'GLOBAL' else 0,
             self.global_path_index if self.planner_mode == 'GLOBAL' else 0
-        ]
-        self.csv_writer.writerow(row)
-        self.log_file.flush()
+        )
         self.step_count += 1
 
     def publish_slam_map(self):
@@ -688,8 +603,8 @@ class RRTInfotaxisNode(Node):
         self.publish_slam_map()
 
     def __del__(self):
-        if self.log_file is not None:
-            self.log_file.close()
+        if hasattr(self, 'logger'):
+            self.logger.close()
 
 def main(args=None):
     rclpy.init(args=args)
