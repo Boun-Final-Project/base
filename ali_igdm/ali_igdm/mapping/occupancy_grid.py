@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import rclpy
 from rclpy.node import Node
 from gaden_msgs.srv import Occupancy
+from nav_msgs.msg import OccupancyGrid
+from std_msgs.msg import Header
 
 
 def load_3d_occupancy_grid_from_service(node: Node, service_name='/gaden_environment/occupancyMap3D',
@@ -299,6 +301,50 @@ class OccupancyGridMap:
             ax.grid(True, alpha=0.3)
 
         return ax
+
+    def to_ros_msg(self, frame_id: str = 'map', timestamp=None):
+        """
+        Convert occupancy grid to ROS2 OccupancyGrid message.
+
+        Parameters:
+        -----------
+        frame_id : str
+            Frame ID for the occupancy grid (default: 'map')
+        timestamp : builtin_interfaces.msg.Time
+            Timestamp for the message header (default: None)
+
+        Returns:
+        --------
+        msg : nav_msgs.msg.OccupancyGrid
+            ROS2 OccupancyGrid message
+        """
+        msg = OccupancyGrid()
+
+        # Set header
+        msg.header = Header()
+        msg.header.frame_id = frame_id
+        if timestamp is not None:
+            msg.header.stamp = timestamp
+
+        # Set metadata
+        msg.info.width = self.width
+        msg.info.height = self.height
+        msg.info.resolution = self.resolution
+        msg.info.origin.position.x = self.origin_x
+        msg.info.origin.position.y = self.origin_y
+        msg.info.origin.position.z = self.z_height if self.z_height is not None else 0.0
+        msg.info.origin.orientation.w = 1.0  # No rotation
+
+        # Convert grid data to ROS2 format
+        # Internal format: -1=unknown, 0=free, 1=occupied
+        # ROS2 format: -1=unknown, 0=free, 100=occupied
+        ros_grid = self.grid.copy().astype(np.int8)
+        ros_grid[ros_grid == 1] = 100  # Convert occupied cells to 100
+
+        # Flatten row-major (C-order) as expected by ROS2
+        msg.data = ros_grid.flatten().tolist()
+
+        return msg
 
 
 # Example usage function for ROS2 integration
