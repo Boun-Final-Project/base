@@ -16,7 +16,7 @@ from nav_msgs.msg import OccupancyGrid
 # Custom Modules
 from .mapping.occupancy_grid import create_occupancy_map_from_service, create_empty_occupancy_map
 from .estimation.sensor_model import ContinuousGaussianSensorModel
-from .estimation.particle_filter_optimized import ParticleFilterOptimized as ParticleFilter
+from .estimation.particle_filter import ParticleFilter
 from .models.igdm_gas_model import IndoorGaussianDispersionModel
 from .planning.rrt import RRT
 from .planning.global_planner import GlobalPlanner
@@ -195,7 +195,7 @@ class RRTInfotaxisNode(Node):
         self.particle_filter = ParticleFilter(
             num_particles=self.params['number_of_particles'],
             search_bounds={"x": (0, self.slam_map.real_world_width), "y": (0, self.slam_map.real_world_height), "Q": (0, 120.0)},
-            binary_sensor_model=self.sensor_model,
+            sensor_model=self.sensor_model,
             dispersion_model=self.dispersion_model
         )
 

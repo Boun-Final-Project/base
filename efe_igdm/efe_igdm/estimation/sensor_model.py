@@ -200,3 +200,41 @@ class ContinuousGaussianSensorModel:
             prob = prob_upper - prob_lower
 
         return prob
+    
+    def compute_discretized_distribution(self, predicted_concentrations: np.ndarray) -> np.ndarray:
+        """
+        Compute probability mass for ALL discretization bins for ALL particles at once.
+        
+        This replaces the manual CDF math previously done in ParticleFilter.
+        
+        Returns:
+        --------
+        bin_probs : np.ndarray
+            Shape (num_levels, N). 
+            Row i contains the probability that the measurement falls in Bin i 
+            for every particle.
+        """
+        # 1. Generate thresholds based on current predictions
+        inner_thresholds = self.create_discretization_thresholds(predicted_concentrations)
+        
+        # 2. define all bin edges: [-inf, t1, t2, ..., inf]
+        # Shape: (num_levels + 1,)
+        bin_edges = np.concatenate([[-np.inf], inner_thresholds, [np.inf]])
+
+        # 3. Compute sensor noise for every particle
+        # Shape: (N,)
+        sigma_g = self.alpha * predicted_concentrations + self.sigma_env
+        sigma_g = np.maximum(sigma_g, 1e-15)
+
+        # 4. Compute Z-scores matrix
+        # Broadcasting: (Num_Edges, 1) - (1, N) -> (Num_Edges, N)
+        z_scores = (bin_edges[:, None] - predicted_concentrations[None, :]) / sigma_g[None, :]
+
+        # 5. Compute CDFs
+        cdfs = norm.cdf(z_scores)
+
+        # 6. Compute bin probabilities (CDF[i+1] - CDF[i])
+        # Shape: (num_levels, N)
+        bin_probs_per_particle = cdfs[1:, :] - cdfs[:-1, :]
+
+        return bin_probs_per_particle

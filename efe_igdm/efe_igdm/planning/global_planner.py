@@ -16,7 +16,7 @@ from typing import List, Tuple, Optional, Dict, Set
 
 # Relative imports (keep these matching your file structure)
 from ..mapping.occupancy_grid import OccupancyGridMap
-from ..estimation.particle_filter_optimized import ParticleFilterOptimized
+from ..estimation.particle_filter import ParticleFilter
 
 
 class FrontierCluster:
@@ -364,7 +364,7 @@ class GlobalPlanner:
             
         return path[::-1] # Reverse to get Start -> Goal
 
-    def _compute_mutual_information(self, position: Tuple[float, float], pf: ParticleFilterOptimized) -> float:
+    def _compute_mutual_information(self, position: Tuple[float, float], pf: ParticleFilter) -> float:
         """Compute MI using particle filter."""
         current_entropy = pf.get_entropy()
         num_measurements = pf.sensor_model.num_levels if hasattr(pf.sensor_model, 'num_levels') else 2
@@ -378,7 +378,7 @@ class GlobalPlanner:
             
         return current_entropy - expected_entropy
 
-    def evaluate_frontier_vertices(self, current_pos: Tuple[float, float], pf: ParticleFilterOptimized) -> Dict:
+    def evaluate_frontier_vertices(self, current_pos: Tuple[float, float], pf: ParticleFilter) -> Dict:
         """
         Evaluate frontiers based on utility function (Eq. 22).
         Uses Single-Source Dijkstra for efficiency.
@@ -494,7 +494,7 @@ class GlobalPlanner:
             'total_frontiers': len(self.ranked_frontiers)
         }
 
-    def plan(self, current_position: Tuple[float, float], particle_filter: ParticleFilterOptimized) -> Dict:
+    def plan(self, current_position: Tuple[float, float], particle_filter: ParticleFilter) -> Dict:
         """Execute global planning pipeline."""
         
         # 1. Detect

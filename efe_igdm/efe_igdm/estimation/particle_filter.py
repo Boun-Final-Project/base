@@ -4,7 +4,7 @@ from ..models.igdm_gas_model import IndoorGaussianDispersionModel
 from .sensor_model import ContinuousGaussianSensorModel
 from copy import deepcopy
 
-class ParticleFilterOptimized:
+class ParticleFilter:
     """
     Optimized particle filter for gas source term estimation.
 
@@ -16,17 +16,12 @@ class ParticleFilterOptimized:
     """
 
     def __init__(self, num_particles: int, search_bounds: dict[str, list[float]],
-                 binary_sensor_model: ContinuousGaussianSensorModel,
+                 sensor_model: ContinuousGaussianSensorModel,
                  dispersion_model: IndoorGaussianDispersionModel,
-                 resample_threshold: float = 0.3, mcmc_std=None):
-        """
-        Parameters are identical to original ParticleFilter for drop-in replacement.
-        Note: 'binary_sensor_model' parameter name kept for backwards compatibility,
-        but now expects ContinuousGaussianSensorModel.
-        """
+                 resample_threshold: float = 0.5, mcmc_std=None):
         self.N = num_particles
         self.bounds = search_bounds
-        self.sensor_model = binary_sensor_model
+        self.sensor_model = sensor_model
         self.dispersion_model = dispersion_model
         self.resample_threshold = resample_threshold
 
@@ -117,100 +112,29 @@ class ParticleFilterOptimized:
                 self._resample()
                 self._mcmc_move()
 
-    def _compute_concentrations_for_particles(self, particles_array: np.ndarray,
-                                            sensor_position: tuple[float, float]) -> np.ndarray:
+    def _compute_concentrations(self, particles: np.ndarray, sensor_position: tuple[float, float]) -> np.ndarray:
         """
-        Compute concentrations for a given array of particles (VECTORIZED).
-        Used for MCMC moves where we need to evaluate arbitrary particle arrays.
+        Compute concentrations for a specific array of particles (VECTORIZED).
+        Args:
+            particles: Array of shape (N, 3) containing [x, y, Q]
+            sensor_position: Tuple (x, y) of sensor location
         """
-        # Check if using IGDM
-        if isinstance(self.dispersion_model, IndoorGaussianDispersionModel):
-            # IGDM path: Use batch computation (will compute distance map)
-            particle_locations = particles_array[:, :2]  # (N, 2) - x, y positions
-            release_rates = particles_array[:, 2]         # (N,) - Q values
+        particle_locations = particles[:, :2]  # (N, 2)
+        release_rates = particles[:, 2]        # (N,)
 
-            concentrations = self.dispersion_model.compute_concentrations_batch(
-                sensor_position, particle_locations, release_rates
-            )
-            return concentrations
+        return self.dispersion_model.compute_concentrations_batch(
+            sensor_position, particle_locations, release_rates
+        )
 
-        # Gaussian Plume model path (fallback if you ever swap models)
-        x0 = particles_array[:, 0]
-        y0 = particles_array[:, 1]
-        Q0 = particles_array[:, 2] * 1e6  # Convert to μg/s
-
-        sx, sy = sensor_position
-
-        dx = sx - x0
-        dy = sy - y0
-
-        wind_dir = self.dispersion_model.wind_direction
-        downwind = dx * np.cos(wind_dir) + dy * np.sin(wind_dir)
-        crosswind = -dx * np.sin(wind_dir) + dy * np.cos(wind_dir)
-
-        concentrations = np.zeros(particles_array.shape[0])
-
-        mask = downwind > 0.1
-        if not np.any(mask):
-            return concentrations
-
-        dw = downwind[mask]
-        sigma_y = self.dispersion_model.zeta1 * dw / np.sqrt(1 + 0.0001 * dw)
-        sigma_z = self.dispersion_model.zeta2 * dw / np.sqrt(1 + 0.0001 * dw)
-
-        valid_sigma = (sigma_y >= 0.01) & (sigma_z >= 0.01)
-        if not np.any(valid_sigma):
-            return concentrations
-
-        cw = crosswind[mask][valid_sigma]
-        sy_v = sigma_y[valid_sigma]
-        sz_v = sigma_z[valid_sigma]
-        Q0_v = Q0[mask][valid_sigma]
-
-        crosswind_term = np.exp(-cw**2 / (2 * sy_v**2))
-
-        z_diff = self.dispersion_model.agent_height - self.dispersion_model.z0
-        z_sum = self.dispersion_model.agent_height + self.dispersion_model.z0
-        z_term = (np.exp(-z_diff**2 / (2 * sz_v**2)) +
-                  np.exp(-z_sum**2 / (2 * sz_v**2)))
-
-        conc_valid = (Q0_v / (2 * np.pi * self.dispersion_model.V * sy_v * sz_v) *
-                      crosswind_term * z_term)
-
-        valid_indices = np.where(mask)[0][valid_sigma]
-        concentrations[valid_indices] = conc_valid
-
-        return concentrations
-
-    def _compute_concentrations_batch(self, sensor_position: tuple[float, float]) -> np.ndarray:
-        """
-        Compute concentrations for all SELF.particles at once (VECTORIZED).
-        """
-        # Check if using IGDM
-        if isinstance(self.dispersion_model, IndoorGaussianDispersionModel):
-            # IGDM path: Use optimized batch computation with distance map
-            particle_locations = self.particles[:, :2]  # (N, 2) - x, y positions
-            release_rates = self.particles[:, 2]         # (N,) - Q values
-
-            concentrations = self.dispersion_model.compute_concentrations_batch(
-                sensor_position, particle_locations, release_rates
-            )
-            return concentrations
-        else:
-            return self._compute_concentrations_for_particles(self.particles, sensor_position)
 
     def _compute_likelihoods_vectorized(self, measurement: float, sensor_position: tuple[float, float]):
         """
         Compute Gaussian measurement likelihood for all particles (VECTORIZED).
         """
         # Compute all predicted concentrations at once
-        predicted_concs = self._compute_concentrations_batch(sensor_position)
+        predicted_concs = self._compute_concentrations(self.particles, sensor_position)
 
-        # Check if sensor model has continuous Gaussian likelihood (paper's method)
-        if hasattr(self.sensor_model, 'probability_continuous_vec'):
-            likelihoods = self.sensor_model.probability_continuous_vec(measurement, predicted_concs)
-        else:
-            likelihoods = self.sensor_model.probability_binary_vec(measurement, predicted_concs)
+        likelihoods = self.sensor_model.probability_continuous_vec(measurement, predicted_concs)
 
         return likelihoods
 
@@ -231,8 +155,8 @@ class ParticleFilterOptimized:
 
     def _systematic_resample(self):
         """
-        Vectorized systematic resampling.
-        O(N) in C-speed vs O(N) in Python-speed.
+        This puts something like a ruler with N evenly spaced marks over the cumulative sum
+        Therefore high weight particles get multiple samples, low weight particles get none.
         """
         # 1. Generate cumulative weights
         cumulative_sum = np.cumsum(self.weights)
@@ -266,30 +190,20 @@ class ParticleFilterOptimized:
         )
         
         # 3. Compute likelihoods for ALL CURRENT particles at once
-        conc_curr = self._compute_concentrations_for_particles(
+        conc_curr = self._compute_concentrations(
             self.particles, self.last_sensor_position
         )
-        if hasattr(self.sensor_model, 'probability_continuous_vec'):
-            likelihood_curr = self.sensor_model.probability_continuous_vec(
-                self.last_measurement, conc_curr
-            )
-        else:
-            likelihood_curr = self.sensor_model.probability_binary_vec(
-                self.last_measurement, conc_curr
-            )
+        likelihood_curr = self.sensor_model.probability_continuous_vec(
+            self.last_measurement, conc_curr
+        )
 
         # 4. Compute likelihoods for ALL PROPOSED particles at once
-        conc_prop = self._compute_concentrations_for_particles(
+        conc_prop = self._compute_concentrations(
             proposals, self.last_sensor_position
         )
-        if hasattr(self.sensor_model, 'probability_continuous_vec'):
-            likelihood_prop = self.sensor_model.probability_continuous_vec(
-                self.last_measurement, conc_prop
-            )
-        else:
-            likelihood_prop = self.sensor_model.probability_binary_vec(
-                self.last_measurement, conc_prop
-            )
+        likelihood_prop = self.sensor_model.probability_continuous_vec(
+            self.last_measurement, conc_prop
+        )
 
         # 5. Metropolis-Hastings acceptance (FULLY VECTORIZED)
         likelihood_curr = np.maximum(likelihood_curr, 1e-50)
@@ -330,15 +244,12 @@ class ParticleFilterOptimized:
         """
         Compute hypothetical entropy after a measurement WITHOUT modifying filter state.
         """
-        # For ContinuousGaussianSensorModel, compute bin likelihoods using discretization
-        if hasattr(self.sensor_model, 'create_discretization_thresholds'):
-            predicted_concs = self._compute_concentrations_batch(sensor_position)
-            thresholds = self.sensor_model.create_discretization_thresholds(predicted_concs)
-            likelihoods = self.sensor_model.compute_bin_likelihood_vec(
-                measurement, predicted_concs, thresholds
-            )
-        else:
-            likelihoods = self._compute_likelihoods_vectorized(measurement, sensor_position)
+        # Compute likelihoods by discretizing hypothetical measurements
+        predicted_concs = self._compute_concentrations(self.particles, sensor_position)
+        thresholds = self.sensor_model.create_discretization_thresholds(predicted_concs)
+        likelihoods = self.sensor_model.compute_bin_likelihood_vec(
+            measurement, predicted_concs, thresholds
+        )
 
         hypothetical_weights = self.weights * likelihoods
 
@@ -355,19 +266,17 @@ class ParticleFilterOptimized:
     
     def predict_measurement_probability(self, sensor_position, binary_value=None):
         """
-        Predict probability of future measurement using ContinuousGaussianSensorModel.
+        Predict probability of future measurement using the Sensor Model's logic.
         """
-        predicted_concs = self._compute_concentrations_batch(sensor_position)
-        inner_thresholds = self.sensor_model.create_discretization_thresholds(predicted_concs)
-        bin_edges = np.concatenate([[-np.inf], inner_thresholds, [np.inf]])
+        # 1. Get Concentration Predictions (The "What")
+        predicted_concs = self._compute_concentrations(self.particles, sensor_position)
 
-        sigma_g = self.sensor_model.alpha * predicted_concs + self.sensor_model.sigma_env
-        sigma_g = np.maximum(sigma_g, 1e-15)
+        # 2. Ask Sensor Model for Probabilities (The "How")
+        # Returns matrix of shape (Num_Bins, Num_Particles)
+        bin_probs_per_particle = self.sensor_model.compute_discretized_distribution(predicted_concs)
 
-        z_scores = (bin_edges[:, None] - predicted_concs[None, :]) / sigma_g[None, :]
-        cdfs = scipy_norm.cdf(z_scores)
-
-        bin_probs_per_particle = cdfs[1:, :] - cdfs[:-1, :]
+        # 3. Marginalize over particle weights
+        # (Num_Bins, N) @ (N,) -> (Num_Bins,)
         level_probs = bin_probs_per_particle @ self.weights
 
         if binary_value is None:
@@ -383,7 +292,7 @@ class ParticleFilterOptimized:
         """
         OPTIMIZED: Lightweight copy for prediction-only use cases.
         """
-        new_pf = ParticleFilterOptimized.__new__(ParticleFilterOptimized)
+        new_pf = ParticleFilter.__new__(ParticleFilter)
 
         # Copy mutable state
         new_pf.particles = self.particles.copy()

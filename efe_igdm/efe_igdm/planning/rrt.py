@@ -1,5 +1,5 @@
 import numpy as np
-from ..estimation.particle_filter_optimized import ParticleFilterOptimized
+from ..estimation.particle_filter import ParticleFilter
 from ..mapping.occupancy_grid import OccupancyGridMap
 from typing import List, Tuple, Optional, Dict
 
@@ -141,7 +141,7 @@ class RRT:
             paths.append(path[::-1])
         return paths
 
-    def calculate_branch_information(self, path: List[Node], initial_particle_filter: ParticleFilterOptimized) -> float:
+    def calculate_branch_information(self, path: List[Node], initial_particle_filter: ParticleFilter) -> float:
         """Calculates BI (Eq 19) - Optimized with cached entropy."""
         path = path[1:] # Exclude root
         BI = 0.0
@@ -173,7 +173,7 @@ class RRT:
 
         return BI
 
-    def calculate_travel_cost(self, path : List[Node], initial_particle_filter : ParticleFilterOptimized) -> float:
+    def calculate_travel_cost(self, path : List[Node], initial_particle_filter : ParticleFilter) -> float:
         """Calculate the travel cost along a given path. J2 from the paper. Eq(31)."""
         estimation, _ = initial_particle_filter.get_estimate()  # Returns (mean, std)
         target_pos = np.array([estimation["x"], estimation["y"]])
@@ -186,7 +186,7 @@ class RRT:
         total_cost = path_length + distance_to_target
         return total_cost
     
-    def get_next_move(self, start_pos: Tuple[float,float], initial_particle_filter: ParticleFilterOptimized) -> Tuple[float,float]:
+    def get_next_move(self, start_pos: Tuple[float,float], initial_particle_filter: ParticleFilter) -> Tuple[float,float]:
         self.nodes = [] # Reset tree
         self.sprawl(start_pos)
         paths = self.prune()
@@ -204,7 +204,7 @@ class RRT:
             return tuple(best_path[1].position)
         return start_pos
 
-    def get_next_move_debug(self, start_pos : tuple[float,float], initial_particle_filter : ParticleFilterOptimized) -> dict:
+    def get_next_move_debug(self, start_pos : tuple[float,float], initial_particle_filter : ParticleFilter) -> dict:
         """
         Get next move with detailed debug information for visualization.
 

@@ -14,7 +14,7 @@ from .planning.global_planner import GlobalPlanner
 from .planning.dead_end_detector import DeadEndDetector
 
 # Estimation
-from .estimation.particle_filter_optimized import ParticleFilterOptimized
+from .estimation.particle_filter import ParticleFilter
 from .estimation.sensor_model import ContinuousGaussianSensorModel
 
 # Gas dispersion models
@@ -40,7 +40,7 @@ __all__ = [
     'DeadEndDetector',
 
     # Estimation
-    'ParticleFilterOptimized',
+    'ParticleFilter',
     'ContinuousGaussianSensorModel',
 
     # Models
