@@ -1,17 +1,13 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
-from rclpy.task import Future
 
 # Messages
 from olfaction_msgs.msg import GasSensor
-from geometry_msgs.msg import PoseWithCovarianceStamped, Point, PoseStamped, Twist
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
-from nav2_msgs.action import NavigateToPose
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid
+from visualization_msgs.msg import Marker, MarkerArray
 
 # Custom Modules
 from .mapping.occupancy_grid import create_occupancy_map_from_service, create_empty_occupancy_map
@@ -22,17 +18,20 @@ from .planning.rrt import RRT
 from .planning.global_planner import GlobalPlanner
 from .visualization.text_visualizer import TextVisualizer
 from .planning.dead_end_detector import DeadEndDetector
+
+# NEW MODULES
 from .visualization.marker_visualizer import MarkerVisualizer
+from .navigation.navigator import Navigator
 
 import numpy as np
 import csv
 from datetime import datetime
 import os
 import time
-from typing import Tuple, List, Optional, Dict, Any
+from typing import Tuple, List, Optional
 
 class RRTInfotaxisNode(Node):
-    """RRT Infotaxis node that receives occupancy map and plans gas search."""
+    """RRT Infotaxis node (Refactored Coordinator)."""
 
     def __init__(self):
         super().__init__('rrt_infotaxis_node')
@@ -44,11 +43,10 @@ class RRTInfotaxisNode(Node):
         self._init_models_and_planners()
         
         self.node_initialized = True
-        self.get_logger().info('Node initialized successfully, waiting for sensor and pose data...')
+        self.get_logger().info('Node initialized successfully, waiting for data...')
 
     def _init_parameters(self):
-        """Declare and cache parameters to avoid repeated lookups."""
-        # Declarations
+        """Declare and cache parameters."""
         self.declare_parameter('use_fast_rrt', True)
         self.declare_parameter('sigma_m', 1.5)
         self.declare_parameter('number_of_particles', 1000)
@@ -69,12 +67,11 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('lambda_p', 0.1)
         self.declare_parameter('lambda_s', 0.05)
         self.declare_parameter('switch_back_threshold', 1.5)
-        self.declare_parameter('global_fstep_size', 1.5)
         self.declare_parameter('resample_threshold', 0.5)
         self.declare_parameter('true_source_x', 2.0)
         self.declare_parameter('true_source_y', 4.5)
 
-        # Cache values for performance
+        # Cache values
         self.params = {
             'sigma_m': self.get_parameter('sigma_m').value,
             'sigma_threshold': self.get_parameter('sigma_threshold').value,
@@ -94,18 +91,14 @@ class RRTInfotaxisNode(Node):
         }
 
     def _init_state_variables(self):
-        """Initialize internal state variables."""
+        """Initialize internal state."""
         self.sensor_raw_value: Optional[float] = None
         self.current_position: Optional[Tuple[float, float]] = None
         self.current_theta: Optional[float] = None
         self.sensor_initialized = False
         self.node_initialized = False
         self.step_count = 0
-        self.is_moving = False
-        self.goal_handle = None
-        self.goal_position = None
         self.search_complete = False
-        self.current_dead_end_status = False
         self.planning_pending = False
 
         # Dual-mode planner state
@@ -113,13 +106,6 @@ class RRTInfotaxisNode(Node):
         self.global_path: List[Tuple[float, float]] = []
         self.global_path_index = 0
         self.settling_start_time = None
-
-        # Recovery state
-        self.consecutive_failures = 0
-        self.max_failures_tolerance = 3
-        self.in_recovery = False
-        self.initial_spin_done = False
-        self.initial_spin_goal_handle = None
 
         # SLAM / Map logic
         self.laser_scan_count = 0
@@ -129,10 +115,9 @@ class RRTInfotaxisNode(Node):
         self.total_travel_distance = 0.0
         self.previous_position = None
         self.computation_times = []
-        self.prev_num_paths = 0
 
     def _init_ros_interfaces(self):
-        """Initialize Publishers, Subscribers, and Action Clients."""
+        """Initialize Publishers and Subscribers."""
         # Subscriptions
         self.pose_subscription = self.create_subscription(
             PoseWithCovarianceStamped, '/PioneerP3DX/ground_truth', self.pose_callback, 10)
@@ -141,45 +126,44 @@ class RRTInfotaxisNode(Node):
         self.laser_subscription = self.create_subscription(
             LaserScan, '/PioneerP3DX/laser_scanner', self.laser_callback, 10)
 
-        self.text_info_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/source_info_text', 10)
+        # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
-        self.initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, '/PioneerP3DX/initialpose', 10)
+        # Note: Marker publishers moved to MarkerVisualizer
+        # Note: Initialpose publisher moved to Navigator
+
+        # Text Info Publisher (still needed for TextVisualizer)
+        self.text_info_pub = self.create_publisher(MarkerArray, '/rrt_infotaxis/source_info_text', 10)
 
         # SLAM map publisher
         map_qos = QoSProfile(depth=10, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL, reliability=QoSReliabilityPolicy.RELIABLE)
         self.slam_map_pub = self.create_publisher(OccupancyGrid, '/rrt_infotaxis/slam_map', map_qos)
         self.slam_map_timer = self.create_timer(0.5, self._publish_slam_map_timer)
 
-        # Nav2 Client
-        self.nav_to_pose_client = ActionClient(self, NavigateToPose, '/PioneerP3DX/navigate_to_pose')
-        self.get_logger().info('Waiting for Nav2 action server...')
-        self.nav_to_pose_client.wait_for_server()
-        self.get_logger().info('Nav2 action server available!')
-
     def _init_models_and_planners(self):
-        """Load maps and initialize computational models."""
+        """Load maps and initialize components."""
         try:
             self.occupancy_map = create_occupancy_map_from_service(
                 self, z_level=5, service_name='/gaden_environment/occupancyMap3D', timeout_sec=10.0
             )
-            # FIX: GADEN service returns origin (0,0) but actual map starts at (-0.2, -0.2)
+            # FIX: GADEN origin correction
             if self.occupancy_map.origin_x == 0.0 and self.occupancy_map.origin_y == 0.0:
-                self.get_logger().warn('GADEN origin correction applied.')
                 self.occupancy_map.origin_x = -0.2
                 self.occupancy_map.origin_y = -0.2
 
             self.slam_map = create_empty_occupancy_map(self.occupancy_map)
-            self.get_logger().info(f'SLAM initialized: res={self.slam_map.resolution}m')
         except Exception as e:
             self.get_logger().error(f'Failed to load occupancy map: {e}')
             raise
 
+        # 1. Initialize Helpers (Viz & Nav)
         self.marker_viz = MarkerVisualizer(self, self.slam_map)
+        self.navigator = Navigator(self, on_complete_callback=self._on_navigation_complete)
+        self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
 
+        # 2. Initialize Models
         self.dispersion_model = IndoorGaussianDispersionModel(
             sigma_m=self.params['sigma_m'], occupancy_grid=self.slam_map
         )
-
         self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.5, num_levels=10, max_concentration=120.0)
         
         self.particle_filter = ParticleFilter(
@@ -199,8 +183,6 @@ class RRTInfotaxisNode(Node):
             positive_weight=self.params['positive_weight']
         )
 
-        self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
-        
         self.dead_end_detector = DeadEndDetector(
             epsilon=self.get_parameter('dead_end_epsilon').value,
             initial_threshold=self.params['dead_end_initial_threshold']
@@ -231,11 +213,14 @@ class RRTInfotaxisNode(Node):
             'planner_mode', 'global_path_length', 'global_waypoint_index'
         ])
         self.log_file.flush()
-        self.get_logger().info(f'Data logging to: {log_filename}')
         self.start_time = self.get_clock().now()
 
+    def _on_navigation_complete(self):
+        """Callback from Navigator when a move finishes."""
+        self.planning_pending = True
+
     # =========================================================================
-    # CORE LOGIC: Take Step (Refactored)
+    # CORE LOGIC: Take Step
     # =========================================================================
 
     def take_step(self):
@@ -249,13 +234,13 @@ class RRTInfotaxisNode(Node):
             self.sensor_initialized = True
             self.get_logger().info(f'Sensor initialized (α={self.sensor_model.alpha})')
 
-        # 1. Handle Initialization Spin
-        if not self.initial_spin_done:
-            self._handle_initial_spin()
+        # 1. Handle Initialization Spin (Delegated)
+        if not self.navigator.initial_spin_done:
+            self.navigator.perform_initial_spin(self.current_position, self.current_theta)
             return
 
-        # 2. Block if moving
-        if self.is_moving:
+        # 2. Block if moving (Delegated)
+        if self.navigator.is_moving:
             return
 
         # 3. Handle Settling State (Mode Switching)
@@ -278,12 +263,12 @@ class RRTInfotaxisNode(Node):
 
         if self.planner_mode == 'GLOBAL':
             next_pos, should_return = self._run_global_planning(current_means)
-            if should_return: return # Logic dictated a return (e.g., stopping to settle)
+            if should_return: return
             
         elif self.planner_mode == 'LOCAL':
             next_pos, debug_info, dead_end_detected, bi_optimal = self._run_local_planning()
 
-        # 6. Visualization & Logging
+        # 6. Visualization & Logging (Delegated)
         self._update_visualizations(est_x, est_y, current_stds, debug_info, bi_optimal, dead_end_detected)
         self._log_step_data(current_means, current_stds, debug_info, bi_optimal, dead_end_detected)
         
@@ -291,22 +276,16 @@ class RRTInfotaxisNode(Node):
         if self._check_convergence(current_stds):
             return
 
-        # 8. Execute Move
-        if next_pos is not None:  # <--- CHANGED from "if next_pos:"
+        # 8. Execute Move (Delegated)
+        if next_pos is not None:
             step_computation_time = time.time() - step_start_time
             self.computation_times.append(step_computation_time)
             self.get_logger().info(f'Moving to: ({next_pos[0]:.2f}, {next_pos[1]:.2f})')
-            self.send_nav_goal(next_pos[0], next_pos[1])
+            self.navigator.send_goal(next_pos[0], next_pos[1], tolerance=self.params['xy_goal_tolerance'])
 
     # =========================================================================
-    # PLANNING HELPERS
+    # PLANNING LOGIC
     # =========================================================================
-
-    def _handle_initial_spin(self):
-        if not self.is_moving:
-            self.get_logger().info('[STARTUP] Starting initial 360° sensor sweep...')
-            target_yaw = self.current_theta + 3.14
-            self.send_nav_goal_pose(self.current_position[0], self.current_position[1], target_yaw, is_spin=True)
 
     def _handle_settling_complete(self):
         self.get_logger().info('[MODE SWITCH] Settling complete. Switching to LOCAL.')
@@ -321,10 +300,7 @@ class RRTInfotaxisNode(Node):
         self.planning_pending = True
 
     def _run_global_planning(self, current_means) -> Tuple[Optional[Tuple[float, float]], bool]:
-        """
-        Execute Global planning logic. 
-        Returns: (Next Position, Should Return/Stop)
-        """
+        """Returns: (Next Position, Should Return/Stop)"""
         self.get_logger().info('[GLOBAL MODE] Following frontier path...')
         
         if not self.global_path or self.global_path_index >= len(self.global_path):
@@ -352,19 +328,12 @@ class RRTInfotaxisNode(Node):
         # Collision Check
         if not self.is_path_to_waypoint_valid(waypoint):
             self.get_logger().warn(f'[GLOBAL MODE] Path blocked to {waypoint}.')
-            self.global_path_index += 1 # Try next
-            if self.global_path_index >= len(self.global_path):
-                 self.settling_start_time = self.get_clock().now()
-                 self.planning_pending = True
-                 return None, True
+            self.global_path_index += 1
             self.planning_pending = True
             return None, True
 
-        # Entropy / Information Gain Check
-        # Calculate expected entropy reduction (Vectorized Optimization)
+        # Entropy Check (Optimized Vectorized Call)
         current_entropy = self.particle_filter.get_entropy()
-        
-        # CHANGED: Use the new single-pass vectorized method
         expected_entropy = self.particle_filter.compute_expected_entropy(waypoint)
         
         mutual_info = current_entropy - expected_entropy
@@ -381,24 +350,20 @@ class RRTInfotaxisNode(Node):
         return waypoint, False
 
     def _run_local_planning(self) -> Tuple[Optional[Tuple[float, float]], dict, bool, float]:
-        """
-        Execute Local RRT planning.
-        Returns: (Next Position, Debug Info, Dead End Detected, Bi Optimal)
-        """
+        """Returns: (Next Position, Debug Info, Dead End Detected, Bi Optimal)"""
         debug_info = self.rrt.get_next_move_debug(self.current_position, self.particle_filter)
         next_pos = debug_info["next_position"]
         
         move_dist = np.hypot(next_pos[0] - self.current_position[0], next_pos[1] - self.current_position[1])
         
         if move_dist < 0.05:
-            self.consecutive_failures += 1
-            if self.consecutive_failures >= self.max_failures_tolerance:
+            self.navigator.consecutive_failures += 1
+            if self.navigator.consecutive_failures >= self.navigator.max_failures_tolerance:
                 self.trigger_recovery()
-                # Recovery triggers teleport/plan, so we return None here to stop this step
                 return None, debug_info, False, 0.0
         else:
-            if self.consecutive_failures > 0:
-                self.consecutive_failures -= 1
+            if self.navigator.consecutive_failures > 0:
+                self.navigator.consecutive_failures -= 1
         
         bi_optimal = debug_info.get("best_utility", debug_info.get("best_entropy_gain", 0.0))
         dead_end_detected = False
@@ -407,8 +372,6 @@ class RRTInfotaxisNode(Node):
             dead_end_detected = self.dead_end_detector.is_dead_end(bi_optimal)
             if dead_end_detected:
                 self._handle_dead_end_transition()
-                # If transition successful, next_pos might change in next loop, 
-                # but for now we follow the local path or wait for logic to update
                 if self.planner_mode == 'GLOBAL' and self.global_path:
                     next_pos = self.global_path[self.global_path_index]
 
@@ -434,11 +397,38 @@ class RRTInfotaxisNode(Node):
             # Viz
             self.marker_viz.visualize_frontier_cells(result['frontier_cells'])
             self.marker_viz.visualize_frontier_centroids(result['frontier_clusters'])
-            self.marker_viz.visualize_prm_graph(result['prm_vertices'],self.global_planner.vertex_dict)
+            self.marker_viz.visualize_prm_graph(result['prm_vertices'], self.global_planner.vertex_dict)
             self.marker_viz.visualize_global_path(self.global_path)
         else:
             self.get_logger().info('[DEAD END] Global plan failed. Staying LOCAL.')
             self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
+
+    def trigger_recovery(self):
+        # 1. Attempt Teleport (Delegated)
+        success = self.navigator.attempt_teleport_recovery(
+            self.current_position, self.slam_map, self.dead_end_detector
+        )
+        if success:
+            # Main node just needs to ensure state is clean
+            self.current_position = None 
+            return
+
+        # 2. Fallback to Global Planner
+        self.get_logger().warn('Teleport failed. Trying Global Planner fallback.')
+        self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
+        self.planner_mode = 'GLOBAL'
+        
+        res = self.global_planner.plan(self.current_position, self.particle_filter)
+        if res['success']:
+            self.global_path = res['best_global_path']
+            self.global_path_index = 1
+            self.marker_viz.clear_global_planner_visualizations()
+            self.marker_viz.visualize_global_path(self.global_path)
+            self.planning_pending = True
+        else:
+            self.get_logger().error('Global recovery failed. Staying LOCAL.')
+            self.planner_mode = 'LOCAL'
+            self.planning_pending = True
 
     def _check_convergence(self, current_stds):
         sigma_p = max(current_stds["x"], current_stds["y"])
@@ -477,125 +467,14 @@ class RRTInfotaxisNode(Node):
         self.search_complete = True
 
     # =========================================================================
-    # RECOVERY & MOVEMENT
+    # CALLBACKS
     # =========================================================================
-
-    def trigger_recovery(self):
-        self.get_logger().warn('!!! STUCK DETECTED - RECOVERING !!!')
-        self.consecutive_failures = 0
-        self.in_recovery = False
-        
-        safe_pos = self.find_safe_position_away_from_wall(self.current_position, distance=0.5)
-        
-        if safe_pos != self.current_position:
-            self.teleport_robot(safe_pos[0], safe_pos[1])
-            time.sleep(1.0)
-            self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
-            self.planning_pending = True
-            return
-
-        self.get_logger().warn('Teleport failed. Trying Global Planner fallback.')
-        self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
-        self.planner_mode = 'GLOBAL'
-        
-        res = self.global_planner.plan(self.current_position, self.particle_filter)
-        if res['success']:
-            self.global_path = res['best_global_path']
-            self.global_path_index = 1
-            self.marker_viz.clear_global_planner_visualizations()
-            self.marker_viz.visualize_global_path(self.global_path)
-            self.planning_pending = True
-        else:
-            self.get_logger().error('Global recovery failed. Staying LOCAL.')
-            self.planner_mode = 'LOCAL'
-            self.planning_pending = True
-
-    def send_nav_goal(self, x, y):
-        # Helper that doesn't care about orientation
-        self.send_nav_goal_pose(x, y, 0.0, use_orientation=False)
-
-    def send_nav_goal_pose(self, x, y, yaw, is_spin=False, use_orientation=True):
-        self.goal_position = (float(x), float(y))
-        goal_msg = NavigateToPose.Goal()
-        goal_msg.pose.header.frame_id = 'map'
-        goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
-        goal_msg.pose.pose.position.x = float(x)
-        goal_msg.pose.pose.position.y = float(y)
-        
-        if use_orientation or is_spin:
-            from math import sin, cos
-            qz = sin(yaw / 2.0)
-            qw = cos(yaw / 2.0)
-            goal_msg.pose.pose.orientation.z = float(qz)
-            goal_msg.pose.pose.orientation.w = float(qw)
-        else:
-            goal_msg.pose.pose.orientation.w = 1.0
-
-        self.is_moving = True
-        future = self.nav_to_pose_client.send_goal_async(goal_msg, feedback_callback=self.nav_feedback_callback)
-        
-        if is_spin:
-            future.add_done_callback(self.initial_spin_response_callback)
-        else:
-            future.add_done_callback(self.nav_goal_response_callback)
-
-    def nav_feedback_callback(self, feedback_msg):
-        if self.goal_position is None or self.goal_handle is None: return
-        
-        current_pose = feedback_msg.feedback.current_pose.pose.position
-        dx = current_pose.x - self.goal_position[0]
-        dy = current_pose.y - self.goal_position[1]
-        
-        if np.hypot(dx, dy) <= self.params['xy_goal_tolerance']:
-            self.get_logger().debug('XY goal reached via feedback, canceling for smooth stop.')
-            self.goal_handle.cancel_goal_async().add_done_callback(self._goal_cancel_callback)
-
-    def nav_goal_response_callback(self, future):
-        self.goal_handle = future.result()
-        if not self.goal_handle.accepted:
-            self.get_logger().warn('Goal rejected!')
-            self.is_moving = False
-            return
-        self.goal_handle.get_result_async().add_done_callback(self.nav_result_callback)
-
-    def nav_result_callback(self, future):
-        status = future.result().status
-        if status == 4: # SUCCEEDED
-            self.consecutive_failures = 0
-            self.in_recovery = False
-        elif status == 6: # ABORTED
-            if not self.in_recovery:
-                self.consecutive_failures += 1
-        
-        self.is_moving = False
-        self.goal_handle = None
-        self.planning_pending = True
-
-    def initial_spin_response_callback(self, future):
-        gh = future.result()
-        if not gh.accepted:
-            self.initial_spin_done = True
-            self.is_moving = False
-            return
-        self.initial_spin_goal_handle = gh
-        gh.get_result_async().add_done_callback(lambda f: self._finish_initial_spin())
-
-    def _finish_initial_spin(self):
-        self.is_moving = False
-        self.initial_spin_done = True
-        self.get_logger().info('Initial spin complete.')
-        self.planning_pending = True
-    
-    def _goal_cancel_callback(self, future):
-        # Triggered when we manually cancel because we are close enough
-        pass
 
     def pose_callback(self, msg):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         from math import atan2
         
-        # Orientation quaternion to yaw
         q = msg.pose.pose.orientation
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
@@ -609,22 +488,125 @@ class RRTInfotaxisNode(Node):
         self.current_theta = theta
         self.previous_position = (x, y)
 
-        if self.planning_pending and not self.is_moving:
+        if self.planning_pending and not self.navigator.is_moving:
             self.planning_pending = False
             self.take_step()
         
         # Initial trigger
-        if self.node_initialized and not self.initial_spin_done and not self.is_moving and self.sensor_raw_value is not None and not self.planning_pending:
+        if (self.node_initialized and not self.navigator.initial_spin_done 
+            and not self.navigator.is_moving and self.sensor_raw_value is not None 
+            and not self.planning_pending):
             self.take_step()
 
     def sensor_callback(self, msg):
         self.sensor_raw_value = msg.raw
-        if self.node_initialized and not self.initial_spin_done and not self.is_moving and self.current_position and not self.planning_pending:
+        if (self.node_initialized and not self.navigator.initial_spin_done 
+            and not self.navigator.is_moving and self.current_position 
+            and not self.planning_pending):
             self.take_step()
 
+    def laser_callback(self, msg: LaserScan):
+        """Process laser scan (Simple Map Update)."""
+        if not hasattr(self, 'slam_map') or self.current_position is None or self.current_theta is None:
+            return
+
+        robot_x = self.current_position[0]
+        robot_y = self.current_position[1]
+        robot_theta = self.current_theta
+        obstacles_this_scan = 0
+
+        for i, range_val in enumerate(msg.ranges):
+            if not np.isfinite(range_val):
+                continue
+            range_val = min(range_val, msg.range_max)
+            angle = msg.angle_min + i * msg.angle_increment
+            hit_obstacle = (range_val >= msg.range_min and range_val < msg.range_max)
+
+            local_x = range_val * np.cos(angle)
+            local_y = range_val * np.sin(angle)
+            end_x = robot_x + local_x * np.cos(robot_theta) - local_y * np.sin(robot_theta)
+            end_y = robot_y + local_x * np.sin(robot_theta) + local_y * np.cos(robot_theta)
+
+            self._mark_ray_as_free(robot_x, robot_y, end_x, end_y)
+
+            if hit_obstacle:
+                if self._mark_obstacle_in_slam_map(end_x, end_y):
+                    obstacles_this_scan += 1
+
+        self.laser_scan_count += 1
+        self.total_obstacles_marked += obstacles_this_scan
+
     # =========================================================================
-    # VISUALIZATION & LOGGING
+    # HELPERS
     # =========================================================================
+
+    def _mark_obstacle_in_slam_map(self, world_x: float, world_y: float) -> bool:
+        gx, gy = self.slam_map.world_to_grid(world_x, world_y)
+        if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height:
+            return False
+        self.slam_map.grid[gy, gx] = 1
+        return True
+
+    def _mark_ray_as_free(self, x0, y0, x1, y1):
+        # Raytracing logic
+        gx0, gy0 = self.slam_map.world_to_grid(x0, y0)
+        gx1, gy1 = self.slam_map.world_to_grid(x1, y1)
+        dx = abs(gx1 - gx0)
+        dy = abs(gy1 - gy0)
+        x, y = gx0, gy0
+        sx = 1 if gx0 < gx1 else -1
+        sy = 1 if gy0 < gy1 else -1
+        err = dx - dy
+
+        while True:
+            if 0 <= x < self.slam_map.width and 0 <= y < self.slam_map.height:
+                if x == gx1 and y == gy1:
+                    break
+                if self.slam_map.grid[y, x] != 1:
+                    self.slam_map.grid[y, x] = 0
+
+            if x == gx1 and y == gy1:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+
+    def is_path_to_waypoint_valid(self, waypoint: tuple) -> bool:
+        if self.current_position is None: return False
+        return self._is_segment_valid(self.current_position, waypoint)
+
+    def _is_valid_optimistic(self, position: tuple) -> bool:
+        gx, gy = self.slam_map.world_to_grid(*position)
+        if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height: return False
+        
+        radius_cells = int(np.ceil(self.params['robot_radius'] / self.slam_map.resolution))
+        radius_sq = radius_cells ** 2
+
+        for dx in range(-radius_cells, radius_cells + 1):
+            for dy in range(-radius_cells, radius_cells + 1):
+                if dx*dx + dy*dy > radius_sq: continue
+                check_gx, check_gy = gx + dx, gy + dy
+                if 0 <= check_gx < self.slam_map.width and 0 <= check_gy < self.slam_map.height:
+                    if self.slam_map.grid[check_gy, check_gx] > 0: 
+                        return False
+        return True
+
+    def _is_segment_valid(self, start: tuple, end: tuple) -> bool:
+        pos1, pos2 = np.array(start), np.array(end)
+        dist = np.linalg.norm(pos2 - pos1)
+        if dist < 1e-6: return self._is_valid_optimistic(tuple(pos1))
+        
+        num_samples = max(int(np.ceil(dist / (self.slam_map.resolution * 0.5))), 2)
+        for i in range(num_samples + 1):
+            t = i / num_samples
+            sample_pos = pos1 + t * (pos2 - pos1)
+            if not self._is_valid_optimistic((sample_pos[0], sample_pos[1])):
+                return False
+        return True
 
     def _update_visualizations(self, est_x, est_y, current_stds, debug_info, bi_optimal, dead_end_detected):
         self.marker_viz.visualize_planner_mode(self.planner_mode)
@@ -640,7 +622,6 @@ class RRTInfotaxisNode(Node):
         sigma_p = max(current_stds["x"], current_stds["y"])
         current_entropy = self.particle_filter.get_entropy()
         
-        # Calculate visualization bins
         bin_width = self.sensor_model.max_concentration / self.sensor_model.num_levels
         current_bin = min(int(self.sensor_raw_value / bin_width), self.sensor_model.num_levels - 1)
 
@@ -688,78 +669,6 @@ class RRTInfotaxisNode(Node):
         self.log_file.flush()
         self.step_count += 1
 
-    # =========================================================================
-    # PRESERVED LASER & SLAM LOGIC (Unchanged)
-    # =========================================================================
-
-    def laser_callback(self, msg: LaserScan):
-        """Process laser scan and update SLAM map using ground truth pose."""
-        if not hasattr(self, 'slam_map') or self.current_position is None or self.current_theta is None:
-            return
-
-        # Corrected: Allow map updates while moving to prevent data loss
-        robot_x = self.current_position[0]
-        robot_y = self.current_position[1]
-        robot_theta = self.current_theta
-        obstacles_this_scan = 0
-
-        for i, range_val in enumerate(msg.ranges):
-            if not np.isfinite(range_val):
-                continue
-            range_val = min(range_val, msg.range_max)
-            angle = msg.angle_min + i * msg.angle_increment
-            hit_obstacle = (range_val >= msg.range_min and range_val < msg.range_max)
-
-            local_x = range_val * np.cos(angle)
-            local_y = range_val * np.sin(angle)
-            end_x = robot_x + local_x * np.cos(robot_theta) - local_y * np.sin(robot_theta)
-            end_y = robot_y + local_x * np.sin(robot_theta) + local_y * np.cos(robot_theta)
-
-            self._mark_ray_as_free(robot_x, robot_y, end_x, end_y)
-
-            if hit_obstacle:
-                if self._mark_obstacle_in_slam_map(end_x, end_y):
-                    obstacles_this_scan += 1
-
-        self.laser_scan_count += 1
-        self.total_obstacles_marked += obstacles_this_scan
-
-    def _mark_obstacle_in_slam_map(self, world_x: float, world_y: float) -> bool:
-        gx, gy = self.slam_map.world_to_grid(world_x, world_y)
-        if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height:
-            return False
-        self.slam_map.grid[gy, gx] = 1
-        return True
-
-    def _mark_ray_as_free(self, x0, y0, x1, y1):
-        gx0, gy0 = self.slam_map.world_to_grid(x0, y0)
-        gx1, gy1 = self.slam_map.world_to_grid(x1, y1)
-        dx = abs(gx1 - gx0)
-        dy = abs(gy1 - gy0)
-        x = gx0
-        y = gy0
-        sx = 1 if gx0 < gx1 else -1
-        sy = 1 if gy0 < gy1 else -1
-        err = dx - dy
-
-        while True:
-            if 0 <= x < self.slam_map.width and 0 <= y < self.slam_map.height:
-                if x == gx1 and y == gy1:
-                    break
-                # BUGFIX: Don't overwrite previously detected obstacles
-                if self.slam_map.grid[y, x] != 1:
-                    self.slam_map.grid[y, x] = 0
-
-            if x == gx1 and y == gy1:
-                break
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                x += sx
-            if e2 < dx:
-                err += dx
-                y += sy
-
     def publish_slam_map(self):
         if not hasattr(self, 'slam_map'): return
         msg = OccupancyGrid()
@@ -777,100 +686,6 @@ class RRTInfotaxisNode(Node):
 
     def _publish_slam_map_timer(self):
         self.publish_slam_map()
-
-    # =========================================================================
-    # HELPERS (Calculations, Viz)
-    # =========================================================================
-
-    def find_safe_position_away_from_wall(self, current_pos, distance=0.5):
-        if current_pos is None: return current_pos
-        cx, cy = current_pos
-        num_samples = 16
-        max_search_distance = 2.0
-        best_position = None
-        max_clearance = 0
-
-        for i in range(num_samples):
-            angle = (2 * np.pi * i) / num_samples
-            for test_dist in np.linspace(distance, max_search_distance, 5):
-                test_x = cx + test_dist * np.cos(angle)
-                test_y = cy + test_dist * np.sin(angle)
-                test_pos = (test_x, test_y)
-                if self._is_valid_optimistic(test_pos):
-                    clearance = self._calculate_clearance(test_pos)
-                    if clearance > max_clearance:
-                        max_clearance = clearance
-                        best_position = test_pos
-
-        if best_position is not None and max_clearance >= distance:
-            return best_position
-        else:
-            self.get_logger().warn(f'Could not find safe position {distance}m from walls')
-            return current_pos
-
-    def _calculate_clearance(self, position):
-        gx, gy = self.slam_map.world_to_grid(*position)
-        if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height: return 0.0
-        max_radius = int(2.0 / self.slam_map.resolution)
-        for radius in range(1, max_radius):
-            for dx in range(-radius, radius + 1):
-                for dy in range(-radius, radius + 1):
-                    if abs(dx) != radius and abs(dy) != radius: continue
-                    check_gx = gx + dx
-                    check_gy = gy + dy
-                    if 0 <= check_gx < self.slam_map.width and 0 <= check_gy < self.slam_map.height:
-                        if self.slam_map.grid[check_gy, check_gx] > 0:
-                            return radius * self.slam_map.resolution
-        return max_radius * self.slam_map.resolution
-
-    def teleport_robot(self, target_x, target_y):
-        msg = PoseWithCovarianceStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'map'
-        msg.pose.pose.position.x = float(target_x)
-        msg.pose.pose.position.y = float(target_y)
-        msg.pose.pose.orientation.w = 1.0
-        if self.current_theta is not None:
-            from math import sin, cos
-            msg.pose.pose.orientation.z = float(sin(self.current_theta / 2.0))
-            msg.pose.pose.orientation.w = float(cos(self.current_theta / 2.0))
-        msg.pose.covariance = [0.0] * 36
-        self.initialpose_pub.publish(msg)
-        self.get_logger().info(f'Teleported robot to ({target_x:.2f}, {target_y:.2f})')
-        self.current_position = (target_x, target_y)
-
-    def is_path_to_waypoint_valid(self, waypoint: tuple) -> bool:
-        if self.current_position is None: return False
-        return self._is_segment_valid(self.current_position, waypoint)
-
-    def _is_valid_optimistic(self, position: tuple) -> bool:
-        gx, gy = self.slam_map.world_to_grid(*position)
-        if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height: return False
-        
-        radius_cells = int(np.ceil(self.params['robot_radius'] / self.slam_map.resolution))
-        radius_sq = radius_cells ** 2
-
-        for dx in range(-radius_cells, radius_cells + 1):
-            for dy in range(-radius_cells, radius_cells + 1):
-                if dx*dx + dy*dy > radius_sq: continue
-                check_gx, check_gy = gx + dx, gy + dy
-                if 0 <= check_gx < self.slam_map.width and 0 <= check_gy < self.slam_map.height:
-                    if self.slam_map.grid[check_gy, check_gx] > 0: 
-                        return False
-        return True
-
-    def _is_segment_valid(self, start: tuple, end: tuple) -> bool:
-        pos1, pos2 = np.array(start), np.array(end)
-        dist = np.linalg.norm(pos2 - pos1)
-        if dist < 1e-6: return self._is_valid_optimistic(tuple(pos1))
-        
-        num_samples = max(int(np.ceil(dist / (self.slam_map.resolution * 0.5))), 2)
-        for i in range(num_samples + 1):
-            t = i / num_samples
-            sample_pos = pos1 + t * (pos2 - pos1)
-            if not self._is_valid_optimistic((sample_pos[0], sample_pos[1])):
-                return False
-        return True
 
     def __del__(self):
         if self.log_file is not None:
