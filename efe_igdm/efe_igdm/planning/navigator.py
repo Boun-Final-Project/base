@@ -24,6 +24,7 @@ class Navigator:
         self.goal_handle = None
         self.goal_position = None
         self.consecutive_failures = 0
+        self.max_failures_tolerance = 3  # Max consecutive failures before recovery
         self.in_recovery = False
         self.initial_spin_done = False
         self.initial_spin_goal_handle = None

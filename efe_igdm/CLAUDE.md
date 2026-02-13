@@ -588,7 +588,7 @@ global_planner = GlobalPlanner(
     occupancy_grid=slam_map,
     robot_radius=0.35,
     prm_samples=300,               # Number of PRM vertices
-    prm_connection_radius=2.5,     # Edge connection radius
+    prm_connection_radius=5.0,     # Edge connection radius (ROS param default)
     frontier_min_size=3,           # Min cells per frontier cluster
     lambda_p=0.1,                  # Path cost weight
     lambda_s=0.05                  # Source distance weight
@@ -785,7 +785,7 @@ Handles low-level motion control and recovery behaviors.
 
 - **Initial Spin**: 360° rotation for sensor calibration
 - **Goal-Based Navigation**: Move to waypoint with tolerance
-- **Stuck Detection**: Monitors consecutive navigation failures
+- **Stuck Detection**: Monitors consecutive navigation failures (max_failures_tolerance=3)
 - **Teleport Recovery**: Attempts to escape local minima
 
 #### Methods
@@ -1171,7 +1171,7 @@ number_of_particles: int = 1000
 n_tn: int = 50
 delta: float = 0.7
 max_depth: int = 4
-robot_radius: float = 0.35
+robot_radius: float = 0.05
 sigma_threshold: float = 0.5
 success_distance: float = 0.5
 positive_weight: float = 0.5
@@ -1179,7 +1179,7 @@ dead_end_epsilon: float = 0.6
 dead_end_initial_threshold: float = 0.1
 enable_global_planner: bool = True
 prm_samples: int = 300
-prm_connection_radius: float = 5.0
+prm_connection_radius: float = 5.0  # Note: GlobalPlanner default is 2.5
 frontier_min_size: int = 3
 lambda_p: float = 0.1
 lambda_s: float = 0.05
@@ -1491,4 +1491,4 @@ Dual-Mode Information-Theoretic Search", IEEE RA-L, Vol. 10, No. 1, 2025
 
 *Implementation by: Efe*
 *Based on: Kim et al. IEEE RA-L 2025*
-*Last Updated: January 2026*
+*Last Updated: February 2026*
