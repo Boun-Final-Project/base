@@ -1,9 +1,16 @@
 import numpy as np
 from matplotlib.colors import ListedColormap
 import matplotlib.pyplot as plt
+from scipy.ndimage import binary_fill_holes
 import rclpy
 from rclpy.node import Node
 from gaden_msgs.srv import Occupancy
+
+# Cell value constants
+CELL_UNKNOWN = -1
+CELL_FREE = 0
+CELL_OCCUPIED = 1
+CELL_OUTLET = 2
 
 
 def load_3d_occupancy_grid_from_service(node: Node, service_name='/gaden_environment/occupancyMap3D',
@@ -88,6 +95,27 @@ def load_3d_occupancy_grid_from_service(node: Node, service_name='/gaden_environ
     # Transpose to match expected (y, x) format for visualization
     grid_2d = grid_2d.T
 
+    # Extract outlet mask BEFORE binarizing (outlet = cell value 2)
+    outlet_mask = (grid_2d == CELL_OUTLET)
+
+    # Also check adjacent z-levels for outlets spanning multiple heights
+    for dz in [-1, 1]:
+        alt_z = z_level + dz
+        if 0 <= alt_z < num_cells_z:
+            alt_slice = grid_3d[:, :, alt_z].T
+            outlet_mask |= (alt_slice == CELL_OUTLET)
+
+    num_outlets_raw = int(np.sum(outlet_mask))
+
+    # Fill holes inside the outlet frame. The outlet has a hollow structure:
+    # outer ring is value 2 (outlet) but the interior has value 1 (wall).
+    # binary_fill_holes fills the enclosed interior so LiDAR hits on inner
+    # walls are also recognized as outlet cells.
+    outlet_mask = binary_fill_holes(outlet_mask)
+
+    num_outlets = int(np.sum(outlet_mask))
+    node.get_logger().info(f'Outlet mask: {num_outlets} outlet cells detected at z_level={z_level} ({num_outlets_raw} raw, {num_outlets - num_outlets_raw} filled)')
+
     # Convert occupancy values: 0=free, anything else (>0)=occupied
     grid_2d = (grid_2d > 0).astype(np.int8)
 
@@ -109,7 +137,7 @@ def load_3d_occupancy_grid_from_service(node: Node, service_name='/gaden_environ
     node.get_logger().info(f'  2D Grid shape: {grid_2d.shape} (y, x)')
     node.get_logger().info(f'  Occupied cells: {np.sum(grid_2d)} / {grid_2d.size}')
 
-    return grid_2d, params
+    return grid_2d, outlet_mask, params
 
 class OccupancyGridMap:
     """Occupancy grid map for indoor environments."""
@@ -156,6 +184,15 @@ class OccupancyGridMap:
         if 0 <= gx < self.grid_width and 0 <= gy < self.grid_height:
             return self.grid[gy, gx] == 0
         return False
+
+    def get_outlet_cells(self):
+        """Get grid coordinates of all cells marked as outlets."""
+        ys, xs = np.where(self.grid == CELL_OUTLET)
+        return list(zip(xs.tolist(), ys.tolist()))
+
+    def get_outlet_positions_world(self):
+        """Get world coordinates of all outlet cell centers."""
+        return [self.grid_to_world(gx, gy) for gx, gy in self.get_outlet_cells()]
 
     def grid_to_world(self, gx, gy):
         """Convert grid indices to world coordinates (cell center)."""
@@ -272,20 +309,21 @@ class OccupancyGridMap:
             fig, ax = plt.subplots(figsize=(10, 6))
 
         # Create custom colormap with transparency for unknown cells
-        # Colors: unknown (-1), free (0), occupied (1)
+        # Colors: unknown (-1), free (0), occupied (1), outlet (2)
         # RGBA format: (R, G, B, Alpha) where Alpha=0 is transparent
         cmap = ListedColormap([
-            (1.0, 1.0, 1.0, 0.0),  # Unknown (-1): Transparent (was orange)
+            (1.0, 1.0, 1.0, 0.0),  # Unknown (-1): Transparent
             (1.0, 1.0, 1.0, 1.0),  # Free (0): White
-            (0.5, 0.5, 0.5, 1.0)   # Occupied (1): Gray
+            (0.5, 0.5, 0.5, 1.0),  # Occupied (1): Gray
+            (0.0, 0.7, 1.0, 1.0)   # Outlet (2): Blue
         ])
 
         # Display grid with correct world coordinates
         extent = [self.origin_x, self.origin_x + self.width * self.resolution,
                   self.origin_y, self.origin_y + self.height * self.resolution]
-        # Shift grid values: -1→0, 0→1, 1→2 for correct colormap indexing
+        # Shift grid values: -1→0, 0→1, 1→2, 2→3 for correct colormap indexing
         display_grid = self.grid + 1
-        ax.imshow(display_grid, origin='lower', extent=extent, cmap=cmap, alpha=1.0, vmin=0, vmax=2)
+        ax.imshow(display_grid, origin='lower', extent=extent, cmap=cmap, alpha=1.0, vmin=0, vmax=3)
 
         ax.set_xlabel('X (meters)')
         ax.set_ylabel('Y (meters)')
@@ -324,13 +362,13 @@ def create_occupancy_map_from_service(node: Node, z_level: int = 5,
     occupancy_map : OccupancyGridMap
         Occupancy grid map object
     """
-    grid, params = load_3d_occupancy_grid_from_service(
+    grid, outlet_mask, params = load_3d_occupancy_grid_from_service(
         node,
         service_name=service_name,
         z_level=z_level,
         timeout_sec=timeout_sec
     )
-    return OccupancyGridMap(grid, params)
+    return OccupancyGridMap(grid, params), outlet_mask
 
 
 def create_empty_occupancy_map(reference_map: OccupancyGridMap) -> OccupancyGridMap:

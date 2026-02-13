@@ -10,7 +10,7 @@ from nav_msgs.msg import OccupancyGrid
 from visualization_msgs.msg import MarkerArray
 
 # Custom Modules
-from .mapping.occupancy_grid import create_occupancy_map_from_service, create_empty_occupancy_map
+from .mapping.occupancy_grid import create_occupancy_map_from_service, create_empty_occupancy_map, load_3d_occupancy_grid_from_service, OccupancyGridMap
 from .estimation.sensor_model import ContinuousGaussianSensorModel
 from .estimation.particle_filter import ParticleFilter
 from .estimation.igdm_gas_model import IndoorGaussianDispersionModel
@@ -146,15 +146,18 @@ class RRTInfotaxisNode(Node):
     def _init_models_and_planners(self):
         """Load maps and initialize components."""
         try:
-            self.occupancy_map = create_occupancy_map_from_service(
+            grid_2d, self.outlet_mask, params = load_3d_occupancy_grid_from_service(
                 self, z_level=5, service_name='/gaden_environment/occupancyMap3D', timeout_sec=10.0
             )
+            self.occupancy_map = OccupancyGridMap(grid_2d, params)
+
             # FIX: GADEN origin correction
             if self.occupancy_map.origin_x == 0.0 and self.occupancy_map.origin_y == 0.0:
                 self.occupancy_map.origin_x = -0.2
                 self.occupancy_map.origin_y = -0.2
 
             self.slam_map = create_empty_occupancy_map(self.occupancy_map)
+            self.get_logger().info(f'Outlet mask loaded: {int(np.sum(self.outlet_mask))} outlet cells')
         except Exception as e:
             self.get_logger().error(f'Failed to load occupancy map: {e}')
             raise
@@ -162,7 +165,7 @@ class RRTInfotaxisNode(Node):
         # 1. Initialize Helper Modules
         self.marker_viz = MarkerVisualizer(self, self.slam_map)
         self.navigator = Navigator(self, on_complete_callback=self._on_navigation_complete)
-        self.lidar_mapper = LidarMapper(self.slam_map)
+        self.lidar_mapper = LidarMapper(self.slam_map, outlet_mask=self.outlet_mask)
         self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
 
         # 2. Initialize Models
@@ -486,7 +489,7 @@ class RRTInfotaxisNode(Node):
 
     def laser_callback(self, msg: LaserScan):
         """Process laser scan via LidarMapper."""
-        if self.current_position is None or self.current_theta is None:
+        if not self.node_initialized or self.current_position is None or self.current_theta is None:
             return
 
         obstacles_found = self.lidar_mapper.update_from_scan(
@@ -595,8 +598,13 @@ class RRTInfotaxisNode(Node):
         msg.info.origin.position.x = self.slam_map.origin_x
         msg.info.origin.position.y = self.slam_map.origin_y
         msg.info.origin.orientation.w = 1.0
-        flat_grid = (self.slam_map.grid.flatten() * 100).astype(np.int8)
-        msg.data = flat_grid.tolist()
+        # Explicit mapping: -1→-1, 0→0, 1→100, 2→50 (outlet)
+        grid_data = self.slam_map.grid.flatten()
+        ros_grid = np.full_like(grid_data, -1, dtype=np.int8)
+        ros_grid[grid_data == 0] = 0
+        ros_grid[grid_data == 1] = 100
+        ros_grid[grid_data == 2] = 50
+        msg.data = ros_grid.tolist()
         self.slam_map_pub.publish(msg)
 
     def _publish_slam_map_timer(self):

@@ -4,8 +4,9 @@ class LidarMapper:
     """
     Handles Simple SLAM logic: updates an occupancy grid using LaserScan data.
     """
-    def __init__(self, occupancy_grid):
+    def __init__(self, occupancy_grid, outlet_mask=None):
         self.slam_map = occupancy_grid
+        self.outlet_mask = outlet_mask  # 2D boolean array (y, x), same shape as grid
 
     def update_from_scan(self, scan_msg, robot_x, robot_y, robot_theta):
         """
@@ -43,7 +44,10 @@ class LidarMapper:
         gx, gy = self.slam_map.world_to_grid(world_x, world_y)
         if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height:
             return False
-        self.slam_map.grid[gy, gx] = 1
+        if self.outlet_mask is not None and self.outlet_mask[gy, gx]:
+            self.slam_map.grid[gy, gx] = 2  # CELL_OUTLET
+        else:
+            self.slam_map.grid[gy, gx] = 1  # CELL_OCCUPIED
         return True
 
     def _mark_ray_as_free(self, x0, y0, x1, y1):
@@ -61,9 +65,13 @@ class LidarMapper:
             if 0 <= x < self.slam_map.width and 0 <= y < self.slam_map.height:
                 if x == gx1 and y == gy1:
                     break
-                # BUGFIX: Don't overwrite previously detected obstacles
-                if self.slam_map.grid[y, x] != 1:
-                    self.slam_map.grid[y, x] = 0
+                # BUGFIX: Don't overwrite previously detected obstacles or outlets
+                if self.slam_map.grid[y, x] <= 0:
+                    # Check if this cell is an outlet (opening in wall that LiDAR passes through)
+                    if self.outlet_mask is not None and self.outlet_mask[y, x]:
+                        self.slam_map.grid[y, x] = 2  # CELL_OUTLET
+                    else:
+                        self.slam_map.grid[y, x] = 0
 
             if x == gx1 and y == gy1:
                 break
