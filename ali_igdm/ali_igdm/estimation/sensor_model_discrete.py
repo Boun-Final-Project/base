@@ -145,3 +145,44 @@ class DiscreteSensorModel:
             prob = prob_upper - prob_lower
 
         return max(MIN_LIKELIHOOD, min(1.0 - MIN_LIKELIHOOD, prob))
+
+    def probability_discrete_vec(self, discrete_level, particle_concentrations):
+        """Vectorized probability computation for multiple particles at once.
+
+        Parameters:
+        -----------
+        discrete_level : int
+            Discrete measurement level (0-4)
+        particle_concentrations : np.ndarray
+            Predicted concentrations from particles (shape: N,)
+
+        Returns:
+        --------
+        probabilities : np.ndarray
+            Likelihoods of measurement given particle states (shape: N,)
+        """
+        if self.level_thresholds is None:
+            raise ValueError("Thresholds not initialized.")
+
+        # Vectorized standard deviation
+        sigma_g = self.alpha * particle_concentrations + self.sigma_env
+        MIN_LIKELIHOOD = 1e-10
+
+        # Compute probability for each level as area under normal distribution (vectorized)
+        if discrete_level == 0:
+            # P(C < level_thresholds[0])
+            probs = scipy_norm.cdf((self.level_thresholds[0] - particle_concentrations) / sigma_g)
+        elif discrete_level == 4:
+            # P(C >= level_thresholds[3])
+            probs = 1.0 - scipy_norm.cdf((self.level_thresholds[3] - particle_concentrations) / sigma_g)
+        else:
+            # P(level_thresholds[i] <= C < level_thresholds[i+1])
+            lower_threshold = self.level_thresholds[discrete_level - 1]
+            upper_threshold = self.level_thresholds[discrete_level]
+
+            prob_lower = scipy_norm.cdf((lower_threshold - particle_concentrations) / sigma_g)
+            prob_upper = scipy_norm.cdf((upper_threshold - particle_concentrations) / sigma_g)
+            probs = prob_upper - prob_lower
+
+        # Clamp all probabilities to valid range
+        return np.clip(probs, MIN_LIKELIHOOD, 1.0 - MIN_LIKELIHOOD)

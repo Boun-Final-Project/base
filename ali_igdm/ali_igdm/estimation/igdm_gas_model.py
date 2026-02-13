@@ -167,7 +167,7 @@ class IndoorGaussianDispersionModel:
 
         # Cache for Dijkstra distance maps (on coarse grid)
         self._distance_cache = {}
-        self._cache_max_size = 20  # Keep small to save RAM
+        self._cache_max_size = 250  # Increased to handle RRT nodes (N_tn=50 × max_depth=4 = 200+)
         self._cache_hits = 0
         self._cache_misses = 0
 

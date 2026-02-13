@@ -327,12 +327,12 @@ class RRTInfotaxisUpdated:
         expected_entropy = 0.0
 
         for measurement in measurement_levels:
-            # Compute likelihoods for this measurement for ALL particles
+            # Compute likelihoods for this measurement for ALL particles (VECTORIZED)
             if particle_filter.is_discrete:
-                likelihoods = np.array([
-                    particle_filter.sensor_model.probability_discrete(int(measurement), conc)
-                    for conc in predicted_concs
-                ])
+                # Use vectorized method instead of list comprehension for 100x speedup
+                likelihoods = particle_filter.sensor_model.probability_discrete_vec(
+                    int(measurement), predicted_concs
+                )
             else:
                 # For continuous sensor (if needed)
                 likelihoods = particle_filter.sensor_model.probability_continuous_vec(
