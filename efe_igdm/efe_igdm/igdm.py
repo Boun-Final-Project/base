@@ -3,7 +3,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 
 # Messages
-from olfaction_msgs.msg import GasSensor
+from olfaction_msgs.msg import GasSensor, Anemometer
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid
@@ -23,6 +23,7 @@ from .planning.dead_end_detector import DeadEndDetector
 from .visualization.marker_visualizer import MarkerVisualizer
 from .planning.navigator import Navigator
 from .mapping.lidar_mapper import LidarMapper
+from .mapping.wind_map import WindMap
 from .utils.experiment_logger import ExperimentLogger
 
 import numpy as np
@@ -90,6 +91,7 @@ class RRTInfotaxisNode(Node):
             'positive_weight': self.get_parameter('positive_weight').value,
             'use_fast_rrt': self.get_parameter('use_fast_rrt').value,
             'number_of_particles': self.get_parameter('number_of_particles').value,
+            'use_gmrf': True  # Hardcoded enable for GMRF
         }
 
     def _init_state_variables(self):
@@ -113,6 +115,12 @@ class RRTInfotaxisNode(Node):
         self.laser_scan_count = 0
         self.total_obstacles_marked = 0
 
+        # Wind sensor state
+        self.wind_speed: Optional[float] = None
+        self.wind_direction: Optional[float] = None
+        self.wind_x: float = 0.0  # Cartesian x-component
+        self.wind_y: float = 0.0  # Cartesian y-component
+
         # Performance tracking
         self.total_travel_distance = 0.0
         self.previous_position = None
@@ -133,6 +141,13 @@ class RRTInfotaxisNode(Node):
             GasSensor, '/fake_pid/Sensor_reading', self.sensor_callback, 10)
         self.laser_subscription = self.create_subscription(
             LaserScan, '/PioneerP3DX/laser_scanner', self.laser_callback, 10)
+        self.wind_subscription = self.create_subscription(
+            Anemometer, '/fake_anemometer/WindSensor_reading', self.wind_callback, 10)
+
+        # Ground Truth Wind Subscription
+        self.gt_wind_sub = self.create_subscription(
+            MarkerArray, '/wind_vectors', self.gt_wind_callback, 10)
+        self.gt_wind_data = None
 
         # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
@@ -142,6 +157,7 @@ class RRTInfotaxisNode(Node):
         map_qos = QoSProfile(depth=10, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL, reliability=QoSReliabilityPolicy.RELIABLE)
         self.slam_map_pub = self.create_publisher(OccupancyGrid, '/rrt_infotaxis/slam_map', map_qos)
         self.slam_map_timer = self.create_timer(0.5, self._publish_slam_map_timer)
+        self.wind_map_timer = self.create_timer(5.0, self._publish_wind_map_timer)
 
     def _init_models_and_planners(self):
         """Load maps and initialize components."""
@@ -166,6 +182,13 @@ class RRTInfotaxisNode(Node):
         self.marker_viz = MarkerVisualizer(self, self.slam_map)
         self.navigator = Navigator(self, on_complete_callback=self._on_navigation_complete)
         self.lidar_mapper = LidarMapper(self.slam_map, outlet_mask=self.outlet_mask)
+        self.wind_map = WindMap(
+            width=self.slam_map.width,
+            height=self.slam_map.height,
+            resolution=self.slam_map.resolution,
+            origin_x=self.slam_map.origin_x,
+            origin_y=self.slam_map.origin_y
+        )
         self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
 
         # 2. Initialize Models
@@ -501,6 +524,25 @@ class RRTInfotaxisNode(Node):
         self.laser_scan_count += 1
         self.total_obstacles_marked += obstacles_found
 
+    def wind_callback(self, msg: Anemometer):
+        """Process wind sensor data from anemometer."""
+        if not self.node_initialized:
+            return
+        self.wind_speed = msg.wind_speed
+        self.wind_direction = msg.wind_direction
+        # Convert polar to Cartesian
+        self.wind_x = msg.wind_speed * np.cos(msg.wind_direction)
+        self.wind_y = msg.wind_speed * np.sin(msg.wind_direction)
+
+        # Record measurement in wind map at current robot position
+        if self.current_position is not None:
+            timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            self.wind_map.add_measurement(
+                self.current_position[0], self.current_position[1],
+                msg.wind_speed, msg.wind_direction,
+                timestamp=timestamp
+            )
+
     # =========================================================================
     # HELPERS
     # =========================================================================
@@ -609,6 +651,37 @@ class RRTInfotaxisNode(Node):
 
     def _publish_slam_map_timer(self):
         self.publish_slam_map()
+
+    def gt_wind_callback(self, msg: MarkerArray):
+        """Store ground truth wind vectors for validation."""
+        self.gt_wind_data = msg
+
+    def _publish_wind_map_timer(self):
+        if not hasattr(self, 'wind_map') or not hasattr(self, 'marker_viz'):
+            return
+
+        # Re-solve wind field
+        # GMRF does not strictly require outlets, just measurements + grid
+        if self.params.get('use_gmrf', False):
+             self.wind_map.solve_gmrf(self.slam_map.grid)
+        else:
+            # Re-solve potential flow using current SLAM grid
+            has_outlets = np.any(self.slam_map.grid == 2)
+            if has_outlets:
+                solved = self.wind_map.solve_potential_flow(self.slam_map.grid)
+                if solved and not getattr(self, '_pf_solve_logged', False):
+                    n = self.wind_map.pf_estimator.num_clusters
+                    self.get_logger().info(f'Potential flow solved with {n} outlet clusters')
+                    self._pf_solve_logged = True
+
+        self.marker_viz.visualize_wind_map(self.wind_map)
+        
+        # Validation
+        if self.gt_wind_data and self.step_count % 10 == 0:
+            # Basic check: compare N vectors?
+            # For now, just log presence.
+            # Real validation code would go here.
+            self.get_logger().info(f'[VALIDATION] GT Vectors available: {len(self.gt_wind_data.markers)}')
 
     def __del__(self):
         if hasattr(self, 'logger'):
