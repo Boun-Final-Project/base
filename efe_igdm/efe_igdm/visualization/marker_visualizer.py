@@ -278,10 +278,10 @@ class MarkerVisualizer:
         arrow_scale = wind_map.resolution * 2.0
         marker_id = 1
 
-        # --- Estimated (potential flow) wind field ---
+        # --- Estimated (GMRF / potential flow) wind field ---
         if wind_map.pf_solved:
-            # Subsample: every N cells to avoid clutter
-            step = max(2, int(1.0 / wind_map.resolution))  # ~1m spacing
+            # Subsample: ~0.3m spacing between arrows
+            step = max(1, int(0.3 / wind_map.resolution))
 
             # Compute max speed for normalization
             est_speed_map = np.sqrt(wind_map.estimated_vx**2 + wind_map.estimated_vy**2)
@@ -326,7 +326,7 @@ class MarkerVisualizer:
                     marker.color = ColorRGBA(
                         r=1.0, g=float(0.6 * intensity), b=0.0, a=0.6
                     )
-                    marker.lifetime.sec = 2
+                    marker.lifetime.sec = 6
 
                     marker_array.markers.append(marker)
 
@@ -373,7 +373,7 @@ class MarkerVisualizer:
                 marker.color = ColorRGBA(
                     r=0.0, g=float(intensity), b=float(intensity), a=0.8
                 )
-                marker.lifetime.sec = 2
+                marker.lifetime.sec = 6
 
                 marker_array.markers.append(marker)
 
