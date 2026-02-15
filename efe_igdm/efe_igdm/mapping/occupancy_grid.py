@@ -1,7 +1,7 @@
 import numpy as np
 from matplotlib.colors import ListedColormap
 import matplotlib.pyplot as plt
-from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import binary_fill_holes, label, generate_binary_structure, binary_dilation
 import rclpy
 from rclpy.node import Node
 from gaden_msgs.srv import Occupancy
@@ -289,6 +289,44 @@ class OccupancyGridMap:
     #                 if self.grid[check_gy, check_gx] != 0:
     #                     return False
     #     return True
+
+    def fill_enclosed_unknown(self) -> int:
+        """
+        Fill unknown cells that are walled off from explored space.
+
+        A connected component of unknown cells is filled with wall (1) if
+        no free cell is 8-adjacent to any cell in the component.
+        This covers both interior pockets (thick walls) and edge regions
+        (walls along the map boundary).
+
+        Components that border explored free space are kept as unknown
+        (they might be unexplored rooms reachable through a doorway).
+
+        Returns the number of cells filled.
+        """
+        is_unknown = (self.grid == CELL_UNKNOWN)
+        if not np.any(is_unknown):
+            return 0
+
+        struct = generate_binary_structure(2, 2)  # 8-connectivity
+        labeled, num_features = label(is_unknown, structure=struct)
+        if num_features == 0:
+            return 0
+
+        is_free = (self.grid == CELL_FREE)
+
+        filled = 0
+        for label_id in range(1, num_features + 1):
+            component_mask = (labeled == label_id)
+
+            # Dilate by 1 cell, check if any free cell is adjacent
+            border = binary_dilation(component_mask, structure=struct) & ~component_mask
+            if not np.any(border & is_free):
+                # No free cell neighbors → walled off → fill
+                self.grid[component_mask] = CELL_OCCUPIED
+                filled += int(np.sum(component_mask))
+
+        return filled
 
     def add_rectangle_obstacle(self, x_min, y_min, x_max, y_max):
         """Add a rectangular obstacle to the map."""

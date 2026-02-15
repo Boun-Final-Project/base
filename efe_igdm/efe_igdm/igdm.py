@@ -663,6 +663,11 @@ class RRTInfotaxisNode(Node):
         if not hasattr(self, 'wind_map') or not hasattr(self, 'marker_viz'):
             return
 
+        # Fill enclosed unknown regions (wall interiors) with occupied
+        filled = self.slam_map.fill_enclosed_unknown()
+        if filled > 0:
+            self.get_logger().info(f'Filled {filled} enclosed unknown cells as wall')
+
         # Re-solve wind field
         # GMRF does not strictly require outlets, just measurements + grid
         if self.params.get('use_gmrf', False):
