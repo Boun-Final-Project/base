@@ -57,16 +57,29 @@ class ParticleFilter:
         self._current_sensor_position = None
 
     def _initialize_particles(self):
-        """Initialize particles uniformly in search space."""
+        """Initialize particles uniformly in free space (not inside walls)."""
         x_min, x_max = self.bounds['x']
         y_min, y_max = self.bounds['y']
         Q_min, Q_max = self.bounds['Q']
 
         particles = np.zeros((self.N, 3))
-        particles[:, 0] = np.random.uniform(x_min, x_max, self.N)  # x₀
-        particles[:, 1] = np.random.uniform(y_min, y_max, self.N)  # y₀
         particles[:, 2] = np.random.uniform(Q_min, Q_max, self.N)  # Q₀
 
+        og = getattr(self.dispersion_model, 'occupancy_grid', None)
+        if og is not None and hasattr(og, 'grid'):
+            # Sample only from free or unknown cells (not walls)
+            free_mask = (og.grid != 1)
+            free_ys, free_xs = np.where(free_mask)
+            if len(free_xs) > 0:
+                chosen = np.random.randint(0, len(free_xs), self.N)
+                # Convert to world coords with random jitter within cell
+                particles[:, 0] = og.origin_x + (free_xs[chosen] + np.random.random(self.N)) * og.resolution
+                particles[:, 1] = og.origin_y + (free_ys[chosen] + np.random.random(self.N)) * og.resolution
+                return particles
+
+        # Fallback: uniform in bounds (no grid available)
+        particles[:, 0] = np.random.uniform(x_min, x_max, self.N)
+        particles[:, 1] = np.random.uniform(y_min, y_max, self.N)
         return particles
 
     def update(self, measurement: float, sensor_position: tuple[float, float], skip_resample: bool = False):
@@ -185,6 +198,18 @@ class ParticleFilter:
             (proposals[:, 1] >= self.bounds['y'][0]) & (proposals[:, 1] <= self.bounds['y'][1]) &
             (proposals[:, 2] >= self.bounds['Q'][0]) & (proposals[:, 2] <= self.bounds['Q'][1])
         )
+
+        # 2b. Reject proposals inside walls
+        og = self.dispersion_model.occupancy_grid
+        if og is not None:
+            gx = np.floor((proposals[:, 0] - og.origin_x) / og.resolution).astype(np.int32)
+            gy = np.floor((proposals[:, 1] - og.origin_y) / og.resolution).astype(np.int32)
+            in_grid = (gx >= 0) & (gx < og.width) & (gy >= 0) & (gy < og.height)
+            occupied = np.zeros(self.N, dtype=bool)
+            idx = np.where(in_grid)[0]
+            if len(idx) > 0:
+                occupied[idx] = og.grid[gy[idx], gx[idx]] == 1
+            in_bounds &= ~occupied
         
         # 3. Compute likelihoods for ALL CURRENT particles at once
         conc_curr = self._compute_concentrations(
