@@ -73,6 +73,7 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('resample_threshold', 0.5)
         self.declare_parameter('true_source_x', 2.0)
         self.declare_parameter('true_source_y', 4.5)
+        self.declare_parameter('wind_alpha', 0.5)
 
         # Cache values
         self.params = {
@@ -91,7 +92,8 @@ class RRTInfotaxisNode(Node):
             'positive_weight': self.get_parameter('positive_weight').value,
             'use_fast_rrt': self.get_parameter('use_fast_rrt').value,
             'number_of_particles': self.get_parameter('number_of_particles').value,
-            'use_gmrf': True  # Hardcoded enable for GMRF
+            'use_gmrf': True,  # Hardcoded enable for GMRF
+            'wind_alpha': self.get_parameter('wind_alpha').value,
         }
 
     def _init_state_variables(self):
@@ -193,7 +195,8 @@ class RRTInfotaxisNode(Node):
 
         # 2. Initialize Models
         self.dispersion_model = IndoorGaussianDispersionModel(
-            sigma_m=self.params['sigma_m'], occupancy_grid=self.slam_map
+            sigma_m=self.params['sigma_m'], occupancy_grid=self.slam_map,
+            wind_alpha=self.params['wind_alpha']
         )
         self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.5, num_levels=10, max_concentration=120.0)
         
@@ -674,8 +677,13 @@ class RRTInfotaxisNode(Node):
                     self.get_logger().info(f'Potential flow solved with {n} outlet clusters')
                     self._pf_solve_logged = True
 
+        # Update dispersion model with latest wind field
+        self.dispersion_model.set_wind_field(
+            self.wind_map.estimated_vx, self.wind_map.estimated_vy
+        )
+
         self.marker_viz.visualize_wind_map(self.wind_map)
-        
+
         # Validation
         if self.gt_wind_data and self.step_count % 10 == 0:
             # Basic check: compare N vectors?
