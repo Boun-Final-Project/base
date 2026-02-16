@@ -57,7 +57,7 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('delta', 0.7)
         self.declare_parameter('max_depth', 4)
         self.declare_parameter('xy_goal_tolerance', 0.3)
-        self.declare_parameter('robot_radius', 0.05)
+        self.declare_parameter('robot_radius', 0.25)
         self.declare_parameter('sigma_threshold', 0.5)
         self.declare_parameter('success_distance', 0.5)
         self.declare_parameter('positive_weight', 0.5)
@@ -74,6 +74,10 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('true_source_x', 2.0)
         self.declare_parameter('true_source_y', 4.5)
         self.declare_parameter('wind_alpha', 0.5)
+        self.declare_parameter('sensor_alpha', 0.1)
+        self.declare_parameter('sensor_sigma_env', 1.5)
+        self.declare_parameter('sensor_num_levels', 10)
+        self.declare_parameter('max_concentration', 120.0)
 
         # Cache values
         self.params = {
@@ -94,6 +98,10 @@ class RRTInfotaxisNode(Node):
             'number_of_particles': self.get_parameter('number_of_particles').value,
             'use_gmrf': True,  # Hardcoded enable for GMRF
             'wind_alpha': self.get_parameter('wind_alpha').value,
+            'sensor_alpha': self.get_parameter('sensor_alpha').value,
+            'sensor_sigma_env': self.get_parameter('sensor_sigma_env').value,
+            'sensor_num_levels': self.get_parameter('sensor_num_levels').value,
+            'max_concentration': self.get_parameter('max_concentration').value,
         }
 
     def _init_state_variables(self):
@@ -198,11 +206,16 @@ class RRTInfotaxisNode(Node):
             sigma_m=self.params['sigma_m'], occupancy_grid=self.slam_map,
             wind_alpha=self.params['wind_alpha']
         )
-        self.sensor_model = ContinuousGaussianSensorModel(alpha=0.1, sigma_env=1.5, num_levels=10, max_concentration=120.0)
-        
+        self.sensor_model = ContinuousGaussianSensorModel(
+            alpha=self.params['sensor_alpha'],
+            sigma_env=self.params['sensor_sigma_env'],
+            num_levels=self.params['sensor_num_levels'],
+            max_concentration=self.params['max_concentration']
+        )
+
         self.particle_filter = ParticleFilter(
             num_particles=self.params['number_of_particles'],
-            search_bounds={"x": (0, self.slam_map.real_world_width), "y": (0, self.slam_map.real_world_height), "Q": (0, 120.0)},
+            search_bounds={"x": (0, self.slam_map.real_world_width), "y": (0, self.slam_map.real_world_height), "Q": (0, self.params['max_concentration'])},
             sensor_model=self.sensor_model,
             dispersion_model=self.dispersion_model
         )
