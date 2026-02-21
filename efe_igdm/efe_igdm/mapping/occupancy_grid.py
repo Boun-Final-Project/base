@@ -107,14 +107,13 @@ def load_3d_occupancy_grid_from_service(node: Node, service_name='/gaden_environ
 
     num_outlets_raw = int(np.sum(outlet_mask))
 
-    # Fill holes inside the outlet frame. The outlet has a hollow structure:
-    # outer ring is value 2 (outlet) but the interior has value 1 (wall).
-    # binary_fill_holes fills the enclosed interior so LiDAR hits on inner
-    # walls are also recognized as outlet cells.
-    outlet_mask = binary_fill_holes(outlet_mask)
-
-    num_outlets = int(np.sum(outlet_mask))
-    node.get_logger().info(f'Outlet mask: {num_outlets} outlet cells detected at z_level={z_level} ({num_outlets_raw} raw, {num_outlets - num_outlets_raw} filled)')
+    # NOTE: binary_fill_holes is intentionally NOT used here. In environments
+    # where outlet cells form a ring around the map boundary, fill_holes would
+    # incorrectly mark the entire navigable interior as outlet cells, preventing
+    # LiDAR from ever marking any cell as free (CELL_FREE=0). Use only the raw
+    # outlet cells detected from the 3D grid.
+    num_outlets = num_outlets_raw
+    node.get_logger().info(f'Outlet mask: {num_outlets} outlet cells detected at z_level={z_level} ({num_outlets_raw} raw, 0 filled)')
 
     # Convert occupancy values: 0=free, anything else (>0)=occupied
     grid_2d = (grid_2d > 0).astype(np.int8)
