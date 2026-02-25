@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import rclpy
 from rclpy.node import Node
 from gaden_msgs.srv import Occupancy
+from nav_msgs.msg import OccupancyGrid
+from std_msgs.msg import Header
 
 
 def load_3d_occupancy_grid_from_service(node: Node, service_name='/gaden_environment/occupancyMap3D',
@@ -147,6 +149,15 @@ class OccupancyGridMap:
         gx = int(np.floor((x - self.origin_x) / self.resolution))
         gy = int(np.floor((y - self.origin_y) / self.resolution))
         return gx, gy
+    
+    def is_cell_free(self, gx, gy):
+        """
+        Fast check if a specific grid cell is free.
+        Useful for pathfinders (A*, Dijkstra) that work on grid indices.
+        """
+        if 0 <= gx < self.grid_width and 0 <= gy < self.grid_height:
+            return self.grid[gy, gx] == 0
+        return False
 
     def grid_to_world(self, gx, gy):
         """Convert grid indices to world coordinates (cell center)."""
@@ -157,60 +168,92 @@ class OccupancyGridMap:
     def is_valid(self, position: tuple[float, float], radius: float = 0.2) -> bool:
         """
         Check if position is valid (within bounds and collision-free).
-
-        Parameters:
-        -----------
-        position : tuple[float, float]
-            World coordinates (x, y)
-        radius : float
-            Safety radius to check around the position (default: 0.1m)
-
-        Returns:
-        --------
-        valid : bool
-            True if position is valid and collision-free
+        Optimized to use squared distances for speed.
         """
-        # gx, gy = self.world_to_grid(*position)
-        # if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
-        #     return False
-
-        # # Check surrounding cells within the radius
-        # radius_cells = int(np.ceil(radius / self.resolution))
-        # for dx in range(-radius_cells, radius_cells + 1):
-        #     for dy in range(-radius_cells, radius_cells + 1):
-        #         if 0 <= gx + dx < self.grid_width and 0 <= gy + dy < self.grid_height:
-        #             if self.grid[gy + dy, gx + dx] != 0:
-        #                 return False
-        # return True
         gx, gy = self.world_to_grid(*position)
+        
+        # Fast bounds check
         if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
             return False
 
-        # Check surrounding cells within the radius
+        # Calculate radius in cells
         radius_cells = int(np.ceil(radius / self.resolution))
+        radius_sq_cells = radius_cells**2  # Optimization: compare squares
         
-        # --- START OF FIX ---
-        # Pre-calculate the squared radius in grid cells for comparison
-        radius_sq_cells = radius_cells**2
-        # --- END OF FIX ---
-
+        # Check surrounding cells
         for dx in range(-radius_cells, radius_cells + 1):
             for dy in range(-radius_cells, radius_cells + 1):
-                
-                # --- START OF FIX ---
-                # Check if the grid cell (dx, dy) is within the circular radius
-                # by comparing squared distances.
+                # Optimization: Skip corners of the square bounding box
+                # to approximate a circle without using sqrt()
                 if dx*dx + dy*dy > radius_sq_cells:
-                    continue  # Skip this cell, it's in the "corner" of the square
-                # --- END OF FIX ---
+                    continue
                 
                 check_gx = gx + dx
                 check_gy = gy + dy
 
+                # Check grid bounds and occupancy
                 if 0 <= check_gx < self.grid_width and 0 <= check_gy < self.grid_height:
                     if self.grid[check_gy, check_gx] != 0:
                         return False
         return True
+
+    # def is_valid(self, position: tuple[float, float], radius: float = 0.2) -> bool:
+    #     """
+    #     Check if position is valid (within bounds and collision-free).
+
+    #     Parameters:
+    #     -----------
+    #     position : tuple[float, float]
+    #         World coordinates (x, y)
+    #     radius : float
+    #         Safety radius to check around the position (default: 0.1m)
+
+    #     Returns:
+    #     --------
+    #     valid : bool
+    #         True if position is valid and collision-free
+    #     """
+    #     # gx, gy = self.world_to_grid(*position)
+    #     # if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
+    #     #     return False
+
+    #     # # Check surrounding cells within the radius
+    #     # radius_cells = int(np.ceil(radius / self.resolution))
+    #     # for dx in range(-radius_cells, radius_cells + 1):
+    #     #     for dy in range(-radius_cells, radius_cells + 1):
+    #     #         if 0 <= gx + dx < self.grid_width and 0 <= gy + dy < self.grid_height:
+    #     #             if self.grid[gy + dy, gx + dx] != 0:
+    #     #                 return False
+    #     # return True
+    #     gx, gy = self.world_to_grid(*position)
+    #     if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
+    #         return False
+
+    #     # Check surrounding cells within the radius
+    #     radius_cells = int(np.ceil(radius / self.resolution))
+        
+    #     # --- START OF FIX ---
+    #     # Pre-calculate the squared radius in grid cells for comparison
+    #     radius_sq_cells = radius_cells**2
+    #     # --- END OF FIX ---
+
+    #     for dx in range(-radius_cells, radius_cells + 1):
+    #         for dy in range(-radius_cells, radius_cells + 1):
+                
+    #             # --- START OF FIX ---
+    #             # Check if the grid cell (dx, dy) is within the circular radius
+    #             # by comparing squared distances.
+    #             if dx*dx + dy*dy > radius_sq_cells:
+    #                 continue  # Skip this cell, it's in the "corner" of the square
+    #             # --- END OF FIX ---
+                
+    #             check_gx = gx + dx
+    #             check_gy = gy + dy
+
+    #             if 0 <= check_gx < self.grid_width and 0 <= check_gy < self.grid_height:
+    #                 if self.grid[check_gy, check_gx] != 0:
+    #                     return False
+    #     return True
 
     def add_rectangle_obstacle(self, x_min, y_min, x_max, y_max):
         """Add a rectangular obstacle to the map."""
@@ -230,13 +273,21 @@ class OccupancyGridMap:
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
 
-        # Create custom colormap
-        cmap = ListedColormap(['white', 'gray', 'lightblue'])
+        # Create custom colormap with transparency for unknown cells
+        # Colors: unknown (-1), free (0), occupied (1)
+        # RGBA format: (R, G, B, Alpha) where Alpha=0 is transparent
+        cmap = ListedColormap([
+            (1.0, 1.0, 1.0, 0.0),  # Unknown (-1): Transparent (was orange)
+            (1.0, 1.0, 1.0, 1.0),  # Free (0): White
+            (0.5, 0.5, 0.5, 1.0)   # Occupied (1): Gray
+        ])
 
         # Display grid with correct world coordinates
         extent = [self.origin_x, self.origin_x + self.width * self.resolution,
                   self.origin_y, self.origin_y + self.height * self.resolution]
-        ax.imshow(self.grid, origin='lower', extent=extent, cmap=cmap, alpha=0.7)
+        # Shift grid values: -1→0, 0→1, 1→2 for correct colormap indexing
+        display_grid = self.grid + 1
+        ax.imshow(display_grid, origin='lower', extent=extent, cmap=cmap, alpha=1.0, vmin=0, vmax=2)
 
         ax.set_xlabel('X (meters)')
         ax.set_ylabel('Y (meters)')
@@ -250,6 +301,50 @@ class OccupancyGridMap:
             ax.grid(True, alpha=0.3)
 
         return ax
+
+    def to_ros_msg(self, frame_id: str = 'map', timestamp=None):
+        """
+        Convert occupancy grid to ROS2 OccupancyGrid message.
+
+        Parameters:
+        -----------
+        frame_id : str
+            Frame ID for the occupancy grid (default: 'map')
+        timestamp : builtin_interfaces.msg.Time
+            Timestamp for the message header (default: None)
+
+        Returns:
+        --------
+        msg : nav_msgs.msg.OccupancyGrid
+            ROS2 OccupancyGrid message
+        """
+        msg = OccupancyGrid()
+
+        # Set header
+        msg.header = Header()
+        msg.header.frame_id = frame_id
+        if timestamp is not None:
+            msg.header.stamp = timestamp
+
+        # Set metadata
+        msg.info.width = self.width
+        msg.info.height = self.height
+        msg.info.resolution = self.resolution
+        msg.info.origin.position.x = self.origin_x
+        msg.info.origin.position.y = self.origin_y
+        msg.info.origin.position.z = self.z_height if self.z_height is not None else 0.0
+        msg.info.origin.orientation.w = 1.0  # No rotation
+
+        # Convert grid data to ROS2 format
+        # Internal format: -1=unknown, 0=free, 1=occupied
+        # ROS2 format: -1=unknown, 0=free, 100=occupied
+        ros_grid = self.grid.copy().astype(np.int8)
+        ros_grid[ros_grid == 1] = 100  # Convert occupied cells to 100
+
+        # Flatten row-major (C-order) as expected by ROS2
+        msg.data = ros_grid.flatten().tolist()
+
+        return msg
 
 
 # Example usage function for ROS2 integration

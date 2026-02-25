@@ -500,6 +500,10 @@ class RRTInfotaxisNode(Node):
         best_path = debug_info["best_path"]
         all_paths = debug_info["all_paths"]
 
+        # Log if using fallback mode
+        if 'error' in debug_info:
+            self.get_logger().warn(f'[PLAN] Fallback mode: {debug_info["error"]}')
+
         # Visualize everything in RViz2
         self.visualize_particles(self.particle_filter.particles, self.particle_filter.weights)
         self.visualize_all_paths(all_paths)

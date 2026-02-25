@@ -1,10 +1,12 @@
 import numpy as np
-from .particle_filter_optimized import ParticleFilterOptimized
-from .occupancy_grid import OccupancyGridMap
-from typing import List
+from ..estimation.particle_filter import ParticleFilter
+from ..mapping.occupancy_grid import OccupancyGridMap
+from typing import List, Tuple, Optional, Dict
 
 class Node:
-    """A node in the RRT tree."""
+    """A node in the RRT tree using slots for memory optimization."""
+    __slots__ = ['position', 'parent', 'depth', 'entropy_gain']
+    
     def __init__(self, position, parent=None):
         self.position = np.array(position)
         self.parent = parent
@@ -12,93 +14,122 @@ class Node:
         self.entropy_gain = -np.inf
 
 class RRT:
-    """Rapidly-exploring Random Tree"""
-    def __init__(self, occupancy_grid : OccupancyGridMap, N_tn : int, R_range : float, delta : float,
-                 max_depth : int = 4, discount_factor : float = 0.8, positive_weight : float = 0.5,
-                 robot_radius : float = 0.35, max_iterations : int = None):
+    """Rapidly-exploring Random Tree - OPTIMIZED"""
+    def __init__(self, occupancy_grid: OccupancyGridMap, N_tn: int, R_range: float, delta: float,
+                 max_depth: int = 4, discount_factor: float = 0.8, positive_weight: float = 0.5,
+                 robot_radius: float = 0.35, max_iterations: int = None):
         self.occupancy_grid = occupancy_grid
         self.N_tn = N_tn
         self.R_range = R_range
-        self.nodes = []
+        self.nodes: List[Node] = []
         self.delta = delta
         self.max_depth = max_depth
         self.discount_factor = discount_factor
         self.positive_weight = positive_weight
         self.robot_radius = robot_radius
-        self.kdtree = None
-        # Maximum iterations to prevent infinite loops near walls
-        # Default: 100x the target node count
         self.max_iterations = max_iterations if max_iterations is not None else (N_tn * 100)
 
-    def sprawl(self, start_pos: tuple[float,float]) -> None:
-        root = Node(start_pos)
-        self.nodes.append(root)
-
-        # Track iterations to prevent infinite loops near walls
+    def sprawl(self, start_pos: Tuple[float, float]) -> None:
+        """Generates the RRT tree."""
+        self.nodes = [Node(start_pos)]
         iteration = 0
+        
+        # Pre-calculate constants
+        grid_width = self.occupancy_grid.width
+        grid_height = self.occupancy_grid.height
 
         while len(self.nodes) < self.N_tn and iteration < self.max_iterations:
             iteration += 1
 
+            # Sample random point within R_range
             r = self.R_range * np.sqrt(np.random.random())
             theta = 2 * np.pi * np.random.random()
-            x = start_pos[0] + r * np.cos(theta)
-            y = start_pos[1] + r * np.sin(theta)
-            closest_node = self.get_closest_node((x, y))
-            dist = np.linalg.norm(np.array((x, y)) - closest_node.position)
+            x_rand = start_pos[0] + r * np.cos(theta)
+            y_rand = start_pos[1] + r * np.sin(theta)
+            
+            # Find closest existing node
+            closest_node = self.get_closest_node((x_rand, y_rand))
+            
+            # Steer towards random point
+            diff = np.array([x_rand, y_rand]) - closest_node.position
+            dist = np.linalg.norm(diff)
+            
             if dist > self.delta:
-                direction = (np.array((x, y)) - closest_node.position) / dist
+                direction = diff / dist
                 new_pos = closest_node.position + direction * self.delta
-                x, y = new_pos[0], new_pos[1]
-                # Check both endpoint validity and collision-free path
-                if self.is_collision_free((closest_node.position[0], closest_node.position[1]), (x, y)):
-                    new_node = Node((x, y), closest_node)
-                    self.nodes.append(new_node)
             else:
-                # Check both endpoint validity and collision-free path
-                if self.is_collision_free((closest_node.position[0], closest_node.position[1]), (x, y)):
-                    new_node = Node((x, y), closest_node)
-                    self.nodes.append(new_node)
+                new_pos = np.array([x_rand, y_rand])
 
-        # Log warning if we couldn't generate the requested number of nodes
-        if len(self.nodes) < self.N_tn:
-            import logging
-            logging.warning(f'RRT sprawl: Only generated {len(self.nodes)}/{self.N_tn} nodes after {iteration} iterations (near walls/obstacles)')
+            # Check validity
+            if self.is_collision_free_vectorized(closest_node.position, new_pos):
+                new_node = Node(new_pos, closest_node)
+                self.nodes.append(new_node)
 
-    def get_closest_node(self, position : tuple[float,float]) -> Node:
-        """Find the closest node in the tree to the given position."""
-        position = np.array(position)
-        positions = np.array([node.position for node in self.nodes])
-        dists = np.linalg.norm(positions - position, axis=1)
-        closest_index = np.argmin(dists)
+    def get_closest_node(self, position: Tuple[float, float]) -> Node:
+        """
+        Find closest node using vectorized numpy operations.
+        Much faster than looping for < 1000 nodes.
+        """
+        target = np.array(position)
+        # Gather all positions into a (N, 2) array
+        # Note: This list comprehension is fast enough for N < 1000. 
+        # For N > 1000, we should maintain a separate self.node_positions array.
+        all_positions = np.array([n.position for n in self.nodes])
+        
+        # Compute squared distances (avoids sqrt for comparison)
+        dists_sq = np.sum((all_positions - target)**2, axis=1)
+        closest_index = np.argmin(dists_sq)
         return self.nodes[closest_index]
 
-    def is_collision_free(self, pos1: tuple[float, float], pos2: tuple[float, float]) -> bool:
+    def is_collision_free_vectorized(self, pos1: np.ndarray, pos2: np.ndarray) -> bool:
         """
-        Check if the straight-line path between pos1 and pos2 is collision-free.
-        Uses discrete sampling along the path.
+        Check collision using vectorized grid sampling.
         """
-        pos1 = np.array(pos1)
-        pos2 = np.array(pos2)
+        # 1. Check endpoints first (fast fail)
+        if not self.occupancy_grid.is_valid(tuple(pos2), radius=self.robot_radius):
+            return False
 
-        # Sample points along the line
         dist = np.linalg.norm(pos2 - pos1)
         if dist < 1e-6:
-            return self.occupancy_grid.is_valid(tuple(pos1), radius=self.robot_radius)
+            return True
 
-        # Sample at resolution of half the grid cell size for safety
+        # 2. Determine number of samples based on resolution
+        # Sampling slightly denser than resolution guarantees no skipping
         num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution * 0.5)))
-        num_samples = max(num_samples, 2)  # At least check start and end
+        
+        # 3. Generate points (Linear Interpolation)
+        # Creates (N, 2) array of points along the line
+        ts = np.linspace(0, 1, num_samples + 1)
+        # Broadcasting: pos1 + t * (pos2 - pos1)
+        line_points = pos1 + np.outer(ts, (pos2 - pos1))
 
-        for i in range(num_samples + 1):
-            t = i / num_samples
-            sample_pos = pos1 + t * (pos2 - pos1)
-            if not self.occupancy_grid.is_valid((sample_pos[0], sample_pos[1]), radius=self.robot_radius):
-                return False
+        # 4. Batch convert to grid coordinates
+        # We access occupancy grid internals for speed here
+        # Assuming occupancy_grid has world_to_grid helper or using resolution math:
+        grid_xs = ((line_points[:, 0] - self.occupancy_grid.origin_x) / self.occupancy_grid.resolution).astype(int)
+        grid_ys = ((line_points[:, 1] - self.occupancy_grid.origin_y) / self.occupancy_grid.resolution).astype(int)
 
+        # 5. Boundary Checks (Vectorized)
+        valid_x = (grid_xs >= 0) & (grid_xs < self.occupancy_grid.width)
+        valid_y = (grid_ys >= 0) & (grid_ys < self.occupancy_grid.height)
+        valid_indices = valid_x & valid_y
+        
+        if not np.all(valid_indices):
+            return False # Path goes out of bounds
+
+        # 6. Check Occupancy
+        # 0 = Free, 100 = Occupied, -1 = Unknown
+        # We assume > 0 is collision.
+        grid_values = self.occupancy_grid.grid[grid_ys, grid_xs]
+        
+        # If any cell is occupied (> 0), collision detected
+        if np.any(grid_values > 0):
+            return False
+            
         return True
 
     def prune(self) -> List[List[Node]]:
+        """Return all branches that reached max depth."""
         edge_nodes = [node for node in self.nodes if node.depth == self.max_depth]
         paths = []
         for edge_node in edge_nodes:
@@ -110,78 +141,39 @@ class RRT:
             paths.append(path[::-1])
         return paths
 
-    def calculate_branch_information(self, path : List[Node], initial_particle_filter : ParticleFilterOptimized) -> float:
-        """
-        Calculate Branch Information (BI) for a path using Equation 19 from paper.
+    def calculate_branch_information(self, path: List[Node], initial_particle_filter: ParticleFilter) -> float:
+        """Calculates BI (Eq 19) - Optimized with cached entropy."""
+        path = path[1:] # Exclude root
+        BI = 0.0
 
-        BI(V_b) = Σ_{i=1}^{m} γ^{i-1} · I(v_{b,i})
-
-        where:
-        - V_b is a branch (path) in the RRT tree
-        - v_{b,i} is the i-th vertex in the branch
-        - I(v_{b,i}) is the mutual information at vertex v_{b,i}
-        - γ is the discount factor (assigns higher weight to nearer future)
-        - m is the number of vertices in the branch
-
-        Parameters:
-        -----------
-        path : List[Node]
-            Branch from root to leaf node
-        initial_particle_filter : ParticleFilterOptimized
-            Current particle filter state for entropy calculations
-
-        Returns:
-        --------
-        BI : float
-            Total Branch Information (discounted sum of mutual information)
-        """
-        path = path[1:] # Exclude starting position (root node)
-        BI = 0.0  # Branch Information (Eq. 19)
-
-        # Compute BI = Σ γ^{i-1} · I(v_i) where i starts from 1 in paper
-        # After excluding root, enumerate starts from 0, so γ^i = γ^{i-1} in paper notation
         for i, node in enumerate(path):
-            # Use cached entropy gain if available
             if node.entropy_gain != -np.inf:
-                discounted_gain = (self.discount_factor ** i) * node.entropy_gain
-                BI += discounted_gain
+                # Use cached value
+                BI += (self.discount_factor ** i) * node.entropy_gain
                 continue
 
-            position = node.position
-
-            # Compute mutual information I(v_i) at this vertex
-            # I(v_i) = H_k - E[H_{k+1}] (Equation 9 in paper)
+            # --- Information Gain Calculation ---
             current_entropy = initial_particle_filter.get_entropy()
-
-            # Determine number of measurement levels based on sensor model
-            # Binary: 2 levels (0, 1), Discrete: N levels (0 to N-1)
-            if hasattr(initial_particle_filter.sensor_model, 'num_levels'):
-                num_measurements = initial_particle_filter.sensor_model.num_levels
-            else:
-                num_measurements = 2  # Binary sensor model
-
-            # Compute expected entropy E[H_{k+1}] = Σ p(z) · H(z) (Eq. 11-12)
+            
+            num_measurements = getattr(initial_particle_filter.sensor_model, 'num_levels', 2)
+            
             expected_entropy = 0.0
             for measurement in range(num_measurements):
-                # p(z | current state) from Equation 29
-                probability_of_measurement = initial_particle_filter.predict_measurement_probability(position, measurement)
-                # H_{k+1}(z) - hypothetical entropy after measurement z (Eq. 28)
-                hypothetical_entropy = initial_particle_filter.compute_hypothetical_entropy(measurement, position)
-                expected_entropy += probability_of_measurement * hypothetical_entropy
-
-            # Mutual information at this vertex
+                prob = initial_particle_filter.predict_measurement_probability(node.position, measurement)
+                if prob > 1e-6: # Optimization: Skip negligible probabilities
+                    hyp_entropy = initial_particle_filter.compute_hypothetical_entropy(measurement, node.position)
+                    expected_entropy += prob * hyp_entropy
+                
             mutual_information = current_entropy - expected_entropy
-
-            # Cache for potential reuse
+            
+            # Cache result
             node.entropy_gain = mutual_information
-
-            # Apply discount factor: γ^i · I(v_i)
-            discounted_gain = (self.discount_factor ** i) * mutual_information
-            BI += discounted_gain
+            
+            BI += (self.discount_factor ** i) * mutual_information
 
         return BI
 
-    def calculate_travel_cost(self, path : List[Node], initial_particle_filter : ParticleFilterOptimized) -> float:
+    def calculate_travel_cost(self, path : List[Node], initial_particle_filter : ParticleFilter) -> float:
         """Calculate the travel cost along a given path. J2 from the paper. Eq(31)."""
         estimation, _ = initial_particle_filter.get_estimate()  # Returns (mean, std)
         target_pos = np.array([estimation["x"], estimation["y"]])
@@ -194,36 +186,25 @@ class RRT:
         total_cost = path_length + distance_to_target
         return total_cost
     
-    def get_next_move(self, start_pos : tuple[float,float], initial_particle_filter : ParticleFilterOptimized) -> tuple[float,float]:
-        """
-        Get the next move position by maximizing Branch Information (BI).
-
-        Implements local planner from Section IV.B.1:
-        - Select branch V_b* = argmax_{V_b} BI(V_b)  (Equation 20)
-        - Move to first vertex of selected branch
-        """
-        # Clear previous tree
-        self.nodes = []
+    def get_next_move(self, start_pos: Tuple[float,float], initial_particle_filter: ParticleFilter) -> Tuple[float,float]:
+        self.nodes = [] # Reset tree
         self.sprawl(start_pos)
         paths = self.prune()
+        
         best_path = None
-        best_BI = -np.inf  # BI* (Equation 20)
+        best_BI = -np.inf
 
         for path in paths:
-            # Compute Branch Information (Equation 19)
             BI = self.calculate_branch_information(path, initial_particle_filter)
-
-            # Select branch with highest BI (Equation 20)
             if BI > best_BI:
                 best_BI = BI
                 best_path = path
 
-        if best_path is not None and len(best_path) > 1:
-            return tuple(best_path[1].position)  # Move to first vertex
-        else:
-            return start_pos  # No move possible
+        if best_path and len(best_path) > 1:
+            return tuple(best_path[1].position)
+        return start_pos
 
-    def get_next_move_debug(self, start_pos : tuple[float,float], initial_particle_filter : ParticleFilterOptimized) -> dict:
+    def get_next_move_debug(self, start_pos : tuple[float,float], initial_particle_filter : ParticleFilter) -> dict:
         """
         Get next move with detailed debug information for visualization.
 
