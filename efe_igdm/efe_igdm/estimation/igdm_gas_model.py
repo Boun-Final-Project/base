@@ -12,6 +12,7 @@ STRICT MODE: Numba acceleration is REQUIRED.
 
 import numpy as np
 from typing import Tuple, Optional
+from collections import OrderedDict
 import heapq
 from numba import jit
 
@@ -107,8 +108,8 @@ class IndoorGaussianDispersionModel:
         self._wind_u = None  # (height, width) float64
         self._wind_v = None  # (height, width) float64
 
-        # Cache for Dijkstra distance maps
-        self._distance_cache = {}
+        # LRU cache for Dijkstra distance maps
+        self._distance_cache = OrderedDict()
         self._cache_max_size = 20  # Keep small to save RAM
         self._cache_hits = 0
         self._cache_misses = 0
@@ -166,13 +167,14 @@ class IndoorGaussianDispersionModel:
         cache_key = (gx, gy)
         if cache_key in self._distance_cache:
             self._cache_hits += 1
+            self._distance_cache.move_to_end(cache_key)  # Mark as recently used
             return self._distance_cache[cache_key]
 
         self._cache_misses += 1
         distance_map = self._dijkstra_all_distances((gx, gy))
 
         if len(self._distance_cache) >= self._cache_max_size:
-            self._distance_cache.pop(next(iter(self._distance_cache)))
+            self._distance_cache.popitem(last=False)  # Evict least recently used
 
         self._distance_cache[cache_key] = distance_map
         return distance_map

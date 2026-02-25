@@ -347,29 +347,48 @@ class GlobalPlanner:
                 self.adj_list[j].append((i, dist))
 
     def _is_path_collision_free(self, pos1: Tuple[float, float], pos2: Tuple[float, float], allow_start_invalid: bool = False) -> bool:
-        """Check collision using optimistic check along the segment."""
+        """Check collision using vectorized grid sampling along the segment."""
         pos1 = np.array(pos1)
         pos2 = np.array(pos2)
         dist = np.linalg.norm(pos2 - pos1)
-        
+
         if dist < 1e-6:
             if allow_start_invalid: return True
             return self._is_valid_optimistic(tuple(pos1))
 
-        # Relaxed sampling: Check every resolution unit
-        num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution)))
-        num_samples = max(num_samples, 2)
+        # Sample points along the line at resolution spacing
+        num_samples = max(int(np.ceil(dist / self.occupancy_grid.resolution)), 2)
 
-        for i in range(num_samples + 1):
-            t = i / num_samples
-            
-            # If start is allowed invalid, skip the very first point (i=0)
-            if i == 0 and allow_start_invalid:
-                continue
+        ts = np.linspace(0, 1, num_samples + 1)
+        if allow_start_invalid:
+            ts = ts[1:]  # Skip starting point
 
-            sample_pos = pos1 + t * (pos2 - pos1)
-            if not self._is_valid_optimistic((sample_pos[0], sample_pos[1])):
-                return False
+        # Generate all sample points at once: (M, 2)
+        line_points = pos1 + np.outer(ts, (pos2 - pos1))
+
+        # Convert to grid coordinates (vectorized)
+        og = self.occupancy_grid
+        center_gxs = ((line_points[:, 0] - og.origin_x) / og.resolution).astype(int)
+        center_gys = ((line_points[:, 1] - og.origin_y) / og.resolution).astype(int)
+
+        # Bounds check on centers
+        if np.any((center_gxs < 0) | (center_gxs >= og.width) |
+                  (center_gys < 0) | (center_gys >= og.height)):
+            return False
+
+        # Expand each center by disk footprint offsets: (M, K) where K = num disk cells
+        all_gxs = center_gxs[:, None] + self._disk_dx[None, :]  # (M, K)
+        all_gys = center_gys[:, None] + self._disk_dy[None, :]  # (M, K)
+
+        # Clip to grid bounds
+        all_gxs_clip = np.clip(all_gxs, 0, og.width - 1)
+        all_gys_clip = np.clip(all_gys, 0, og.height - 1)
+
+        # Batch occupancy lookup
+        cell_vals = og.grid[all_gys_clip.ravel(), all_gxs_clip.ravel()]
+        if np.any(cell_vals > 0):
+            return False
+
         return True
 
     def compute_all_paths_from_start(self, start_id: int = 0) -> Tuple[Dict[int, float], Dict[int, int]]:

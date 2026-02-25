@@ -26,8 +26,8 @@ class ExperimentLogger:
         ])
         self.log_file.flush()
     
-    def log_step(self, step_count, particle_filter, sensor_value, current_pos, 
-                 params, debug_info, bi_optimal, dead_end_detected, 
+    def log_step(self, step_count, particle_filter, sensor_value, current_pos,
+                 params, debug_info, bi_optimal, bi_threshold, dead_end_detected,
                  planner_mode, global_path_len, global_path_index):
         """
         Logs a single step of the experiment.
@@ -35,10 +35,10 @@ class ExperimentLogger:
         means, stds = particle_filter.get_estimate()
         entropy = particle_filter.get_entropy()
         debug_info = debug_info or {}
-        
-        # Build the row (Logic moved from igdm.py)
+
+        # Build the row — columns must match header order exactly
         row = [
-            step_count, 
+            step_count,
             0, # elapsed time placeholder (can be filled if needed)
             f'{entropy:.4f}',
             f'{stds["x"]:.4f}', f'{stds["y"]:.4f}', f'{stds["Q"]:.4f}',
@@ -51,7 +51,7 @@ class ExperimentLogger:
             f'{current_pos[0]:.4f}', f'{current_pos[1]:.4f}',
             f'{params["sigma_m"]:.4f}',
             f'{bi_optimal:.4f}',
-            f'{dead_end_detected}', # simplified from boolean
+            f'{bi_threshold:.4f}',
             1 if dead_end_detected else 0,
             planner_mode,
             global_path_len,

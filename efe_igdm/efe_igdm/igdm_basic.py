@@ -138,9 +138,9 @@ class RRTInfotaxisBasicNode(Node):
         self.pose_subscription = self.create_subscription(
             PoseWithCovarianceStamped, '/PioneerP3DX/ground_truth', self.pose_callback, 10)
         self.sensor_subscription = self.create_subscription(
-            GasSensor, '/fake_pid/Sensor_reading', self.sensor_callback, 10)
+            GasSensor, '/PioneerP3DX/PID/Sensor_reading', self.sensor_callback, 10)
         self.laser_subscription = self.create_subscription(
-            LaserScan, '/PioneerP3DX/laser_scanner', self.laser_callback, 10)
+            LaserScan, '/PioneerP3DX/laser_scan', self.laser_callback, 10)
 
         # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
@@ -243,6 +243,11 @@ class RRTInfotaxisBasicNode(Node):
         # 1. Handle Initialization Spin (Delegated to Navigator)
         if not self.navigator.initial_spin_done:
             self.navigator.perform_initial_spin(self.current_position, self.current_theta)
+            return
+
+        # 1b. Wait for SLAM map to populate from laser scans before planning
+        MIN_LASER_SCANS = 5
+        if self.laser_scan_count < MIN_LASER_SCANS:
             return
 
         # 2. Block if moving (Delegated to Navigator)
@@ -594,10 +599,11 @@ class RRTInfotaxisBasicNode(Node):
         self.publish_slam_map()
 
     def _log_step_data(self, means, stds, debug_info, bi_optimal, dead_end_detected):
+        bi_threshold = self.dead_end_detector.get_status()["bi_threshold"]
         self.logger.log_step(
             self.step_count, self.particle_filter, self.sensor_raw_value,
             self.current_position, self.params, debug_info,
-            bi_optimal, dead_end_detected,
+            bi_optimal, bi_threshold, dead_end_detected,
             self.planner_mode,
             len(self.global_path) if self.planner_mode == 'GLOBAL' else 0,
             self.global_path_index if self.planner_mode == 'GLOBAL' else 0

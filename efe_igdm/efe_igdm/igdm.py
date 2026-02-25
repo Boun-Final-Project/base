@@ -638,11 +638,12 @@ class RRTInfotaxisNode(Node):
         self.publish_slam_map()
 
     def _log_step_data(self, means, stds, debug_info, bi_optimal, dead_end_detected):
+        bi_threshold = self.dead_end_detector.get_status()["bi_threshold"]
         self.logger.log_step(
-            self.step_count, self.particle_filter, self.sensor_raw_value, 
-            self.current_position, self.params, debug_info, 
-            bi_optimal, dead_end_detected, 
-            self.planner_mode, 
+            self.step_count, self.particle_filter, self.sensor_raw_value,
+            self.current_position, self.params, debug_info,
+            bi_optimal, bi_threshold, dead_end_detected,
+            self.planner_mode,
             len(self.global_path) if self.planner_mode == 'GLOBAL' else 0,
             self.global_path_index if self.planner_mode == 'GLOBAL' else 0
         )
