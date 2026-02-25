@@ -128,6 +128,9 @@ class DeadEndDetector:
         bool
             True if dead end detected, False otherwise.
         """
+        # Clamp to zero to prevent -inf from poisoning the threshold EMA
+        bi_optimal = max(bi_optimal, 0.0)
+
         if not self.initialized:
             # On first step, just update threshold without detecting dead end
             self.update_threshold(bi_optimal)

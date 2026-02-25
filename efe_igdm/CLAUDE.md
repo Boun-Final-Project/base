@@ -36,7 +36,8 @@ efe_igdm/
 │   └── navigator.py                # Low-level motion control
 ├── mapping/
 │   ├── occupancy_grid.py           # Occupancy grid data structure
-│   └── lidar_mapper.py             # LiDAR-based mapping
+│   ├── lidar_mapper.py             # LiDAR-based mapping
+│   └── wind_map.py                 # Spatial wind measurement map
 ├── visualization/
 │   ├── marker_visualizer.py        # RViz markers
 │   ├── text_visualizer.py          # Text information display
@@ -127,6 +128,7 @@ else:
 - `/PioneerP3DX/ground_truth` (PoseWithCovarianceStamped): Robot pose
 - `/fake_pid/Sensor_reading` (GasSensor): Gas concentration
 - `/PioneerP3DX/laser_scanner` (LaserScan): LiDAR scans
+- `/fake_anemometer/WindSensor_reading` (Anemometer): Wind speed & direction
 
 **Published Topics**:
 - `/PioneerP3DX/cmd_vel` (Twist): Velocity commands
@@ -135,6 +137,7 @@ else:
 - `/rrt_infotaxis/particles` (MarkerArray): Particle visualization
 - `/rrt_infotaxis/rrt_tree` (MarkerArray): RRT tree
 - `/rrt_infotaxis/global_path` (MarkerArray): Global path
+- `/rrt_infotaxis/wind_vectors` (MarkerArray): Wind map arrows (1 Hz)
 
 #### Parameters
 
@@ -906,7 +909,7 @@ Updates occupancy grid from LiDAR scans using ray tracing.
 
 ```python
 # In igdm.py laser_callback
-lidar_mapper = LidarMapper(slam_map)
+lidar_mapper = LidarMapper(slam_map, outlet_mask=outlet_mask)
 
 def laser_callback(self, msg: LaserScan):
     obstacles_found = lidar_mapper.update_from_scan(
@@ -926,12 +929,46 @@ def update_from_scan(self, scan: LaserScan, robot_x, robot_y, robot_theta) -> in
 
     For each laser beam:
     1. Calculate endpoint in world coordinates
-    2. Mark free cells along ray (0)
-    3. Mark endpoint as occupied (1) if valid range
+    2. Mark free cells along ray (0), or CELL_OUTLET (2) if cell is in outlet_mask
+    3. Mark endpoint as occupied (1) or CELL_OUTLET (2) if valid range
 
     Returns:
         num_obstacles: Number of occupied cells marked
     """
+```
+
+#### Outlet Detection
+
+Outlets are openings in walls (e.g., vents). The outlet_mask is built from the 3D occupancy grid
+(cells with value 2) and filled with `binary_fill_holes` to cover internal wall cells.
+During ray tracing, when a LiDAR ray passes through a cell in the outlet_mask, that cell is
+marked as `CELL_OUTLET (2)` instead of free space.
+
+---
+
+### 3. Wind Map: wind_map.py
+
+**Class**: `WindMap`
+
+Spatial record of wind measurements aligned with the occupancy grid. Stores running averages
+of wind vectors (vx, vy) per grid cell as the robot explores, enabling later extrapolation.
+
+#### Usage
+
+```python
+wind_map = WindMap(width, height, resolution, origin_x, origin_y)
+
+# Record measurement at robot position
+wind_map.add_measurement(world_x, world_y, wind_speed, wind_direction, timestamp)
+
+# Query
+vx, vy = wind_map.get_wind_at(world_x, world_y)  # Returns None if unmeasured
+speed_map = wind_map.get_speed_map()    # 2D array (NaN where unmeasured)
+dir_map = wind_map.get_direction_map()  # 2D array (NaN where unmeasured)
+measured = wind_map.get_measured_cells() # Boolean mask
+
+# Raw history: list of (x, y, vx, vy, timestamp)
+wind_map.history
 ```
 
 ---
@@ -978,6 +1015,7 @@ marker_viz.visualize_planner_mode(mode)  # "LOCAL" or "GLOBAL"
 - **Yellow lines**: Global path
 - **Orange markers**: Frontier cells
 - **Purple lines**: PRM graph edges
+- **Cyan arrows**: Wind vectors (length ∝ speed, published on `/rrt_infotaxis/wind_vectors`)
 
 ---
 
