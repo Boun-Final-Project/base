@@ -1,7 +1,8 @@
 from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, Quaternion
 from std_msgs.msg import ColorRGBA
 import numpy as np
+import math
 
 class MarkerVisualizer:
     """
@@ -30,6 +31,9 @@ class MarkerVisualizer:
         self.prm_graph_pub = node.create_publisher(MarkerArray, '/rrt_infotaxis/prm_graph', 10)
         self.global_path_pub = node.create_publisher(Marker, '/rrt_infotaxis/global_path', 10)
         self.planner_mode_pub = node.create_publisher(Marker, '/rrt_infotaxis/planner_mode', 10)
+
+        # Wind visualization
+        self.wind_vectors_pub = node.create_publisher(MarkerArray, '/rrt_infotaxis/wind_vectors', 10)
 
     def visualize_particles(self, particles, weights):
         marker_array = MarkerArray()
@@ -253,3 +257,124 @@ class MarkerVisualizer:
                 ma.markers.append(dm)
         self.prm_graph_pub.publish(ma)
         self.frontier_centroids_pub.publish(ma)
+
+    def visualize_wind_map(self, wind_map):
+        """
+        Visualize wind map as arrow markers in RViz.
+        - Estimated (potential flow) wind: orange arrows on free cells (subsampled)
+        - Measured (anemometer) wind: cyan arrows (all measured cells)
+        """
+        marker_array = MarkerArray()
+        now = self.node.get_clock().now().to_msg()
+
+        # Delete previous arrows from both namespaces
+        for ns in ("wind_arrows", "wind_estimated"):
+            delete_marker = Marker()
+            delete_marker.action = Marker.DELETEALL
+            delete_marker.header.frame_id = "map"
+            delete_marker.ns = ns
+            marker_array.markers.append(delete_marker)
+
+        arrow_scale = wind_map.resolution * 2.0
+        marker_id = 1
+
+        # --- Estimated (GMRF / potential flow) wind field ---
+        if wind_map.pf_solved:
+            # Subsample: ~0.3m spacing between arrows
+            step = max(1, int(0.3 / wind_map.resolution))
+
+            # Compute max speed for normalization
+            est_speed_map = np.sqrt(wind_map.estimated_vx**2 + wind_map.estimated_vy**2)
+            max_est_speed = np.max(est_speed_map)
+            if max_est_speed < 1e-6:
+                max_est_speed = 1.0
+
+            for gy in range(0, wind_map.height, step):
+                for gx in range(0, wind_map.width, step):
+                    vx = wind_map.estimated_vx[gy, gx]
+                    vy = wind_map.estimated_vy[gy, gx]
+                    speed = math.sqrt(vx**2 + vy**2)
+                    if speed < 1e-6:
+                        continue
+
+                    wx, wy = wind_map.grid_to_world(gx, gy)
+                    yaw = math.atan2(vy, vx)
+
+                    marker = Marker()
+                    marker.header.frame_id = "map"
+                    marker.header.stamp = now
+                    marker.ns = "wind_estimated"
+                    marker.id = marker_id
+                    marker_id += 1
+                    marker.type = Marker.ARROW
+                    marker.action = Marker.ADD
+
+                    marker.pose.position.x = wx
+                    marker.pose.position.y = wy
+                    marker.pose.position.z = 0.1
+
+                    marker.pose.orientation.z = math.sin(yaw / 2.0)
+                    marker.pose.orientation.w = math.cos(yaw / 2.0)
+
+                    length = arrow_scale * (speed / max_est_speed)
+                    marker.scale.x = max(length, 0.05)
+                    marker.scale.y = 0.04
+                    marker.scale.z = 0.06
+
+                    # Orange color, brighter with stronger wind
+                    intensity = 0.3 + 0.7 * (speed / max_est_speed)
+                    marker.color = ColorRGBA(
+                        r=1.0, g=float(0.6 * intensity), b=0.0, a=0.6
+                    )
+                    marker.lifetime.sec = 6
+
+                    marker_array.markers.append(marker)
+
+        # --- Measured (anemometer) wind ---
+        measured = wind_map.get_measured_cells()
+        if np.any(measured):
+            ys, xs = np.where(measured)
+            max_speed = np.nanmax(wind_map.get_speed_map())
+            if max_speed < 1e-6:
+                max_speed = 1.0
+
+            for gy, gx in zip(ys, xs):
+                vx = wind_map.wind_vx[gy, gx]
+                vy = wind_map.wind_vy[gy, gx]
+                speed = math.sqrt(vx**2 + vy**2)
+                if speed < 1e-6:
+                    continue
+
+                wx, wy = wind_map.grid_to_world(int(gx), int(gy))
+                yaw = math.atan2(vy, vx)
+
+                marker = Marker()
+                marker.header.frame_id = "map"
+                marker.header.stamp = now
+                marker.ns = "wind_arrows"
+                marker.id = marker_id
+                marker_id += 1
+                marker.type = Marker.ARROW
+                marker.action = Marker.ADD
+
+                marker.pose.position.x = wx
+                marker.pose.position.y = wy
+                marker.pose.position.z = 0.15
+
+                marker.pose.orientation.z = math.sin(yaw / 2.0)
+                marker.pose.orientation.w = math.cos(yaw / 2.0)
+
+                length = arrow_scale * (speed / max_speed)
+                marker.scale.x = max(length, 0.05)
+                marker.scale.y = 0.04
+                marker.scale.z = 0.06
+
+                intensity = 0.3 + 0.7 * (speed / max_speed)
+                marker.color = ColorRGBA(
+                    r=0.0, g=float(intensity), b=float(intensity), a=0.8
+                )
+                marker.lifetime.sec = 6
+
+                marker_array.markers.append(marker)
+
+        self.wind_vectors_pub.publish(marker_array)

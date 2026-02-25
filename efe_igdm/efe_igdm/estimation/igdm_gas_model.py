@@ -12,6 +12,7 @@ STRICT MODE: Numba acceleration is REQUIRED.
 
 import numpy as np
 from typing import Tuple, Optional
+from collections import OrderedDict
 import heapq
 from numba import jit
 
@@ -20,66 +21,72 @@ from numba import jit
 # ============================================================================
 
 @jit(nopython=True, cache=True)
-def _dijkstra_numba_core(grid_data, start_gx, start_gy, width, height, resolution):
+def _dijkstra_numba_core(grid_data, start_gx, start_gy, width, height, resolution,
+                         wind_u, wind_v, wind_alpha):
     """
-    Numba-compiled core Dijkstra algorithm using standard heapq.
-    
-    Parameters:
-    -----------
-    grid_data : np.ndarray
-        Occupancy grid (0=free, >0=occupied)
-    start_gx, start_gy : int
-        Start coordinates
-    width, height : int
-        Grid dimensions
-    resolution : float
-        Grid resolution
-        
-    Returns:
-    --------
-    distances : np.ndarray
-        Distance map (float64)
+    Numba-compiled Dijkstra with wind-biased edge costs.
+
+    Wind bias makes upwind steps cheaper: gas travels downwind from source
+    to sensor, so cells upwind of the sensor should get shorter effective
+    distances (→ higher predicted concentration).
+
+    cost(i→j) = base_cost × (1 + α · dot(wind_dir_i, step_dir_ij))
+    where dot < 0 when stepping INTO the wind → cheaper.
     """
-    # Initialize distances to infinity
     distances = np.full((height, width), np.inf, dtype=np.float64)
     distances[start_gy, start_gx] = 0.0
-    
-    # Priority queue: list of tuples (distance, gx, gy)
+
     pq = [(0.0, start_gx, start_gy)]
-    
-    # Pre-compute edge costs
+
     straight_cost = resolution
     diag_cost = resolution * 1.41421356  # sqrt(2)
-    
-    # 8-connected neighbors: (dx, dy, cost)
+    inv_sqrt2 = 0.70710678
+
+    # 8-connected neighbors: (dx, dy, base_cost)
     neighbors = [
-        (-1, 0, straight_cost), (1, 0, straight_cost), 
+        (-1, 0, straight_cost), (1, 0, straight_cost),
         (0, -1, straight_cost), (0, 1, straight_cost),
-        (-1, -1, diag_cost), (-1, 1, diag_cost), 
+        (-1, -1, diag_cost), (-1, 1, diag_cost),
         (1, -1, diag_cost), (1, 1, diag_cost)
     ]
-    
+
     while len(pq) > 0:
         d, cx, cy = heapq.heappop(pq)
-        
-        # Optimization: If we found a shorter path already, skip
+
         if d > distances[cy, cx]:
             continue
-            
-        for dx, dy, cost in neighbors:
+
+        # Wind at current cell
+        wu = wind_u[cy, cx]
+        wv = wind_v[cy, cx]
+        wspd = (wu * wu + wv * wv) ** 0.5
+
+        for dx, dy, base_cost in neighbors:
             nx, ny = cx + dx, cy + dy
-            
-            # Bounds check
+
             if 0 <= nx < width and 0 <= ny < height:
-                # Collision check (0 is free)
                 if grid_data[ny, nx] == 0:
+                    # Wind-biased cost
+                    if wspd > 1e-6 and wind_alpha > 0.0:
+                        # Normalized step direction
+                        if abs(dx) + abs(dy) == 2:  # diagonal
+                            ndx = dx * inv_sqrt2
+                            ndy = dy * inv_sqrt2
+                        else:
+                            ndx = float(dx)
+                            ndy = float(dy)
+                        dot = (wu / wspd) * ndx + (wv / wspd) * ndy
+                        cost = base_cost * (1.0 + wind_alpha * dot)
+                        if cost < base_cost * 0.1:
+                            cost = base_cost * 0.1
+                    else:
+                        cost = base_cost
+
                     new_dist = d + cost
-                    
-                    # Relaxation
                     if new_dist < distances[ny, nx]:
                         distances[ny, nx] = new_dist
                         heapq.heappush(pq, (new_dist, nx, ny))
-                        
+
     return distances
 
 
@@ -92,24 +99,35 @@ class IndoorGaussianDispersionModel:
     R(rk|θ) = Qm · exp(-cobs(rk, r0)² / (2·σm²))
     """
 
-    def __init__(self, sigma_m: float = 1.0, occupancy_grid=None):
+    def __init__(self, sigma_m: float = 1.0, occupancy_grid=None, wind_alpha: float = 0.0):
         self.sigma_m = sigma_m
         self.occupancy_grid = occupancy_grid
+        self.wind_alpha = wind_alpha
 
-        # Cache for Dijkstra distance maps
-        self._distance_cache = {}
+        # Wind field for biased Dijkstra
+        self._wind_u = None  # (height, width) float64
+        self._wind_v = None  # (height, width) float64
+
+        # LRU cache for Dijkstra distance maps
+        self._distance_cache = OrderedDict()
         self._cache_max_size = 20  # Keep small to save RAM
         self._cache_hits = 0
         self._cache_misses = 0
-        
+
         # Performance tracking
         self._dijkstra_call_count = 0
         self._dijkstra_total_time = 0.0
 
-        print("IGDM: Numba-accelerated mode active.")
+        print(f"IGDM: Numba-accelerated mode active (wind_alpha={wind_alpha}).")
 
     def set_occupancy_grid(self, occupancy_grid):
         self.occupancy_grid = occupancy_grid
+        self._distance_cache.clear()
+
+    def set_wind_field(self, wind_u: np.ndarray, wind_v: np.ndarray):
+        """Update the estimated wind field and invalidate cached distances."""
+        self._wind_u = wind_u.astype(np.float64)
+        self._wind_v = wind_v.astype(np.float64)
         self._distance_cache.clear()
 
     def compute_concentration(self, position: Tuple[float, float],
@@ -149,13 +167,14 @@ class IndoorGaussianDispersionModel:
         cache_key = (gx, gy)
         if cache_key in self._distance_cache:
             self._cache_hits += 1
+            self._distance_cache.move_to_end(cache_key)  # Mark as recently used
             return self._distance_cache[cache_key]
 
         self._cache_misses += 1
         distance_map = self._dijkstra_all_distances((gx, gy))
 
         if len(self._distance_cache) >= self._cache_max_size:
-            self._distance_cache.pop(next(iter(self._distance_cache)))
+            self._distance_cache.popitem(last=False)  # Evict least recently used
 
         self._distance_cache[cache_key] = distance_map
         return distance_map
@@ -193,11 +212,19 @@ class IndoorGaussianDispersionModel:
         grid_data = self.occupancy_grid.grid
         start_gx, start_gy = start_grid
 
+        # Wind field (zeros if not set)
+        if self._wind_u is not None and self._wind_u.shape == (height, width):
+            wind_u = self._wind_u
+            wind_v = self._wind_v
+        else:
+            wind_u = np.zeros((height, width), dtype=np.float64)
+            wind_v = np.zeros((height, width), dtype=np.float64)
+
         start_time = time.perf_counter()
 
-        # Direct call to JIT-compiled function
         result = _dijkstra_numba_core(
-            grid_data, start_gx, start_gy, width, height, resolution
+            grid_data, start_gx, start_gy, width, height, resolution,
+            wind_u, wind_v, self.wind_alpha
         )
 
         elapsed = time.perf_counter() - start_time

@@ -28,17 +28,19 @@ class RRT:
         self.positive_weight = positive_weight
         self.robot_radius = robot_radius
         self.max_iterations = max_iterations if max_iterations is not None else (N_tn * 100)
+        self._node_positions = np.empty((N_tn, 2), dtype=np.float64)
+        self._node_count = 0
 
     def sprawl(self, start_pos: Tuple[float, float]) -> None:
         """Generates the RRT tree."""
         self.nodes = [Node(start_pos)]
+        # Pre-allocate position array for vectorized nearest-neighbor lookup
+        self._node_positions = np.empty((self.N_tn, 2), dtype=np.float64)
+        self._node_positions[0] = start_pos
+        self._node_count = 1
         iteration = 0
-        
-        # Pre-calculate constants
-        grid_width = self.occupancy_grid.width
-        grid_height = self.occupancy_grid.height
 
-        while len(self.nodes) < self.N_tn and iteration < self.max_iterations:
+        while self._node_count < self.N_tn and iteration < self.max_iterations:
             iteration += 1
 
             # Sample random point within R_range
@@ -46,14 +48,14 @@ class RRT:
             theta = 2 * np.pi * np.random.random()
             x_rand = start_pos[0] + r * np.cos(theta)
             y_rand = start_pos[1] + r * np.sin(theta)
-            
+
             # Find closest existing node
             closest_node = self.get_closest_node((x_rand, y_rand))
-            
+
             # Steer towards random point
             diff = np.array([x_rand, y_rand]) - closest_node.position
             dist = np.linalg.norm(diff)
-            
+
             if dist > self.delta:
                 direction = diff / dist
                 new_pos = closest_node.position + direction * self.delta
@@ -64,20 +66,20 @@ class RRT:
             if self.is_collision_free_vectorized(closest_node.position, new_pos):
                 new_node = Node(new_pos, closest_node)
                 self.nodes.append(new_node)
+                self._node_positions[self._node_count] = new_pos
+                self._node_count += 1
 
     def get_closest_node(self, position: Tuple[float, float]) -> Node:
         """
-        Find closest node using vectorized numpy operations.
-        Much faster than looping for < 1000 nodes.
+        Find closest node using pre-allocated position array.
+        Avoids rebuilding the array from node list on every call.
         """
         target = np.array(position)
-        # Gather all positions into a (N, 2) array
-        # Note: This list comprehension is fast enough for N < 1000. 
-        # For N > 1000, we should maintain a separate self.node_positions array.
-        all_positions = np.array([n.position for n in self.nodes])
-        
+        # Use the pre-allocated slice up to current count
+        active = self._node_positions[:self._node_count]
+
         # Compute squared distances (avoids sqrt for comparison)
-        dists_sq = np.sum((all_positions - target)**2, axis=1)
+        dists_sq = np.sum((active - target)**2, axis=1)
         closest_index = np.argmin(dists_sq)
         return self.nodes[closest_index]
 

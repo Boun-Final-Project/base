@@ -77,6 +77,7 @@ class GlobalPlanner:
                  frontier_min_size: int = 3,
                  lambda_p: float = 0.1,
                  lambda_s: float = 0.05,
+                 max_frontiers_to_evaluate: int = 8,
                  debug: bool = True):
 
         self.occupancy_grid = occupancy_grid
@@ -86,6 +87,7 @@ class GlobalPlanner:
         self.frontier_min_size = frontier_min_size
         self.lambda_p = lambda_p
         self.lambda_s = lambda_s
+        self.max_frontiers_to_evaluate = max_frontiers_to_evaluate
         self.debug = debug
 
         self.frontier_cells = []
@@ -105,34 +107,41 @@ class GlobalPlanner:
         self.ranked_frontiers = []
         self.current_frontier_index = 0
 
+        # Pre-compute disk footprint offsets for vectorized validity checks
+        self._radius_cells = int(np.ceil(self.robot_radius / self.occupancy_grid.resolution))
+        r = self._radius_cells
+        dy_range, dx_range = np.mgrid[-r:r+1, -r:r+1]
+        mask = (dx_range**2 + dy_range**2) <= r**2
+        self._disk_dx = dx_range[mask]
+        self._disk_dy = dy_range[mask]
+
     def _is_valid_optimistic(self, position: Tuple[float, float]) -> bool:
         """
-        Check if position is valid using OPTIMISTIC planning.
+        Check if position is valid using OPTIMISTIC planning (vectorized).
         Treats Unknown (-1) as Free (0). Only Occupied (>0) is invalid.
+        Uses pre-computed disk offsets for batch NumPy checks.
         """
         gx, gy = self.occupancy_grid.world_to_grid(*position)
-        
+
         if gx < 0 or gx >= self.occupancy_grid.width or gy < 0 or gy >= self.occupancy_grid.height:
             return False
 
-        # Check radius
-        radius_cells = int(np.ceil(self.robot_radius / self.occupancy_grid.resolution))
-        radius_sq = radius_cells ** 2
+        check_gxs = gx + self._disk_dx
+        check_gys = gy + self._disk_dy
 
-        for dx in range(-radius_cells, radius_cells + 1):
-            for dy in range(-radius_cells, radius_cells + 1):
-                if dx*dx + dy*dy > radius_sq:
-                    continue
-                
-                check_gx = gx + dx
-                check_gy = gy + dy
+        in_bounds = (
+            (check_gxs >= 0) & (check_gxs < self.occupancy_grid.width) &
+            (check_gys >= 0) & (check_gys < self.occupancy_grid.height)
+        )
 
-                if 0 <= check_gx < self.occupancy_grid.width and 0 <= check_gy < self.occupancy_grid.height:
-                    cell_val = self.occupancy_grid.grid[check_gy, check_gx]
-                    # Fail only if strictly occupied (> 0). Allow 0 and -1.
-                    if cell_val > 0: 
-                        return False
-        return True
+        valid_gxs = check_gxs[in_bounds]
+        valid_gys = check_gys[in_bounds]
+
+        if len(valid_gxs) == 0:
+            return False
+
+        cell_vals = self.occupancy_grid.grid[valid_gys, valid_gxs]
+        return not np.any(cell_vals > 0)
 
     def detect_frontiers(self) -> List[Tuple[int, int]]:
         """
@@ -140,22 +149,22 @@ class GlobalPlanner:
         A frontier is a FREE cell (0) that is adjacent to an UNKNOWN cell (-1).
         """
         grid = self.occupancy_grid.grid
-        
+
         # 1. Create Boolean Masks
         is_free = (grid == 0)
         is_unknown = (grid == -1)
-        
+
         # 2. Dilate the Unknown regions (8-connectivity)
         structure = np.ones((3, 3), dtype=bool)
         unknown_dilated = binary_dilation(is_unknown, structure=structure)
-        
+
         # 3. Intersection: Frontier = Is Free AND Is touching Unknown
         frontier_mask = is_free & unknown_dilated
-        
+
         # 4. Extract coordinates
         y_idxs, x_idxs = np.where(frontier_mask)
         self.frontier_cells = list(zip(x_idxs, y_idxs))
-        
+
         return self.frontier_cells
 
     def cluster_frontiers(self) -> List[FrontierCluster]:
@@ -174,8 +183,8 @@ class GlobalPlanner:
             xs, ys = zip(*self.frontier_cells)
             frontier_mask[ys, xs] = True
             
-        # 2. Label connected components (8-connectivity)
-        structure = np.ones((3, 3), dtype=int)
+        # 2. Label connected components (4-connectivity to split at diagonal gaps)
+        structure = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=int)
         labeled_array, num_features = label(frontier_mask, structure=structure)
         
         clusters = []
@@ -204,9 +213,54 @@ class GlobalPlanner:
                     cluster.centroid_grid[0], cluster.centroid_grid[1]
                 )
                 clusters.append(cluster)
-                
-        self.frontier_clusters = clusters
-        return clusters
+
+        # Split large clusters that span too much area
+        max_cluster_span = 10  # grid cells; clusters wider than this get split
+        final_clusters = []
+        for cluster in clusters:
+            if cluster.size > max_cluster_span:
+                final_clusters.extend(self._split_large_cluster(cluster, max_cluster_span))
+            else:
+                final_clusters.append(cluster)
+
+        self.frontier_clusters = final_clusters
+        return final_clusters
+
+    def _split_large_cluster(self, cluster: FrontierCluster,
+                              max_span: int) -> List[FrontierCluster]:
+        """Split a large frontier cluster into sub-clusters using k-means on grid coords."""
+        cells = np.array(cluster.cells, dtype=float)  # (N, 2) in grid coords
+        span = np.max(np.ptp(cells, axis=0))  # max extent in either dimension
+        k = max(2, int(np.ceil(span / max_span)))
+
+        # Simple k-means (few iterations suffice for spatial splitting)
+        rng = np.random.default_rng(42)
+        indices = rng.choice(len(cells), size=min(k, len(cells)), replace=False)
+        centroids = cells[indices].copy()
+
+        for _ in range(10):
+            dists = np.linalg.norm(cells[:, None, :] - centroids[None, :, :], axis=2)
+            labels = np.argmin(dists, axis=1)
+            new_centroids = np.array([
+                cells[labels == j].mean(axis=0) if np.any(labels == j) else centroids[j]
+                for j in range(k)
+            ])
+            if np.allclose(centroids, new_centroids, atol=0.5):
+                break
+            centroids = new_centroids
+
+        sub_clusters = []
+        for j in range(k):
+            mask = labels == j
+            if np.sum(mask) >= self.frontier_min_size:
+                sub_cells = [tuple(c) for c in cells[mask].astype(int)]
+                sc = FrontierCluster(sub_cells)
+                sc.centroid_world = self.occupancy_grid.grid_to_world(
+                    sc.centroid_grid[0], sc.centroid_grid[1]
+                )
+                sub_clusters.append(sc)
+
+        return sub_clusters if sub_clusters else [cluster]
 
     def build_prm_graph(self, current_position: Tuple[float, float]) -> None:
         """
@@ -293,29 +347,48 @@ class GlobalPlanner:
                 self.adj_list[j].append((i, dist))
 
     def _is_path_collision_free(self, pos1: Tuple[float, float], pos2: Tuple[float, float], allow_start_invalid: bool = False) -> bool:
-        """Check collision using optimistic check along the segment."""
+        """Check collision using vectorized grid sampling along the segment."""
         pos1 = np.array(pos1)
         pos2 = np.array(pos2)
         dist = np.linalg.norm(pos2 - pos1)
-        
+
         if dist < 1e-6:
             if allow_start_invalid: return True
             return self._is_valid_optimistic(tuple(pos1))
 
-        # Relaxed sampling: Check every resolution unit
-        num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution)))
-        num_samples = max(num_samples, 2)
+        # Sample points along the line at resolution spacing
+        num_samples = max(int(np.ceil(dist / self.occupancy_grid.resolution)), 2)
 
-        for i in range(num_samples + 1):
-            t = i / num_samples
-            
-            # If start is allowed invalid, skip the very first point (i=0)
-            if i == 0 and allow_start_invalid:
-                continue
+        ts = np.linspace(0, 1, num_samples + 1)
+        if allow_start_invalid:
+            ts = ts[1:]  # Skip starting point
 
-            sample_pos = pos1 + t * (pos2 - pos1)
-            if not self._is_valid_optimistic((sample_pos[0], sample_pos[1])):
-                return False
+        # Generate all sample points at once: (M, 2)
+        line_points = pos1 + np.outer(ts, (pos2 - pos1))
+
+        # Convert to grid coordinates (vectorized)
+        og = self.occupancy_grid
+        center_gxs = ((line_points[:, 0] - og.origin_x) / og.resolution).astype(int)
+        center_gys = ((line_points[:, 1] - og.origin_y) / og.resolution).astype(int)
+
+        # Bounds check on centers
+        if np.any((center_gxs < 0) | (center_gxs >= og.width) |
+                  (center_gys < 0) | (center_gys >= og.height)):
+            return False
+
+        # Expand each center by disk footprint offsets: (M, K) where K = num disk cells
+        all_gxs = center_gxs[:, None] + self._disk_dx[None, :]  # (M, K)
+        all_gys = center_gys[:, None] + self._disk_dy[None, :]  # (M, K)
+
+        # Clip to grid bounds
+        all_gxs_clip = np.clip(all_gxs, 0, og.width - 1)
+        all_gys_clip = np.clip(all_gys, 0, og.height - 1)
+
+        # Batch occupancy lookup
+        cell_vals = og.grid[all_gys_clip.ravel(), all_gxs_clip.ravel()]
+        if np.any(cell_vals > 0):
+            return False
+
         return True
 
     def compute_all_paths_from_start(self, start_id: int = 0) -> Tuple[Dict[int, float], Dict[int, int]]:
@@ -365,17 +438,13 @@ class GlobalPlanner:
         return path[::-1] # Reverse to get Start -> Goal
 
     def _compute_mutual_information(self, position: Tuple[float, float], pf: ParticleFilter) -> float:
-        """Compute MI using particle filter."""
+        """
+        Compute mutual information using single-pass vectorized method.
+        Uses ParticleFilter.compute_expected_entropy() which computes concentrations
+        ONCE and vectorizes all bin/posterior calculations in NumPy.
+        """
         current_entropy = pf.get_entropy()
-        num_measurements = pf.sensor_model.num_levels if hasattr(pf.sensor_model, 'num_levels') else 2
-        
-        expected_entropy = 0.0
-        for m in range(num_measurements):
-            prob = pf.predict_measurement_probability(position, m)
-            if prob > 1e-4: # Skip negligible probabilities
-                hyp_entropy = pf.compute_hypothetical_entropy(m, position)
-                expected_entropy += prob * hyp_entropy
-            
+        expected_entropy = pf.compute_expected_entropy(position)
         return current_entropy - expected_entropy
 
     def evaluate_frontier_vertices(self, current_pos: Tuple[float, float], pf: ParticleFilter) -> Dict:
@@ -389,27 +458,35 @@ class GlobalPlanner:
         estimate, _ = pf.get_estimate()
         source_estimate = np.array([estimate['x'], estimate['y']])
         frontier_vertices = [v for v in self.vertices if v.is_frontier_vertex]
-        
-        candidates = []
 
-        if self.debug:
-            print(f"DEBUG: Evaluating {len(frontier_vertices)} frontiers...")
-
+        # Pre-filter: score by cheap heuristic, only compute MI for top-K
+        scored_frontiers = []
         for f_vertex in frontier_vertices:
-            # 2. Check Reachability using pre-computed Dijkstra map
             path_cost = dists[f_vertex.id]
             if path_cost == float('inf'):
-                continue # Unreachable
-
-            # 3. Compute Metrics
-            mi = self._compute_mutual_information(f_vertex.position, pf)
-            
-            # Filter low info
-            if mi <= 1e-6: continue
-
+                continue
             src_dist = np.linalg.norm(np.array(f_vertex.position) - source_estimate)
+            cheap_score = np.exp(-self.lambda_p * path_cost) * np.exp(-self.lambda_s * src_dist)
+            cluster_size = f_vertex.frontier_cluster.size if f_vertex.frontier_cluster else 1
+            cheap_score *= min(cluster_size / 10.0, 1.0)
+            scored_frontiers.append((cheap_score, path_cost, src_dist, f_vertex))
 
-            # 4. Compute Utility (Eq 22)
+        scored_frontiers.sort(key=lambda x: x[0], reverse=True)
+        frontiers_to_evaluate = scored_frontiers[:self.max_frontiers_to_evaluate]
+
+        if self.debug:
+            print(f"DEBUG: Pre-filtered {len(frontier_vertices)} -> {len(frontiers_to_evaluate)} frontiers for MI evaluation")
+
+        candidates = []
+
+        for cheap_score, path_cost, src_dist, f_vertex in frontiers_to_evaluate:
+            # Compute MI (single-pass vectorized method)
+            mi = self._compute_mutual_information(f_vertex.position, pf)
+
+            if mi <= 1e-6:
+                continue
+
+            # Compute Utility (Eq 22)
             utility = mi * np.exp(-self.lambda_p * path_cost) * np.exp(-self.lambda_s * src_dist)
 
             # Defer path reconstruction until selection to save time
@@ -506,6 +583,9 @@ class GlobalPlanner:
         clusters = self.cluster_frontiers()
         if not clusters:
             return {'success': False, 'error': 'No valid clusters'}
+
+        if self.debug:
+            print(f"DEBUG: {len(frontier_cells)} frontier cells -> {len(clusters)} clusters")
 
         # 3. Build Graph (PRM)
         self.build_prm_graph(current_position)

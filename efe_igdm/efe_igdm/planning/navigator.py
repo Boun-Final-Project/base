@@ -1,5 +1,5 @@
 from nav2_msgs.action import NavigateToPose
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from rclpy.action import ActionClient
 import numpy as np
 from math import sin, cos
@@ -24,9 +24,14 @@ class Navigator:
         self.goal_handle = None
         self.goal_position = None
         self.consecutive_failures = 0
+        self.max_failures_tolerance = 3  # Max consecutive failures before recovery
         self.in_recovery = False
         self.initial_spin_done = False
         self.initial_spin_goal_handle = None
+        self._spin_timer = None
+        self._spin_start_theta = None
+        self._spin_accumulated = 0.0
+        self._spin_last_theta = None
 
         # Interfaces
         self.nav_to_pose_client = ActionClient(node, NavigateToPose, '/PioneerP3DX/navigate_to_pose')
@@ -91,10 +96,54 @@ class Navigator:
             return False
 
     def perform_initial_spin(self, current_pos, current_theta):
+        """Perform a 360° spin using cmd_vel to populate SLAM map from lidar."""
+        if self._spin_timer is not None:
+            return  # Already spinning
         if not self.is_moving:
-            self.node.get_logger().info('[STARTUP] Starting initial 360° sensor sweep...')
-            target_yaw = current_theta + 3.14
-            self.send_goal(current_pos[0], current_pos[1], yaw=target_yaw, is_spin=True)
+            self.node.get_logger().info('[STARTUP] Starting initial 360° sensor sweep via cmd_vel...')
+            self.is_moving = True
+            self._spin_start_theta = current_theta
+            self._spin_last_theta = current_theta
+            self._spin_accumulated = 0.0
+            # Publish rotation command at ~10 Hz
+            self._spin_timer = self.node.create_timer(0.1, self._spin_timer_callback)
+
+    def _spin_timer_callback(self):
+        """Timer callback to drive the spin and check completion."""
+        # Get current theta from main node
+        current_theta = self.node.current_theta
+        if current_theta is None:
+            return
+
+        # Track accumulated rotation
+        dtheta = current_theta - self._spin_last_theta
+        # Normalize to [-pi, pi]
+        while dtheta > np.pi:
+            dtheta -= 2 * np.pi
+        while dtheta < -np.pi:
+            dtheta += 2 * np.pi
+        self._spin_accumulated += abs(dtheta)
+        self._spin_last_theta = current_theta
+
+        if self._spin_accumulated >= 2 * np.pi:
+            # Spin complete - stop rotation
+            stop_msg = Twist()
+            self.node.cmd_vel_pub.publish(stop_msg)
+            self._spin_timer.cancel()
+            self.node.destroy_timer(self._spin_timer)
+            self._spin_timer = None
+            self.is_moving = False
+            self.initial_spin_done = True
+            self.node.get_logger().info(
+                f'Initial spin complete. {self.node.laser_scan_count} laser scans processed.'
+            )
+            if self.on_complete_callback:
+                self.on_complete_callback()
+        else:
+            # Keep rotating
+            twist = Twist()
+            twist.angular.z = 3.0  # rad/s — completes full spin in ~2s sim time
+            self.node.cmd_vel_pub.publish(twist)
 
     # --- Internal Logic / Callbacks ---
 

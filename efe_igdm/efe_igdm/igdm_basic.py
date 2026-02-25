@@ -3,14 +3,14 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 
 # Messages
-from olfaction_msgs.msg import GasSensor, Anemometer
+from olfaction_msgs.msg import GasSensor
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid
 from visualization_msgs.msg import MarkerArray
 
 # Custom Modules
-from .mapping.occupancy_grid import create_occupancy_map_from_service, create_empty_occupancy_map, load_3d_occupancy_grid_from_service, OccupancyGridMap
+from .mapping.occupancy_grid import load_3d_occupancy_grid_from_service, create_empty_occupancy_map, OccupancyGridMap
 from .estimation.sensor_model import ContinuousGaussianSensorModel
 from .estimation.particle_filter import ParticleFilter
 from .estimation.igdm_gas_model import IndoorGaussianDispersionModel
@@ -19,35 +19,33 @@ from .planning.global_planner import GlobalPlanner
 from .visualization.text_visualizer import TextVisualizer
 from .planning.dead_end_detector import DeadEndDetector
 
-# --- NEW MODULES ---
+# Helper modules
 from .visualization.marker_visualizer import MarkerVisualizer
 from .planning.navigator import Navigator
 from .mapping.lidar_mapper import LidarMapper
-from .mapping.wind_map import WindMap
 from .utils.experiment_logger import ExperimentLogger
 
 import numpy as np
 import time
 from typing import Tuple, List, Optional
 
-class RRTInfotaxisNode(Node):
+class RRTInfotaxisBasicNode(Node):
     """
-    RRT Infotaxis node (Refactored Coordinator) - ADVANCED MODE with Wind Mapping.
-    Delegates Visualization, Navigation, Mapping, and Logging to helper classes.
-    Includes GMRF-based wind field estimation and wind-aware dispersion modeling.
+    Basic RRT Infotaxis node without wind mapping.
+    Simplified version with minimal assumptions for gas source localization.
     """
 
     def __init__(self):
-        super().__init__('rrt_infotaxis_node')
-        
+        super().__init__('rrt_infotaxis_basic_node')
+
         self._init_parameters()
         self._init_state_variables()
         self._setup_data_logging()
         self._init_ros_interfaces()
         self._init_models_and_planners()
-        
+
         self.node_initialized = True
-        self.get_logger().info('Advanced Node initialized successfully (with wind mapping), waiting for data...')
+        self.get_logger().info('Basic Node initialized successfully (no wind), waiting for data...')
 
     def _init_parameters(self):
         """Declare and cache parameters."""
@@ -74,7 +72,6 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('resample_threshold', 0.5)
         self.declare_parameter('true_source_x', 2.0)
         self.declare_parameter('true_source_y', 4.5)
-        self.declare_parameter('wind_alpha', 0.5)
         self.declare_parameter('sensor_alpha', 0.1)
         self.declare_parameter('sensor_sigma_env', 1.5)
         self.declare_parameter('sensor_num_levels', 10)
@@ -97,8 +94,6 @@ class RRTInfotaxisNode(Node):
             'positive_weight': self.get_parameter('positive_weight').value,
             'use_fast_rrt': self.get_parameter('use_fast_rrt').value,
             'number_of_particles': self.get_parameter('number_of_particles').value,
-            'use_gmrf': True,  # Hardcoded enable for GMRF
-            'wind_alpha': self.get_parameter('wind_alpha').value,
             'sensor_alpha': self.get_parameter('sensor_alpha').value,
             'sensor_sigma_env': self.get_parameter('sensor_sigma_env').value,
             'sensor_num_levels': self.get_parameter('sensor_num_levels').value,
@@ -126,12 +121,6 @@ class RRTInfotaxisNode(Node):
         self.laser_scan_count = 0
         self.total_obstacles_marked = 0
 
-        # Wind sensor state
-        self.wind_speed: Optional[float] = None
-        self.wind_direction: Optional[float] = None
-        self.wind_x: float = 0.0  # Cartesian x-component
-        self.wind_y: float = 0.0  # Cartesian y-component
-
         # Performance tracking
         self.total_travel_distance = 0.0
         self.previous_position = None
@@ -149,16 +138,9 @@ class RRTInfotaxisNode(Node):
         self.pose_subscription = self.create_subscription(
             PoseWithCovarianceStamped, '/PioneerP3DX/ground_truth', self.pose_callback, 10)
         self.sensor_subscription = self.create_subscription(
-            GasSensor, '/fake_pid/Sensor_reading', self.sensor_callback, 10)
+            GasSensor, '/PioneerP3DX/PID/Sensor_reading', self.sensor_callback, 10)
         self.laser_subscription = self.create_subscription(
-            LaserScan, '/PioneerP3DX/laser_scanner', self.laser_callback, 10)
-        self.wind_subscription = self.create_subscription(
-            Anemometer, '/fake_anemometer/WindSensor_reading', self.wind_callback, 10)
-
-        # Ground Truth Wind Subscription
-        self.gt_wind_sub = self.create_subscription(
-            MarkerArray, '/wind_vectors', self.gt_wind_callback, 10)
-        self.gt_wind_data = None
+            LaserScan, '/PioneerP3DX/laser_scan', self.laser_callback, 10)
 
         # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
@@ -168,7 +150,6 @@ class RRTInfotaxisNode(Node):
         map_qos = QoSProfile(depth=10, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL, reliability=QoSReliabilityPolicy.RELIABLE)
         self.slam_map_pub = self.create_publisher(OccupancyGrid, '/rrt_infotaxis/slam_map', map_qos)
         self.slam_map_timer = self.create_timer(0.5, self._publish_slam_map_timer)
-        self.wind_map_timer = self.create_timer(5.0, self._publish_wind_map_timer)
 
     def _init_models_and_planners(self):
         """Load maps and initialize components."""
@@ -193,19 +174,13 @@ class RRTInfotaxisNode(Node):
         self.marker_viz = MarkerVisualizer(self, self.slam_map)
         self.navigator = Navigator(self, on_complete_callback=self._on_navigation_complete)
         self.lidar_mapper = LidarMapper(self.slam_map, outlet_mask=self.outlet_mask)
-        self.wind_map = WindMap(
-            width=self.slam_map.width,
-            height=self.slam_map.height,
-            resolution=self.slam_map.resolution,
-            origin_x=self.slam_map.origin_x,
-            origin_y=self.slam_map.origin_y
-        )
         self.text_visualizer = TextVisualizer(self.text_info_pub, frame_id="map")
 
-        # 2. Initialize Models
+        # 2. Initialize Models (NO WIND)
         self.dispersion_model = IndoorGaussianDispersionModel(
-            sigma_m=self.params['sigma_m'], occupancy_grid=self.slam_map,
-            wind_alpha=self.params['wind_alpha']
+            sigma_m=self.params['sigma_m'],
+            occupancy_grid=self.slam_map,
+            wind_alpha=0.0  # NO WIND EFFECT
         )
         self.sensor_model = ContinuousGaussianSensorModel(
             alpha=self.params['sensor_alpha'],
@@ -270,6 +245,11 @@ class RRTInfotaxisNode(Node):
             self.navigator.perform_initial_spin(self.current_position, self.current_theta)
             return
 
+        # 1b. Wait for SLAM map to populate from laser scans before planning
+        MIN_LASER_SCANS = 5
+        if self.laser_scan_count < MIN_LASER_SCANS:
+            return
+
         # 2. Block if moving (Delegated to Navigator)
         if self.navigator.is_moving:
             return
@@ -295,14 +275,14 @@ class RRTInfotaxisNode(Node):
         if self.planner_mode == 'GLOBAL':
             next_pos, should_return = self._run_global_planning(current_means)
             if should_return: return
-            
+
         elif self.planner_mode == 'LOCAL':
             next_pos, debug_info, dead_end_detected, bi_optimal = self._run_local_planning()
 
         # 6. Visualization & Logging (Delegated)
         self._update_visualizations(est_x, est_y, current_stds, debug_info, bi_optimal, dead_end_detected)
         self._log_step_data(current_means, current_stds, debug_info, bi_optimal, dead_end_detected)
-        
+
         # 7. Check Convergence
         if self._check_convergence(current_stds):
             return
@@ -322,7 +302,7 @@ class RRTInfotaxisNode(Node):
         self.get_logger().info('[MODE SWITCH] Settling complete. Switching to LOCAL.')
         self.settling_start_time = None
         self.particle_filter.update(self.sensor_raw_value, self.current_position)
-        
+
         self.planner_mode = 'LOCAL'
         self.global_path = []
         self.global_path_index = 0
@@ -333,7 +313,7 @@ class RRTInfotaxisNode(Node):
     def _run_global_planning(self, current_means) -> Tuple[Optional[Tuple[float, float]], bool]:
         """Returns: (Next Position, Should Return/Stop)"""
         self.get_logger().info('[GLOBAL MODE] Following frontier path...')
-        
+
         if not self.global_path or self.global_path_index >= len(self.global_path):
             self.get_logger().warn('[GLOBAL MODE] Path exhausted. Triggering STOP & SETTLE.')
             self.settling_start_time = self.get_clock().now()
@@ -348,14 +328,14 @@ class RRTInfotaxisNode(Node):
                 self.global_path_index += 1
             else:
                 break
-        
+
         if self.global_path_index >= len(self.global_path):
             self.settling_start_time = self.get_clock().now()
             self.planning_pending = True
             return None, True
 
         waypoint = self.global_path[self.global_path_index]
-        
+
         # Collision Check
         if not self.is_path_to_waypoint_valid(waypoint):
             self.get_logger().warn(f'[GLOBAL MODE] Path blocked to {waypoint}.')
@@ -366,7 +346,7 @@ class RRTInfotaxisNode(Node):
         # Entropy Check (Using Optimized Vectorized Call)
         current_entropy = self.particle_filter.get_entropy()
         expected_entropy = self.particle_filter.compute_expected_entropy(waypoint)
-        
+
         mutual_info = current_entropy - expected_entropy
         detector_status = self.dead_end_detector.get_status()
         thresh = self.params['switch_back_threshold'] * detector_status["bi_threshold"]
@@ -376,7 +356,7 @@ class RRTInfotaxisNode(Node):
             self.settling_start_time = self.get_clock().now()
             self.planning_pending = True
             return None, True
-            
+
         self.marker_viz.visualize_global_path(self.global_path)
         return waypoint, False
 
@@ -384,9 +364,9 @@ class RRTInfotaxisNode(Node):
         """Returns: (Next Position, Debug Info, Dead End Detected, Bi Optimal)"""
         debug_info = self.rrt.get_next_move_debug(self.current_position, self.particle_filter)
         next_pos = debug_info["next_position"]
-        
+
         move_dist = np.hypot(next_pos[0] - self.current_position[0], next_pos[1] - self.current_position[1])
-        
+
         if move_dist < 0.05:
             self.navigator.consecutive_failures += 1
             if self.navigator.consecutive_failures >= self.navigator.max_failures_tolerance:
@@ -395,7 +375,7 @@ class RRTInfotaxisNode(Node):
         else:
             if self.navigator.consecutive_failures > 0:
                 self.navigator.consecutive_failures -= 1
-        
+
         bi_optimal = debug_info.get("best_utility", debug_info.get("best_entropy_gain", 0.0))
         dead_end_detected = False
 
@@ -426,7 +406,7 @@ class RRTInfotaxisNode(Node):
             self.planner_mode = 'GLOBAL'
             self.global_path = result['best_global_path']
             self.global_path_index = 1
-            
+
             # Viz
             self.marker_viz.visualize_frontier_cells(result['frontier_cells'])
             self.marker_viz.visualize_frontier_centroids(result['frontier_clusters'])
@@ -449,7 +429,7 @@ class RRTInfotaxisNode(Node):
         self.get_logger().warn('Teleport failed. Trying Global Planner fallback.')
         self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
         self.planner_mode = 'GLOBAL'
-        
+
         res = self.global_planner.plan(self.current_position, self.particle_filter)
         if res['success']:
             self.global_path = res['best_global_path']
@@ -474,7 +454,7 @@ class RRTInfotaxisNode(Node):
         elapsed_time = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
         means, _ = self.particle_filter.get_estimate()
         est_x, est_y = means["x"], means["y"]
-        
+
         true_x, true_y = self.params['true_source_x'], self.params['true_source_y']
         est_error = -1.0
         if true_x != -999.0:
@@ -484,7 +464,7 @@ class RRTInfotaxisNode(Node):
 
         # Delegate summary writing to Logger
         summary_text = self.logger.save_summary(
-            self.step_count, self.total_travel_distance, elapsed_time, 
+            self.step_count, self.total_travel_distance, elapsed_time,
             avg_comp_time, est_x, est_y, est_error
         )
         self.get_logger().info('\n' + summary_text)
@@ -498,7 +478,7 @@ class RRTInfotaxisNode(Node):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         from math import atan2
-        
+
         q = msg.pose.pose.orientation
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
@@ -515,17 +495,17 @@ class RRTInfotaxisNode(Node):
         if self.planning_pending and not self.navigator.is_moving:
             self.planning_pending = False
             self.take_step()
-        
+
         # Initial trigger
-        if (self.node_initialized and not self.navigator.initial_spin_done 
-            and not self.navigator.is_moving and self.sensor_raw_value is not None 
+        if (self.node_initialized and not self.navigator.initial_spin_done
+            and not self.navigator.is_moving and self.sensor_raw_value is not None
             and not self.planning_pending):
             self.take_step()
 
     def sensor_callback(self, msg):
         self.sensor_raw_value = msg.raw
-        if (self.node_initialized and not self.navigator.initial_spin_done 
-            and not self.navigator.is_moving and self.current_position 
+        if (self.node_initialized and not self.navigator.initial_spin_done
+            and not self.navigator.is_moving and self.current_position
             and not self.planning_pending):
             self.take_step()
 
@@ -535,32 +515,13 @@ class RRTInfotaxisNode(Node):
             return
 
         obstacles_found = self.lidar_mapper.update_from_scan(
-            msg, 
-            self.current_position[0], 
-            self.current_position[1], 
+            msg,
+            self.current_position[0],
+            self.current_position[1],
             self.current_theta
         )
         self.laser_scan_count += 1
         self.total_obstacles_marked += obstacles_found
-
-    def wind_callback(self, msg: Anemometer):
-        """Process wind sensor data from anemometer."""
-        if not self.node_initialized:
-            return
-        self.wind_speed = msg.wind_speed
-        self.wind_direction = msg.wind_direction
-        # Convert polar to Cartesian
-        self.wind_x = msg.wind_speed * np.cos(msg.wind_direction)
-        self.wind_y = msg.wind_speed * np.sin(msg.wind_direction)
-
-        # Record measurement in wind map at current robot position
-        if self.current_position is not None:
-            timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            self.wind_map.add_measurement(
-                self.current_position[0], self.current_position[1],
-                msg.wind_speed, msg.wind_direction,
-                timestamp=timestamp
-            )
 
     # =========================================================================
     # HELPERS
@@ -575,7 +536,7 @@ class RRTInfotaxisNode(Node):
         """Lightweight optimistic check used by RRT/GlobalPlanner integration."""
         gx, gy = self.slam_map.world_to_grid(*position)
         if gx < 0 or gx >= self.slam_map.width or gy < 0 or gy >= self.slam_map.height: return False
-        
+
         radius_cells = int(np.ceil(self.params['robot_radius'] / self.slam_map.resolution))
         radius_sq = radius_cells ** 2
 
@@ -584,7 +545,7 @@ class RRTInfotaxisNode(Node):
                 if dx*dx + dy*dy > radius_sq: continue
                 check_gx, check_gy = gx + dx, gy + dy
                 if 0 <= check_gx < self.slam_map.width and 0 <= check_gy < self.slam_map.height:
-                    if self.slam_map.grid[check_gy, check_gx] > 0: 
+                    if self.slam_map.grid[check_gy, check_gx] > 0:
                         return False
         return True
 
@@ -593,7 +554,7 @@ class RRTInfotaxisNode(Node):
         pos1, pos2 = np.array(start), np.array(end)
         dist = np.linalg.norm(pos2 - pos1)
         if dist < 1e-6: return self._is_valid_optimistic(tuple(pos1))
-        
+
         num_samples = max(int(np.ceil(dist / (self.slam_map.resolution * 0.5))), 2)
         for i in range(num_samples + 1):
             t = i / num_samples
@@ -607,7 +568,7 @@ class RRTInfotaxisNode(Node):
         self.marker_viz.visualize_particles(self.particle_filter.particles, self.particle_filter.weights)
         self.marker_viz.visualize_estimated_source(est_x, est_y)
         self.marker_viz.visualize_current_position(self.current_position)
-        
+
         if self.planner_mode == 'LOCAL' and debug_info:
             self.marker_viz.visualize_all_paths(debug_info.get("all_paths", []), debug_info.get("all_utilities", None))
             self.marker_viz.visualize_best_path(debug_info.get("best_path", []))
@@ -615,7 +576,7 @@ class RRTInfotaxisNode(Node):
         # Text Viz
         sigma_p = max(current_stds["x"], current_stds["y"])
         current_entropy = self.particle_filter.get_entropy()
-        
+
         bin_width = self.sensor_model.max_concentration / self.sensor_model.num_levels
         current_bin = min(int(self.sensor_raw_value / bin_width), self.sensor_model.num_levels - 1)
 
@@ -624,7 +585,7 @@ class RRTInfotaxisNode(Node):
             predicted_x=est_x, predicted_y=est_y, predicted_z=0.5,
             std_dev=sigma_p, search_complete=self.search_complete,
             sensor_value=self.sensor_raw_value, binary_value=current_bin,
-            max_concentration=self.sensor_model.max_concentration, 
+            max_concentration=self.sensor_model.max_concentration,
             num_levels=self.sensor_model.num_levels, threshold=0.0,
             num_branches=debug_info.get("num_branches", 0) if debug_info else 0,
             best_utility=debug_info.get("best_utility", 0.0) if debug_info else 0.0,
@@ -632,7 +593,7 @@ class RRTInfotaxisNode(Node):
             best_travel_cost=debug_info.get("best_travel_cost", 0.0) if debug_info else 0.0,
             num_tree_nodes=debug_info.get("num_tree_nodes", 0) if debug_info else 0,
             entropy=current_entropy, bi_optimal=bi_optimal,
-            bi_threshold=self.dead_end_detector.get_status()["bi_threshold"], 
+            bi_threshold=self.dead_end_detector.get_status()["bi_threshold"],
             dead_end_detected=dead_end_detected
         )
         self.publish_slam_map()
@@ -672,47 +633,6 @@ class RRTInfotaxisNode(Node):
     def _publish_slam_map_timer(self):
         self.publish_slam_map()
 
-    def gt_wind_callback(self, msg: MarkerArray):
-        """Store ground truth wind vectors for validation."""
-        self.gt_wind_data = msg
-
-    def _publish_wind_map_timer(self):
-        if not hasattr(self, 'wind_map') or not hasattr(self, 'marker_viz'):
-            return
-
-        # Fill enclosed unknown regions (wall interiors) with occupied
-        filled = self.slam_map.fill_enclosed_unknown()
-        if filled > 0:
-            self.get_logger().info(f'Filled {filled} enclosed unknown cells as wall')
-
-        # Re-solve wind field
-        # GMRF does not strictly require outlets, just measurements + grid
-        if self.params.get('use_gmrf', False):
-             self.wind_map.solve_gmrf(self.slam_map.grid)
-        else:
-            # Re-solve potential flow using current SLAM grid
-            has_outlets = np.any(self.slam_map.grid == 2)
-            if has_outlets:
-                solved = self.wind_map.solve_potential_flow(self.slam_map.grid)
-                if solved and not getattr(self, '_pf_solve_logged', False):
-                    n = self.wind_map.pf_estimator.num_clusters
-                    self.get_logger().info(f'Potential flow solved with {n} outlet clusters')
-                    self._pf_solve_logged = True
-
-        # Update dispersion model with latest wind field
-        self.dispersion_model.set_wind_field(
-            self.wind_map.estimated_vx, self.wind_map.estimated_vy
-        )
-
-        self.marker_viz.visualize_wind_map(self.wind_map)
-
-        # Validation
-        if self.gt_wind_data and self.step_count % 10 == 0:
-            # Basic check: compare N vectors?
-            # For now, just log presence.
-            # Real validation code would go here.
-            self.get_logger().info(f'[VALIDATION] GT Vectors available: {len(self.gt_wind_data.markers)}')
-
     def __del__(self):
         if hasattr(self, 'logger'):
             self.logger.close()
@@ -720,7 +640,7 @@ class RRTInfotaxisNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     try:
-        node = RRTInfotaxisNode()
+        node = RRTInfotaxisBasicNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
