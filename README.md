@@ -42,7 +42,17 @@ base/
 │
 ├── ali_igdm/              # Experimental IGDM variant
 │
-└── wind_visualizer/       # Wind field visualization utility
+├── wind_visualizer/       # Wind field visualization utility
+│
+├── gaden_maps/            # Pre-configured GADEN scenario maps
+│   ├── env_a/             # Single-room environment
+│   ├── env_b/             # Multi-room environment
+│   ├── env_c/             # Environment C
+│   └── env_c_nowind/      # Environment C (no wind)
+│
+└── scripts/               # Helper scripts for running simulations
+    ├── presim.sh          # Preprocessing + gas simulation launcher
+    └── runsim.sh          # Robot & environment launcher
 ```
 
 ## Dependencies
@@ -91,9 +101,38 @@ colcon build
 source install/setup.bash
 ```
 
+### Install GADEN Scenario Maps
+
+This repository includes pre-configured scenario maps in the `gaden_maps/` folder. Copy them into your GADEN scenarios directory:
+
+```bash
+cp -r ~/ros2_ws/src/base/gaden_maps/* ~/ros2_ws/src/gaden/test_env/scenarios/
+```
+
+Then rebuild so GADEN picks up the new scenarios:
+
+```bash
+cd ~/ros2_ws && colcon build
+```
+
+### Helper Scripts (Optional)
+
+Two interactive launcher scripts are provided in `scripts/` to simplify running simulations. They auto-detect your workspace path.
+
+```bash
+# Add aliases to your shell (add these to ~/.bashrc for persistence)
+alias presim='~/ros2_ws/src/base/scripts/presim.sh'
+alias runsim='~/ros2_ws/src/base/scripts/runsim.sh'
+```
+
+- **`presim`** — Runs GADEN preprocessing and gas simulation. Presents an interactive menu to select a scenario and simulation, then executes both steps sequentially.
+- **`runsim`** — Launches the robot and environment player. Shows available gas data iterations and lets you pick a start time.
+
 ## Usage
 
 ### 1. Start GADEN Environment
+
+> **Tip:** If you set up the helper scripts (see [Helper Scripts](#helper-scripts-optional)), you can simply run `presim` then `runsim` instead of the manual steps below.
 
 Launch the GADEN simulation in three steps:
 

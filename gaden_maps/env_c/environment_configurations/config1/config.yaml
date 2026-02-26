@@ -1,0 +1,9 @@
+models:
+  - ../../cad_models/envcwind_walls.stl
+outlets_models:
+  - "!color [0.89, 0.27, 0.27, 1.00]"
+  - ../../cad_models/envcwind_doors.stl
+unprocessed_wind_files: ../../wind_simulations/wind
+empty_point: [1.0, 1.0, 0]
+cell_size: 0.1
+uniformWind: false
