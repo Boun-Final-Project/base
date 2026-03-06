@@ -204,30 +204,6 @@ python3 src/base/efe_igdm/scripts/plot_search_trajectory.py
 python3 src/base/efe_igdm/scripts/plot_entropy.py
 ```
 
-## Architecture (efe_igdm)
-
-The primary `efe_igdm` package uses a modular architecture:
-
-```
-                    ┌─────────────────┐
-                    │   igdm.py       │
-                    │  (Coordinator)  │
-                    └────────┬────────┘
-           ┌─────────┬──────┴──────┬───────────┐
-           v         v             v            v
-    ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌─────────────┐
-    │ Estimation │ │ Planning │ │ Mapping  │ │Visualization│
-    ├────────────┤ ├──────────┤ ├──────────┤ ├─────────────┤
-    │ Particle   │ │ RRT      │ │Occupancy │ │ RViz Markers│
-    │ Filter     │ │ Infotaxis│ │ Grid     │ │ Text Overlay│
-    │ IGDM Model │ │ PRM      │ │ LiDAR    │ └─────────────┘
-    │ Sensor     │ │ Frontier │ │ Mapper   │
-    │ Model      │ │ Dead-End │ │ Wind Map │
-    └────────────┘ │ Detector │ │ GMRF     │
-                   │ Navigator│ └──────────┘
-                   └──────────┘
-```
-
 ## References
 
 - Kim, H. et al., "Gas Source Localization in Unknown Indoor Environments Using Dual-Mode Information-Theoretic Search," *IEEE Robotics and Automation Letters*, 2025. [[IEEE Xplore]](https://ieeexplore.ieee.org/document/10777609/)
@@ -238,7 +214,7 @@ The primary `efe_igdm` package uses a modular architecture:
 
 - **Efe Mantaroglu** — efemantaroglu@gmail.com
 - **Ali Sonmez** — al1.sonmez.mi@gmail.com
-- **Simal** — (transferred to another project)
+- **Simal Guven** — (transferred to another project)
 
 ## License
 
