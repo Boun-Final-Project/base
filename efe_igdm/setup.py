@@ -32,6 +32,7 @@ setup(
             "start = efe_igdm.igdm:main",
             "start_basic = efe_igdm.igdm_basic:main",
             "clear_viz = efe_igdm.tools.clear_visualization:main",
+            "slam_node = efe_igdm.slam_node:main",
         ],
     },
 )

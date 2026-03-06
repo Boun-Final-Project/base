@@ -459,7 +459,7 @@ class GlobalPlanner:
         source_estimate = np.array([estimate['x'], estimate['y']])
         frontier_vertices = [v for v in self.vertices if v.is_frontier_vertex]
 
-        # Pre-filter: score by cheap heuristic, only compute MI for top-K
+        # Pre-filter: score by cheap heuristic (Eq. 22 cost terms only), then compute MI for top-K
         scored_frontiers = []
         for f_vertex in frontier_vertices:
             path_cost = dists[f_vertex.id]
@@ -467,8 +467,6 @@ class GlobalPlanner:
                 continue
             src_dist = np.linalg.norm(np.array(f_vertex.position) - source_estimate)
             cheap_score = np.exp(-self.lambda_p * path_cost) * np.exp(-self.lambda_s * src_dist)
-            cluster_size = f_vertex.frontier_cluster.size if f_vertex.frontier_cluster else 1
-            cheap_score *= min(cluster_size / 10.0, 1.0)
             scored_frontiers.append((cheap_score, path_cost, src_dist, f_vertex))
 
         scored_frontiers.sort(key=lambda x: x[0], reverse=True)

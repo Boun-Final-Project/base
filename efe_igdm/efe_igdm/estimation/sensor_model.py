@@ -124,14 +124,15 @@ class ContinuousGaussianSensorModel(SensorModel):
             Array of (num_levels - 1) threshold values dividing the range
         """
         # 1. Find the active range from particle predictions
-        mean_conc = np.mean(predicted_concentrations)
         max_conc = np.max(predicted_concentrations)
 
-        # Compute average sensor noise
-        avg_sigma = self.alpha * mean_conc + self.sigma_env
+        # Compute sensor noise at the maximum predicted concentration.
+        # The particle with the highest prediction has the widest Gaussian
+        # (σ_g = α·R + σ_env), so we must size the range to cover ITS tail.
+        max_sigma = self.alpha * max_conc + self.sigma_env
 
         # 2. Upper bound: max prediction + 3σ buffer (covers 99.7% of Gaussian tail)
-        d_max = max_conc + 3.0 * avg_sigma
+        d_max = max_conc + 3.0 * max_sigma
 
         # 3. Ensure reasonable range
         d_max = max(d_max, 1.0)  # At least 1 ppm range

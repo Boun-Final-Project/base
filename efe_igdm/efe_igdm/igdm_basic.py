@@ -58,6 +58,7 @@ class RRTInfotaxisBasicNode(Node):
         self.declare_parameter('xy_goal_tolerance', 0.3)
         self.declare_parameter('robot_radius', 0.25)
         self.declare_parameter('sigma_threshold', 0.5)
+        self.declare_parameter('stop_and_measure_time', 0.5)
         self.declare_parameter('success_distance', 0.5)
         self.declare_parameter('positive_weight', 0.5)
         self.declare_parameter('dead_end_epsilon', 0.6)
@@ -111,6 +112,10 @@ class RRTInfotaxisBasicNode(Node):
         self.search_complete = False
         self.planning_pending = False
 
+        # Stop-and-measure: wait for a fresh reading after arriving at waypoint
+        self._measure_wait_start = None   # clock time when wait began
+        self._fresh_reading = False       # set True by sensor_callback after wait starts
+
         # Dual-mode planner state
         self.planner_mode = 'LOCAL'
         self.global_path: List[Tuple[float, float]] = []
@@ -137,10 +142,14 @@ class RRTInfotaxisBasicNode(Node):
         # Subscriptions
         self.pose_subscription = self.create_subscription(
             PoseWithCovarianceStamped, '/PioneerP3DX/ground_truth', self.pose_callback, 10)
+        # self.sensor_subscription = self.create_subscription(
+        #     GasSensor, '/PioneerP3DX/PID/Sensor_reading', self.sensor_callback, 10)
         self.sensor_subscription = self.create_subscription(
-            GasSensor, '/PioneerP3DX/PID/Sensor_reading', self.sensor_callback, 10)
+            GasSensor, '/fake_pid/Sensor_reading', self.sensor_callback, 10)
+        # self.laser_subscription = self.create_subscription(
+        #     LaserScan, '/PioneerP3DX/laser_scan', self.laser_callback, 10)
         self.laser_subscription = self.create_subscription(
-            LaserScan, '/PioneerP3DX/laser_scan', self.laser_callback, 10)
+            LaserScan, '/PioneerP3DX/laser_scanner', self.laser_callback, 10)
 
         # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
@@ -259,6 +268,20 @@ class RRTInfotaxisBasicNode(Node):
             self._handle_settling_complete()
             return
 
+        # 3b. Stop-and-measure: wait for a fresh reading at the waypoint
+        measure_time = self.get_parameter('stop_and_measure_time').value
+        if measure_time > 0:
+            if self._measure_wait_start is None:
+                # Begin waiting
+                self._measure_wait_start = self.get_clock().now()
+                self._fresh_reading = False
+                return
+            elapsed = (self.get_clock().now() - self._measure_wait_start).nanoseconds / 1e9
+            if elapsed < measure_time or not self._fresh_reading:
+                return  # still waiting for time + fresh reading
+            # Wait complete — reset and proceed with the fresh reading
+            self._measure_wait_start = None
+
         self.get_logger().info(f'[STEP {self.step_count}] Pos: ({self.current_position[0]:.2f}, {self.current_position[1]:.2f}) | Sensor: {self.sensor_raw_value:.4f}')
 
         # 4. Update Estimates
@@ -307,7 +330,11 @@ class RRTInfotaxisBasicNode(Node):
         self.global_path = []
         self.global_path_index = 0
         self.marker_viz.clear_global_planner_visualizations()
-        self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
+        # Preserve threshold (don't reset to initial_threshold).
+        # This prevents oscillation: if the RRT at the new location points
+        # back to a previously-exhausted area, the still-high threshold
+        # will immediately detect it as a dead end.
+        self.dead_end_detector.reset()  # keeps current bi_threshold
         self.planning_pending = True
 
     def _run_global_planning(self, current_means) -> Tuple[Optional[Tuple[float, float]], bool]:
@@ -504,6 +531,13 @@ class RRTInfotaxisBasicNode(Node):
 
     def sensor_callback(self, msg):
         self.sensor_raw_value = msg.raw
+        # Mark that a fresh reading arrived during the stop-and-measure wait
+        if self._measure_wait_start is not None:
+            self._fresh_reading = True
+            # Re-trigger take_step so it can check if wait is complete
+            if not self.navigator.is_moving:
+                self.take_step()
+            return
         if (self.node_initialized and not self.navigator.initial_spin_done
             and not self.navigator.is_moving and self.current_position
             and not self.planning_pending):

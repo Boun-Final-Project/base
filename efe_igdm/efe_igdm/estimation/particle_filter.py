@@ -149,8 +149,7 @@ class ParticleFilter:
         if not skip_resample:
             N_eff = self._effective_sample_size()
             if N_eff < self.resample_threshold * self.N:
-                self._resample()
-                self._mcmc_move()
+                self._regularized_resample()
 
     def _compute_concentrations(self, particles: np.ndarray, sensor_position: tuple[float, float]) -> np.ndarray:
         """
@@ -192,6 +191,75 @@ class ParticleFilter:
         self.particles = self.particles[indices]
 
         # 2. Reset weights to uniform in log-space
+        self.log_weights = np.full(self.N, -np.log(self.N))
+
+    def _regularized_resample(self):
+        """
+        Regularized particle filter resampling (Ristic et al. [19], Ch. 12).
+
+        Instead of creating exact copies of surviving particles (which causes
+        all particles to pile onto a few locations), each resampled particle
+        is drawn from a Gaussian kernel centered on the selected particle.
+
+        This maintains diversity: particles spread around high-weight regions
+        rather than collapsing to identical positions.
+
+        Bandwidth: h_opt = (4/(d+2))^(1/(d+4)) * N^(-1/(d+4))
+        Noise covariance: h² * Σ (empirical covariance of weighted particles)
+        """
+        w = self.weights
+
+        # 1. Compute weighted covariance BEFORE resampling
+        d = 3  # dimensions: x, y, Q
+        mean = np.average(self.particles, weights=w, axis=0)
+        diff = self.particles - mean
+        cov = np.dot((diff * w[:, None]).T, diff)
+
+        # Optimal bandwidth for Gaussian kernel (Ristic et al.)
+        h_opt = (4.0 / (d + 2)) ** (1.0 / (d + 4)) * self.N ** (-1.0 / (d + 4))
+
+        # Regularization covariance: h² * Σ
+        reg_cov = (h_opt ** 2) * cov
+
+        # Ensure positive-definite (add small diagonal if needed)
+        reg_cov += np.eye(d) * 1e-10
+
+        # Cholesky factor for efficient sampling
+        try:
+            L = np.linalg.cholesky(reg_cov)
+        except np.linalg.LinAlgError:
+            # Fallback: use diagonal only
+            diag = np.maximum(np.diag(reg_cov), 1e-6)
+            L = np.diag(np.sqrt(diag))
+
+        # 2. Systematic resampling (select which particles to copy)
+        indices = self._systematic_resample()
+        self.particles = self.particles[indices]
+
+        # 3. Add kernel noise to EACH resampled particle (regularization)
+        noise = np.random.randn(self.N, d) @ L.T
+        self.particles += noise
+
+        # 4. Enforce bounds and reject wall particles
+        self.particles[:, 0] = np.clip(self.particles[:, 0], self.bounds['x'][0], self.bounds['x'][1])
+        self.particles[:, 1] = np.clip(self.particles[:, 1], self.bounds['y'][0], self.bounds['y'][1])
+        self.particles[:, 2] = np.clip(self.particles[:, 2], self.bounds['Q'][0], self.bounds['Q'][1])
+
+        # Push particles out of walls
+        og = self.dispersion_model.occupancy_grid
+        if og is not None:
+            gx = np.floor((self.particles[:, 0] - og.origin_x) / og.resolution).astype(np.int32)
+            gy = np.floor((self.particles[:, 1] - og.origin_y) / og.resolution).astype(np.int32)
+            in_grid = (gx >= 0) & (gx < og.width) & (gy >= 0) & (gy < og.height)
+            occupied = np.zeros(self.N, dtype=bool)
+            idx = np.where(in_grid)[0]
+            if len(idx) > 0:
+                occupied[idx] = og.grid[gy[idx], gx[idx]] == 1
+            # For particles in walls: revert to pre-noise position
+            if np.any(occupied):
+                self.particles[occupied] = self.particles[indices[np.where(occupied)[0]]]
+
+        # 5. Reset weights to uniform
         self.log_weights = np.full(self.N, -np.log(self.N))
 
     def _systematic_resample(self):
