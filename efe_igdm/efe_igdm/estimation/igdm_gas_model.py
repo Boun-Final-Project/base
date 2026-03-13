@@ -65,7 +65,7 @@ def _dijkstra_numba_core(grid_data, start_gx, start_gy, width, height, resolutio
             nx, ny = cx + dx, cy + dy
 
             if 0 <= nx < width and 0 <= ny < height:
-                if grid_data[ny, nx] == 0:
+                if grid_data[ny, nx] != 1:  # Traverse free (0) AND unknown (-1); only block confirmed walls
                     # Wind-biased cost
                     if wspd > 1e-6 and wind_alpha > 0.0:
                         # Normalized step direction

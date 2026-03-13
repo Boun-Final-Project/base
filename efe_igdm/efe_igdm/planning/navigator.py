@@ -86,7 +86,7 @@ class Navigator:
             self._teleport_robot(safe_pos[0], safe_pos[1])
             # Reset logic state
             time.sleep(1.0)
-            dead_end_detector.reset()
+            # dead_end_detector.reset()  # Paper: BI_thresh is continuous across mode switches
             # Signal completion to trigger planning
             if self.on_complete_callback:
                 self.on_complete_callback()

@@ -50,7 +50,7 @@ class RRTInfotaxisBasicNode(Node):
     def _init_parameters(self):
         """Declare and cache parameters."""
         self.declare_parameter('use_fast_rrt', True)
-        self.declare_parameter('sigma_m', 1.5)
+        self.declare_parameter('sigma_m', 2.0)
         self.declare_parameter('number_of_particles', 1000)
         self.declare_parameter('n_tn', 50)
         self.declare_parameter('delta', 0.7)
@@ -330,11 +330,7 @@ class RRTInfotaxisBasicNode(Node):
         self.global_path = []
         self.global_path_index = 0
         self.marker_viz.clear_global_planner_visualizations()
-        # Preserve threshold (don't reset to initial_threshold).
-        # This prevents oscillation: if the RRT at the new location points
-        # back to a previously-exhausted area, the still-high threshold
-        # will immediately detect it as a dead end.
-        self.dead_end_detector.reset()  # keeps current bi_threshold
+        # self.dead_end_detector.reset()  # Paper: BI_thresh is continuous across mode switches
         self.planning_pending = True
 
     def _run_global_planning(self, current_means) -> Tuple[Optional[Tuple[float, float]], bool]:
@@ -375,6 +371,8 @@ class RRTInfotaxisBasicNode(Node):
         expected_entropy = self.particle_filter.compute_expected_entropy(waypoint)
 
         mutual_info = current_entropy - expected_entropy
+        # Paper Eq. 21: BI_thresh is updated every step, including during GLOBAL mode
+        self.dead_end_detector.update_threshold(max(mutual_info, 0.0))
         detector_status = self.dead_end_detector.get_status()
         thresh = self.params['switch_back_threshold'] * detector_status["bi_threshold"]
 
@@ -419,7 +417,7 @@ class RRTInfotaxisBasicNode(Node):
         frontier_cells = self.global_planner.detect_frontiers()
         if not frontier_cells:
             self.get_logger().info('[DEAD END] No frontiers. Staying LOCAL.')
-            self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
+            # self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])  # Paper: BI_thresh is continuous
             return
 
         self.get_logger().warn(f'[DEAD END] Found {len(frontier_cells)} frontier cells. Planning Global...')
@@ -441,7 +439,7 @@ class RRTInfotaxisBasicNode(Node):
             self.marker_viz.visualize_global_path(self.global_path)
         else:
             self.get_logger().info('[DEAD END] Global plan failed. Staying LOCAL.')
-            self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
+            # self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])  # Paper: BI_thresh is continuous
 
     def trigger_recovery(self):
         # 1. Attempt Teleport (Delegated to Navigator)
@@ -454,7 +452,7 @@ class RRTInfotaxisBasicNode(Node):
 
         # 2. Fallback to Global Planner
         self.get_logger().warn('Teleport failed. Trying Global Planner fallback.')
-        self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])
+        # self.dead_end_detector.reset(initial_threshold=self.params['dead_end_initial_threshold'])  # Paper: BI_thresh is continuous
         self.planner_mode = 'GLOBAL'
 
         res = self.global_planner.plan(self.current_position, self.particle_filter)
