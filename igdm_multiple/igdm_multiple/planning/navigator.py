@@ -24,7 +24,7 @@ class Navigator:
         self.goal_handle = None
         self.goal_position = None
         self.consecutive_failures = 0
-        self.max_failures_tolerance = 3  # Max consecutive failures before recovery
+        self.max_failures_tolerance = 5  # Max consecutive failures before recovery
         self.in_recovery = False
         self.initial_spin_done = False
         self.initial_spin_goal_handle = None
@@ -162,8 +162,12 @@ class Navigator:
     def _nav_goal_response_callback(self, future):
         self.goal_handle = future.result()
         if not self.goal_handle.accepted:
-            self.node.get_logger().warn('Goal rejected!')
+            self.node.get_logger().warn('Goal rejected by Nav2!')
             self.is_moving = False
+            self.consecutive_failures += 1
+            # Must trigger planning again or the node freezes
+            if self.on_complete_callback:
+                self.on_complete_callback()
             return
         self.goal_handle.get_result_async().add_done_callback(self._nav_result_callback)
 

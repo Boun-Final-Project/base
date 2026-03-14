@@ -35,7 +35,7 @@ class MarkerVisualizer:
         # Wind visualization
         self.wind_vectors_pub = node.create_publisher(MarkerArray, '/rrt_infotaxis/wind_vectors', 10)
 
-    def visualize_particles(self, particles, weights):
+    def visualize_particles(self, particles, weights=None):
         marker_array = MarkerArray()
         marker = Marker()
         marker.header.frame_id = "map"
@@ -44,15 +44,11 @@ class MarkerVisualizer:
         marker.scale.x = marker.scale.y = 0.1
         marker.pose.orientation.w = 1.0
         
-        norm_w = weights / weights.max() if (len(weights) > 0 and weights.max() > 0) else weights
-        
-        for p_val, w in zip(particles, norm_w):
+        for p_val in particles:
             p = Point()
             p.x, p.y, p.z = float(p_val[0]), float(p_val[1]), 0.5
             marker.points.append(p)
-            c = ColorRGBA()
-            c.r, c.g, c.b, c.a = float(w), float(w * 0.8), float(1.0 - w), 0.8
-            marker.colors.append(c)
+            marker.colors.append(ColorRGBA(r=1.0, g=0.0, b=1.0, a=0.7))
         
         marker_array.markers.append(marker)
         self.particle_pub.publish(marker_array)
