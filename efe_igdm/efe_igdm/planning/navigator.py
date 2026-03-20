@@ -164,6 +164,8 @@ class Navigator:
         if not self.goal_handle.accepted:
             self.node.get_logger().warn('Goal rejected!')
             self.is_moving = False
+            if self.on_complete_callback:
+                self.on_complete_callback()
             return
         self.goal_handle.get_result_async().add_done_callback(self._nav_result_callback)
 

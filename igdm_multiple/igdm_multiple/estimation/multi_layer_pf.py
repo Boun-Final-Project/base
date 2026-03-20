@@ -321,6 +321,21 @@ class MultiLayerParticleFilter:
         # At least one source must be confirmed
         return len(self.confirmed_sources) > 0
 
+    def reset_layer(self, layer_id: int):
+        """
+        Reinitialize a layer's particles and weights to uniform.
+        Called after a layer fails source verification (pseudo-source).
+        """
+        layer = self.layers[layer_id]
+        layer.pf.particles = layer.pf._initialize_particles()
+        layer.pf.log_weights = np.full(layer.pf.N, -np.log(layer.pf.N))
+        layer.pf.last_measurement = None
+        layer.pf.last_sensor_position = None
+        layer.converged = False
+        layer.confirmed = False
+        layer.estimate = None
+        layer.std = None
+
     def get_best_layer_for_planning(self) -> Optional[LayerState]:
         """
         Return the most uncertain (highest entropy) non-confirmed layer

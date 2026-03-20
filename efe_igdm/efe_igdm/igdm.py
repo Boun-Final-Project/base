@@ -675,8 +675,55 @@ class RRTInfotaxisNode(Node):
         self.publish_slam_map()
 
     def gt_wind_callback(self, msg: MarkerArray):
-        """Store ground truth wind vectors for validation."""
+        """Parse ground truth wind vectors and feed directly to dispersion model."""
         self.gt_wind_data = msg
+        if not self.node_initialized:
+            return
+        self._apply_gt_wind_field(msg)
+
+    def _apply_gt_wind_field(self, msg: MarkerArray):
+        """
+        Convert GT MarkerArray wind vectors to a grid wind field and update the dispersion model.
+
+        Each arrow marker encodes:
+            points[0] = world position (start)
+            points[1] = world position + wind_vector (end)
+        So wind = (end - start). Dijkstra normalizes by speed, so the
+        visualizer's arrow scale does not affect the direction-based bias.
+        """
+        grid = self.slam_map
+        wind_u = np.zeros((grid.height, grid.width), dtype=np.float64)
+        wind_v = np.zeros((grid.height, grid.width), dtype=np.float64)
+        count = np.zeros((grid.height, grid.width), dtype=np.int32)
+
+        for marker in msg.markers:
+            if len(marker.points) < 2:
+                continue
+            start = marker.points[0]
+            end = marker.points[1]
+            vx = end.x - start.x
+            vy = end.y - start.y
+
+            gx, gy = grid.world_to_grid(start.x, start.y)
+            if 0 <= gx < grid.width and 0 <= gy < grid.height:
+                wind_u[gy, gx] += vx
+                wind_v[gy, gx] += vy
+                count[gy, gx] += 1
+
+        mask = count > 0
+        wind_u[mask] /= count[mask]
+        wind_v[mask] /= count[mask]
+
+        # Mirror into wind_map so visualize_wind_map() works unchanged
+        self.wind_map.estimated_vx = wind_u
+        self.wind_map.estimated_vy = wind_v
+        self.wind_map.pf_solved = True
+
+        self.dispersion_model.set_wind_field(wind_u, wind_v)
+        self.get_logger().info(
+            f'[GT WIND] Wind field set from {int(np.sum(mask))} ground truth vectors',
+            throttle_duration_sec=10.0
+        )
 
     def _publish_wind_map_timer(self):
         if not hasattr(self, 'wind_map') or not hasattr(self, 'marker_viz'):
@@ -687,33 +734,15 @@ class RRTInfotaxisNode(Node):
         if filled > 0:
             self.get_logger().info(f'Filled {filled} enclosed unknown cells as wall')
 
-        # Re-solve wind field
-        # GMRF does not strictly require outlets, just measurements + grid
-        if self.params.get('use_gmrf', False):
-             self.wind_map.solve_gmrf(self.slam_map.grid)
-        else:
-            # Re-solve potential flow using current SLAM grid
-            has_outlets = np.any(self.slam_map.grid == 2)
-            if has_outlets:
-                solved = self.wind_map.solve_potential_flow(self.slam_map.grid)
-                if solved and not getattr(self, '_pf_solve_logged', False):
-                    n = self.wind_map.pf_estimator.num_clusters
-                    self.get_logger().info(f'Potential flow solved with {n} outlet clusters')
-                    self._pf_solve_logged = True
-
-        # Update dispersion model with latest wind field
-        self.dispersion_model.set_wind_field(
-            self.wind_map.estimated_vx, self.wind_map.estimated_vy
-        )
+        # Wind field is provided by ground truth (gt_wind_callback) — skip estimation.
 
         self.marker_viz.visualize_wind_map(self.wind_map)
 
-        # Validation
-        if self.gt_wind_data and self.step_count % 10 == 0:
-            # Basic check: compare N vectors?
-            # For now, just log presence.
-            # Real validation code would go here.
-            self.get_logger().info(f'[VALIDATION] GT Vectors available: {len(self.gt_wind_data.markers)}')
+        if self.gt_wind_data:
+            self.get_logger().info(
+                f'[GT WIND] {len(self.gt_wind_data.markers)} vectors active',
+                throttle_duration_sec=10.0
+            )
 
     def __del__(self):
         if hasattr(self, 'logger'):

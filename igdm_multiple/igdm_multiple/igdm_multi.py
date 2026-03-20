@@ -411,6 +411,12 @@ class MultiSourceNode(Node):
                         f'SOURCE CONFIRMED (layer {layer.id}): '
                         f'({est["x"]:.2f}, {est["y"]:.2f}), Q={est["Q"]:.1f}'
                     )
+                else:
+                    self.get_logger().warn(
+                        f'Layer {layer.id} failed verification at '
+                        f'({est["x"]:.2f}, {est["y"]:.2f}) — pseudo-source, resetting.'
+                    )
+                    self.multi_pf.reset_layer(layer.id)
 
     # =========================================================================
     # PLANNING
@@ -429,6 +435,14 @@ class MultiSourceNode(Node):
 
     def _run_global_planning(self) -> Tuple[Optional[Tuple[float, float]], bool]:
         self.get_logger().info('[GLOBAL MODE] Following frontier path...')
+
+        # Skip rejected waypoint instead of retrying it
+        if self.navigator.last_goal_rejected:
+            self.navigator.last_goal_rejected = False
+            self.global_path_index += 1
+            self.get_logger().warn(
+                f'[GLOBAL MODE] Skipping rejected waypoint, advancing to index {self.global_path_index}.'
+            )
 
         if not self.global_path or self.global_path_index >= len(self.global_path):
             self.settling_start_time = self.get_clock().now()
