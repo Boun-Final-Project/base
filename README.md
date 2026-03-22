@@ -213,7 +213,7 @@ python3 src/base/efe_igdm/scripts/plot_entropy.py
 ## Contributors
 
 - **Efe Mantaroglu** — efemantaroglu@gmail.com
-- **Ali Sonmez** — al1.sonmez.mi@gmail.com
+- **Ali Sonmez** — al1.sonmez.mi@gmail.com (TEST)
 - **Simal Guven** — (transferred to another project)
 
 ## License
