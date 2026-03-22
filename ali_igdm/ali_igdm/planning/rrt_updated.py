@@ -74,6 +74,13 @@ class RRTInfotaxisUpdated:
         self.current_step = current_step
         self.penalty_radius = penalty_radius
 
+        # Cosine schedule parameters for positive_weight
+        self.base_weight = 0.8                      # max value
+        self.weight_amplitude = 0.2               # half-swing (0.8 - 0.4) / 2
+        self.weight_period = 30                    # full cycle in steps
+        self.cosine_active = False                 # starts in max-weight phase
+        self.cosine_start_step = 0                 # step when cosine phase began
+
         # Penalty parameters
         self.MAX_PENALTY_STEPS = 5
         self.INITIAL_PENALTY = 32
@@ -119,8 +126,11 @@ class RRTInfotaxisUpdated:
                 new_node = Node((x, y), root)
                 self.nodes.append(new_node)
 
-        # Continue with random sampling
-        while len(self.nodes) < self.N_tn:
+        # Continue with random sampling (cap attempts to avoid infinite loop)
+        max_attempts = self.N_tn * 10
+        attempts = 0
+        while len(self.nodes) < self.N_tn and attempts < max_attempts:
+            attempts += 1
             r = self.R_range * np.sqrt(np.random.random())
             theta = 2 * np.pi * np.random.random()
             x = start_pos[0] + r * np.cos(theta)
@@ -443,6 +453,30 @@ class RRTInfotaxisUpdated:
 
         return False, penalty_factor, steps_since, penalty_info
 
+    def activate_cosine_schedule(self):
+        """Switch from max-weight phase to cosine periodic phase."""
+        self.cosine_active = True
+        self.cosine_start_step = self.current_step
+
+    def _get_cosine_weight(self):
+        """Compute positive_weight based on current phase.
+
+        Phase 1 (before level >= 3): Returns base_weight (0.6) to maximize
+        information gain while searching for the gas plume.
+
+        Phase 2 (after level >= 3): Cosine schedule oscillating between
+        base_weight (0.6) and base_weight - 2*amplitude (0.4) with a
+        period of weight_period (30) steps.
+
+        Returns:
+            weight: float in [0.4, 0.6]
+        """
+        if not self.cosine_active:
+            return self.base_weight
+        steps_since_activation = self.current_step - self.cosine_start_step
+        mid = self.base_weight - self.weight_amplitude
+        return mid + self.weight_amplitude * np.cos(2 * np.pi * steps_since_activation / self.weight_period)
+
     def _normalize_value(self, value, min_val, max_val):
         """Normalize value to [0, 1] range using min-max normalization.
 
@@ -492,7 +526,24 @@ class RRTInfotaxisUpdated:
         """
         self.nodes = []
         self.sprawl(start_pos)
-        paths = self.prune()
+
+        # Skip pruning if tree is too small (not enough nodes for meaningful branches)
+        if len(self.nodes) < self.N_tn:
+            # Use all root-to-leaf paths without depth truncation
+            paths = []
+            all_nodes = set(self.nodes)
+            parents = {node.parent for node in self.nodes if node.parent is not None}
+            for leaf in all_nodes - parents:
+                path = []
+                current = leaf
+                while current is not None:
+                    path.append(current)
+                    current = current.parent
+                path = path[::-1]
+                if len(path) > 1:
+                    paths.append(path)
+        else:
+            paths = self.prune()
 
         if not paths:
             return {
@@ -540,6 +591,7 @@ class RRTInfotaxisUpdated:
         max_travel_cost = max(raw_travel_costs)
 
         # SECOND PASS: Normalize J1 and J2, calculate utilities
+        current_weight = self._get_cosine_weight()
         all_utilities = []
         all_information_gains_normalized = []
         all_travel_costs_normalized = []
@@ -564,10 +616,10 @@ class RRTInfotaxisUpdated:
                 max_travel_cost
             )
 
-            # Calculate utility with normalized values
-            # utility = J1 * positive_weight - J2 * (1 - positive_weight)
-            # (inverted J2 because we want to minimize cost)
-            utility = J1_normalized * self.positive_weight - J2_normalized * (1 - self.positive_weight)
+            # Calculate utility with cosine-scheduled weight
+            # utility = J1 * w(t) - J2 * (1 - w(t))
+            # w(t) oscillates between 0.6 and 0.4 over 30 steps
+            utility = J1_normalized * current_weight - J2_normalized * (1 - current_weight)
 
             all_utilities.append(utility)
             all_information_gains_normalized.append(J1_normalized)
@@ -608,4 +660,5 @@ class RRTInfotaxisUpdated:
             'all_information_gains_normalized': all_information_gains_normalized,  # Normalized J1 for all paths
             'all_travel_costs_normalized': all_travel_costs_normalized,  # Normalized J2 for all paths
             'path_metadata': path_metadata,  # Metadata for all paths including penalty info
+            'current_positive_weight': current_weight,  # Cosine-scheduled weight for this step
         }

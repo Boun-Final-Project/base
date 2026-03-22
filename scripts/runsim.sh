@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 SCENARIOS_DIR="$WS_ROOT/src/gaden/test_env/scenarios"
-INSTALL_SCENARIOS_DIR="$WS_ROOT/install/pmfs_env/share/pmfs_env/scenarios"
+INSTALL_SCENARIOS_DIR="$WS_ROOT/install/test_env/share/test_env/scenarios"
 
 if [ ! -d "$SCENARIOS_DIR" ]; then
     echo "ERROR: Scenarios directory not found: $SCENARIOS_DIR"
@@ -109,7 +109,7 @@ fi
 # ── Launch ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "Launching: $scenario / $sim  (start iteration: $initial_iteration)"
-echo "Command: ros2 launch test_env main_simbot_launch.py scenario:=$scenario simulation:=$sim initial_iteration:=$initial_iteration"
+echo "Command: ros2 launch test_env main_simbot_launch.py scenario:=$scenario simulation:=$sim initial_iteration:=$initial_iteration speed:=4.0"
 echo ""
 
-ros2 launch test_env main_simbot_launch.py scenario:="$scenario" simulation:="$sim" initial_iteration:="$initial_iteration"
+ros2 launch test_env main_simbot_launch.py scenario:="$scenario" simulation:="$sim" initial_iteration:="$initial_iteration" speed:=4.0

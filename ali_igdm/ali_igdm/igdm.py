@@ -71,6 +71,7 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('robot_radius', 0.35)
         self.declare_parameter('sigma_threshold', 0.3)
         self.declare_parameter('success_distance', 0.5)
+        self.declare_parameter('termination_mode', 'distance')  # 'convergence' or 'distance'
         self.declare_parameter('positive_weight', 0.6)
         self.declare_parameter('resample_threshold', 0.42)
         self.declare_parameter('true_source_x', 2.0)
@@ -119,6 +120,7 @@ class RRTInfotaxisNode(Node):
             'weighted_utility_threshold': self.get_parameter('weighted_utility_threshold').value,
             'use_slam': self.get_parameter('use_slam').value,
             'success_distance': self.get_parameter('success_distance').value,
+            'termination_mode': self.get_parameter('termination_mode').value,
         }
 
     def _init_state_variables(self):
@@ -300,6 +302,11 @@ class RRTInfotaxisNode(Node):
             level_names = ["Very Low (0)", "Low (1)", "Medium (2)", "High (3)", "Very High (4)"]
             self.get_logger().info(f'Discrete level: {discrete_measurement} ({level_names[discrete_measurement]})')
             measurement = discrete_measurement
+
+            # Activate cosine weight schedule once a high reading is detected
+            if discrete_measurement >= 3 and not self.rrt.cosine_active:
+                self.rrt.activate_cosine_schedule()
+                self.get_logger().info(f'[WEIGHT] Level {discrete_measurement} detected — switching to cosine schedule')
         else:
             measurement = self.sensor_raw_value
 
@@ -324,16 +331,18 @@ class RRTInfotaxisNode(Node):
 
         self.get_logger().info(f'Convergence: sigma_p={sigma_p:.3f}, threshold={self.params["sigma_threshold"]:.3f}')
         self.get_logger().info(f'Distance to true source: {dist_to_true:.3f}m (threshold: {self.params["success_distance"]:.3f}m)')
+        self.get_logger().info(f'Termination mode: {self.params["termination_mode"]}')
 
-        if dist_to_true < self.params['success_distance']:
-            self.get_logger().info('✓ SUCCESS! Reached true source!')
-            self._finalize_search()
-            return
-
-        if sigma_p < self.params['sigma_threshold']:
-            self.get_logger().info('✓ CONVERGED! Estimation converged!')
-            self._finalize_search()
-            return
+        if self.params['termination_mode'] == 'distance':
+            if dist_to_true < self.params['success_distance']:
+                self.get_logger().info('✓ SUCCESS! Reached true source (distance mode)!')
+                self._finalize_search()
+                return
+        elif self.params['termination_mode'] == 'convergence':
+            if sigma_p < self.params['sigma_threshold']:
+                self.get_logger().info('✓ CONVERGED! Estimation converged (convergence mode)!')
+                self._finalize_search()
+                return
 
         # 6. PLAN: RRT with exploration penalty
         self.rrt.visited_positions = self.visited_positions
@@ -343,6 +352,7 @@ class RRTInfotaxisNode(Node):
         debug_info = self.rrt.get_next_move_debug(self.current_position, self.particle_filter)
 
         # Log planning results
+        self.get_logger().info(f'[PLAN] positive_weight: {debug_info["current_positive_weight"]:.3f} (cosine schedule)')
         self.get_logger().info(f'[PLAN] Best utility: {debug_info["best_utility"]:.4f}')
         self.get_logger().info(f'[PLAN] J1 (Info gain): {debug_info["best_information_gain"]:.4f} (norm), Original: {debug_info["best_information_gain_original"]:.4f}')
         self.get_logger().info(f'[PLAN] J2 (Travel cost): {debug_info["best_travel_cost"]:.4f} (norm), Original: {debug_info["best_travel_cost_original"]:.4f}')
