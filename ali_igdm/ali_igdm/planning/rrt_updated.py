@@ -86,6 +86,12 @@ class RRTInfotaxisUpdated:
         self.INITIAL_PENALTY = 32
         self.PENALTY_DECAY_RATE = 2.0
 
+        # Stuck detection - tracks consecutive steps with low utility or recovery mode
+        self.stuck_counter = 0
+        self.stuck_threshold = 3  # Number of consecutive low-utility steps to declare stuck
+        self.last_utilities = []  # Rolling window of recent utilities
+        self.max_utilities_history = 10
+
     def sprawl(self, start_pos):
         """Grow the RRT from start position with 4 guaranteed initial nodes.
 
@@ -259,6 +265,52 @@ class RRTInfotaxisUpdated:
                 paths.append(path)
 
         return paths
+
+    def _find_recovery_position(self, start_pos, max_radius=3.0, num_samples=50):
+        """
+        Find a valid recovery position when no RRT paths are available.
+        
+        This method samples random positions in increasing radius until it finds
+        a collision-free position. Used as a fallback when the RRT cannot find
+        any valid branches (e.g., in confined spaces or dead ends).
+        
+        Parameters:
+        -----------
+        start_pos : tuple
+            Current position (x, y)
+        max_radius : float
+            Maximum search radius (default: 3.0m)
+        num_samples : int
+            Number of samples to try (default: 50)
+            
+        Returns:
+        --------
+        recovery_pos : tuple
+            A valid collision-free position, or start_pos if none found
+        """
+        # Try expanding ring search with increasing radius
+        for radius in [0.5, 1.0, 1.5, 2.0, max_radius]:
+            for _ in range(num_samples):
+                # Sample random position within current radius
+                r = radius * np.sqrt(np.random.random())
+                theta = 2 * np.pi * np.random.random()
+                x = start_pos[0] + r * np.cos(theta)
+                y = start_pos[1] + r * np.sin(theta)
+                
+                # Check if position is valid (reduced robot radius for tighter spaces)
+                if self.is_collision_free(start_pos, (x, y)) and \
+                   self.occupancy_grid.is_valid((x, y), radius=self.robot_radius * 0.7):
+                    return (x, y)
+        
+        # Last resort: try cardinal directions with small steps
+        for dx, dy in [(0, 0.3), (0, -0.3), (0.3, 0), (-0.3, 0)]:
+            x = start_pos[0] + dx
+            y = start_pos[1] + dy
+            if self.occupancy_grid.is_valid((x, y), radius=self.robot_radius * 0.5):
+                return (x, y)
+        
+        # If all else fails, return start position (robot will stay in place)
+        return start_pos
 
     def calculate_information_gain(self, path, initial_particle_filter):
         """Calculate total discounted information gain along path.
@@ -546,12 +598,39 @@ class RRTInfotaxisUpdated:
             paths = self.prune()
 
         if not paths:
+            # RECOVERY: No valid paths found - try to find any free nearby position
+            recovery_pos = self._find_recovery_position(start_pos)
+            self.stuck_counter += 1
             return {
-                'next_position': start_pos,
+                'next_position': recovery_pos,
                 'best_utility': -np.inf,
                 'best_information_gain': 0.0,
+                'best_information_gain_original': 0.0,
+                'best_information_gain_penalized': 0.0,
                 'best_travel_cost': np.inf,
+                'best_travel_cost_original': 0.0,
+                'best_penalty_applied': False,
+                'best_penalty_factor': 1.0,
+                'best_penalty_info': {},
+                'paths_with_penalties': 0,
+                'total_paths': 0,
                 'all_paths': [],
+                'norm_info_gain_range': (0.0, 0.0),
+                'norm_travel_cost_range': (0.0, 0.0),
+                'rrt_nodes': self.nodes,
+                'rrt_pruned_paths': [],
+                'all_utilities': [],
+                'all_information_gains_normalized': [],
+                'all_travel_costs_normalized': [],
+                'path_metadata': [],
+                'current_positive_weight': self._get_cosine_weight(),
+                # STUCK DETECTION fields
+                'is_stuck': True,
+                'stuck_reason': 'recovery_mode_no_valid_paths',
+                'stuck_counter': self.stuck_counter,
+                'stuck_threshold': self.stuck_threshold,
+                'recent_utilities': self.last_utilities.copy(),
+                'recovery_mode': True
             }
 
         # FIRST PASS: Collect all raw values (information gain and travel cost)
@@ -638,6 +717,44 @@ class RRTInfotaxisUpdated:
         # Get best path metadata for return value
         best_metadata = path_metadata[best_idx]
 
+        # STUCK DETECTION: Track utility trends and detect when robot is stuck
+        # Update rolling window of recent utilities
+        if best_utility != -np.inf:
+            self.last_utilities.append(best_utility)
+            if len(self.last_utilities) > self.max_utilities_history:
+                self.last_utilities.pop(0)
+        
+        # Detect stuck conditions
+        is_stuck = False
+        stuck_reason = None
+        
+        # Check 1: Recovery mode indicates stuck
+        if not paths:
+            is_stuck = True
+            stuck_reason = 'recovery_mode_no_valid_paths'
+            self.stuck_counter += 1
+        # Check 2: Very low utility (all paths have poor information gain)
+        elif best_utility < -0.5:
+            self.stuck_counter += 1
+            if self.stuck_counter >= self.stuck_threshold:
+                is_stuck = True
+                stuck_reason = 'low_utility_threshold'
+        # Check 3: Utility decreasing over recent steps
+        elif len(self.last_utilities) >= 5:
+            recent_avg = np.mean(self.last_utilities[-3:])
+            older_avg = np.mean(self.last_utilities[:-3]) if len(self.last_utilities) > 3 else recent_avg
+            if recent_avg < older_avg * 0.7:  # 30% decrease
+                self.stuck_counter += 1
+                if self.stuck_counter >= self.stuck_threshold:
+                    is_stuck = True
+                    stuck_reason = 'decreasing_utility_trend'
+        else:
+            # Reset stuck counter if things are improving
+            self.stuck_counter = max(0, self.stuck_counter - 1)
+        
+        # Clamp stuck counter
+        self.stuck_counter = max(0, min(self.stuck_counter, self.stuck_threshold))
+
         return {
             'next_position': next_pos,
             'best_utility': best_utility,
@@ -661,4 +778,11 @@ class RRTInfotaxisUpdated:
             'all_travel_costs_normalized': all_travel_costs_normalized,  # Normalized J2 for all paths
             'path_metadata': path_metadata,  # Metadata for all paths including penalty info
             'current_positive_weight': current_weight,  # Cosine-scheduled weight for this step
+            # STUCK DETECTION fields
+            'is_stuck': is_stuck,
+            'stuck_reason': stuck_reason,
+            'stuck_counter': self.stuck_counter,
+            'stuck_threshold': self.stuck_threshold,
+            'recent_utilities': self.last_utilities.copy(),
+            'recovery_mode': not paths  # True if using recovery behavior
         }

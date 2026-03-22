@@ -11,6 +11,8 @@ Simplified LOCAL-only mode with:
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
+import yaml
+import os
 
 # Messages
 from olfaction_msgs.msg import GasSensor
@@ -61,12 +63,16 @@ class RRTInfotaxisNode(Node):
 
     def _init_parameters(self):
         """Declare and cache parameters."""
+        # Scenario name to load correct source position
+        self.declare_parameter('scenario_name', '')  # Optional: specify scenario name
+        
         # Core parameters
         self.declare_parameter('sigma_m', 1.5)
         self.declare_parameter('number_of_particles', 1000)
-        self.declare_parameter('n_tn', 20)
-        self.declare_parameter('delta', 1.0)
-        self.declare_parameter('max_depth', 2)
+        # RRT parameters - increased for better exploration in confined spaces
+        self.declare_parameter('n_tn', 40)       # Increased from 20 to 40 for more tree nodes
+        self.declare_parameter('delta', 0.5)     # Reduced from 1.0 to 0.5 for finer navigation
+        self.declare_parameter('max_depth', 3)   # Increased from 2 to 3 for deeper planning horizon
         self.declare_parameter('xy_goal_tolerance', 0.3)
         self.declare_parameter('robot_radius', 0.35)
         self.declare_parameter('sigma_threshold', 0.3)
@@ -74,8 +80,9 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('termination_mode', 'distance')  # 'convergence' or 'distance'
         self.declare_parameter('positive_weight', 0.6)
         self.declare_parameter('resample_threshold', 0.42)
-        self.declare_parameter('true_source_x', 2.0)
-        self.declare_parameter('true_source_y', 5.0)
+        # Source position - defaults will be overridden by auto-detection
+        self.declare_parameter('true_source_x', 0.0)
+        self.declare_parameter('true_source_y', 0.0)
 
         # NEW: Sensor type selection
         self.declare_parameter('use_discrete_sensor', True)
@@ -97,13 +104,11 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('use_slam', False)  # Use ground truth by default
 
         # Cache values
-        self.params = {
+        params = {
             'sigma_m': self.get_parameter('sigma_m').value,
             'sigma_threshold': self.get_parameter('sigma_threshold').value,
             'xy_goal_tolerance': self.get_parameter('xy_goal_tolerance').value,
             'robot_radius': self.get_parameter('robot_radius').value,
-            'true_source_x': self.get_parameter('true_source_x').value,
-            'true_source_y': self.get_parameter('true_source_y').value,
             'n_tn': self.get_parameter('n_tn').value,
             'delta': self.get_parameter('delta').value,
             'max_depth': self.get_parameter('max_depth').value,
@@ -122,6 +127,85 @@ class RRTInfotaxisNode(Node):
             'success_distance': self.get_parameter('success_distance').value,
             'termination_mode': self.get_parameter('termination_mode').value,
         }
+        
+        # AUTO-DETECT source position from sim.yaml
+        # If user provided explicit values, use those; otherwise auto-detect
+        source_x = self.get_parameter('true_source_x').value
+        source_y = self.get_parameter('true_source_y').value
+        scenario_name = self.get_parameter('scenario_name').value
+        
+        if source_x == 0.0 and source_y == 0.0:
+            # Auto-detect from sim.yaml
+            detected_source = self._get_source_position_from_scenario(scenario_name)
+            params['true_source_x'] = detected_source[0]
+            params['true_source_y'] = detected_source[1]
+            self.get_logger().info(f'Auto-detected source position: ({detected_source[0]:.2f}, {detected_source[1]:.2f})')
+        else:
+            params['true_source_x'] = source_x
+            params['true_source_y'] = source_y
+            self.get_logger().info(f'Using user-provided source position: ({source_x:.2f}, {source_y:.2f})')
+        
+        self.params = params
+
+    def _get_source_position_from_scenario(self, scenario_name: str = '') -> Tuple[float, float]:
+        """
+        Automatically read the gas source position from the GADEN sim.yaml file.
+        
+        Parameters:
+        -----------
+        scenario_name : str, optional
+            Specific scenario name to search for. If empty, searches all scenarios.
+        
+        Returns:
+        --------
+        (source_x, source_y) : Tuple[float, float]
+            Source position in world coordinates
+        (0.0, 0.0) if not found
+        """
+        # Common scenario locations in ROS2 workspace
+        possible_paths = [
+            # Install space (test_env scenarios)
+            os.path.expanduser("~/ros2_ws/install/test_env/share/test_env/scenarios"),
+            # Source space (gaden scenarios)
+            os.path.expanduser("~/ros2_ws/src/gaden/test_env/scenarios"),
+        ]
+        
+        for base_path in possible_paths:
+            if not os.path.isdir(base_path):
+                continue
+                
+            # Search for sim.yaml files in scenario directories
+            for scenario in os.listdir(base_path):
+                # If scenario_name is specified, only search that scenario
+                if scenario_name and scenario != scenario_name:
+                    continue
+                    
+                scenario_path = os.path.join(base_path, scenario)
+                if not os.path.isdir(scenario_path):
+                    continue
+                
+                # Look for sim.yaml in environment configurations
+                sim_yaml_path = os.path.join(
+                    scenario_path, 
+                    "environment_configurations", "config1", "simulations", "sim1", "sim.yaml"
+                )
+                
+                if os.path.exists(sim_yaml_path):
+                    try:
+                        with open(sim_yaml_path, 'r') as f:
+                            sim_data = yaml.safe_load(f)
+                        
+                        source = sim_data.get('source', {})
+                        position = source.get('position', [])
+                        
+                        if position and len(position) >= 2:
+                            source_x, source_y = position[0], position[1]
+                            return (float(source_x), float(source_y))
+                    except Exception as e:
+                        self.get_logger().warn(f"Could not read {sim_yaml_path}: {e}")
+        
+        self.get_logger().warn("Could not find source position in sim.yaml, using default (0.0, 0.0)")
+        return (0.0, 0.0)
 
     def _init_state_variables(self):
         """Initialize internal state."""
@@ -360,6 +444,14 @@ class RRTInfotaxisNode(Node):
 
         if debug_info['best_penalty_applied']:
             self.get_logger().info(f'[PLAN] ⚠️ PENALTY APPLIED to best path')
+
+        # STUCK DETECTION logging
+        if debug_info.get('is_stuck', False):
+            self.get_logger().warn(f'[STUCK DETECTED] Reason: {debug_info.get("stuck_reason", "unknown")}')
+            self.get_logger().warn(f'[STUCK] Counter: {debug_info.get("stuck_counter", 0)}/{debug_info.get("stuck_threshold", 3)}, Recovery mode: {debug_info.get("recovery_mode", False)}')
+            self.get_logger().warn(f'[STUCK] Recent utilities: {[f"{u:.3f}" for u in debug_info.get("recent_utilities", [])]}')
+        elif debug_info.get('recovery_mode', False):
+            self.get_logger().info(f'[RECOVERY] Using recovery behavior - no valid RRT paths found')
 
         # 7. MOVE: Weighted movement strategy
         next_pos, move_info = self._calculate_weighted_move(debug_info, self.current_position)
