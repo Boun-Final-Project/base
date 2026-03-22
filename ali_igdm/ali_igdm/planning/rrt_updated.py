@@ -76,7 +76,7 @@ class RRTInfotaxisUpdated:
 
         # Cosine schedule parameters for positive_weight
         self.base_weight = 0.8                      # max value
-        self.weight_amplitude = 0.2               # half-swing (0.8 - 0.4) / 2
+        self.weight_amplitude = 0.3               # half-swing (0.8 - 0.2) / 2
         self.weight_period = 30                    # full cycle in steps
         self.cosine_active = False                 # starts in max-weight phase
         self.cosine_start_step = 0                 # step when cosine phase began
@@ -202,7 +202,9 @@ class RRTInfotaxisUpdated:
         num_samples = int(np.ceil(dist / (self.occupancy_grid.resolution * 0.5)))
         num_samples = max(num_samples, 2)
 
-        for i in range(num_samples + 1):
+        # Start from i=1 to skip the start position — the robot may already
+        # be within robot_radius of a wall and still needs to plan moves away
+        for i in range(1, num_samples + 1):
             t = i / num_samples
             sample_pos = pos1 + t * (pos2 - pos1)
             if not self.occupancy_grid.is_valid(position=(sample_pos[0], sample_pos[1]), radius=self.robot_radius):
@@ -513,15 +515,15 @@ class RRTInfotaxisUpdated:
     def _get_cosine_weight(self):
         """Compute positive_weight based on current phase.
 
-        Phase 1 (before level >= 3): Returns base_weight (0.6) to maximize
+        Phase 1 (before level >= 3): Returns base_weight (0.8) to maximize
         information gain while searching for the gas plume.
 
         Phase 2 (after level >= 3): Cosine schedule oscillating between
-        base_weight (0.6) and base_weight - 2*amplitude (0.4) with a
+        base_weight (0.8) and base_weight - 2*amplitude (0.2) with a
         period of weight_period (30) steps.
 
         Returns:
-            weight: float in [0.4, 0.6]
+            weight: float in [0.2, 0.8]
         """
         if not self.cosine_active:
             return self.base_weight
@@ -697,7 +699,7 @@ class RRTInfotaxisUpdated:
 
             # Calculate utility with cosine-scheduled weight
             # utility = J1 * w(t) - J2 * (1 - w(t))
-            # w(t) oscillates between 0.6 and 0.4 over 30 steps
+            # w(t) oscillates between 0.8 and 0.2 over 30 steps
             utility = J1_normalized * current_weight - J2_normalized * (1 - current_weight)
 
             all_utilities.append(utility)

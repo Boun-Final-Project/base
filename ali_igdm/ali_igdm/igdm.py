@@ -453,6 +453,25 @@ class RRTInfotaxisNode(Node):
         elif debug_info.get('recovery_mode', False):
             self.get_logger().info(f'[RECOVERY] Using recovery behavior - no valid RRT paths found')
 
+        # STUCK RECOVERY: drive away from obstacles if RRT is stuck or Nav2 keeps failing
+        if debug_info.get('is_stuck', False) or self.navigator.consecutive_failures >= 3:
+            self.get_logger().warn(
+                f'[RECOVERY] Driving away from obstacles '
+                f'(RRT stuck={debug_info.get("is_stuck", False)}, '
+                f'nav_failures={self.navigator.consecutive_failures})'
+            )
+            recovery_pos = self._find_escape_direction()
+            if recovery_pos is not None:
+                self.navigator.consecutive_failures = 0
+                self.navigator.in_recovery = False
+                self.rrt.stuck_counter = 0
+                self.rrt.last_utilities.clear()
+                self.get_logger().info(f'[RECOVERY] Navigating to escape point ({recovery_pos[0]:.2f}, {recovery_pos[1]:.2f})')
+                self.navigator.send_goal(recovery_pos[0], recovery_pos[1], tolerance=0.2)
+                return
+            else:
+                self.get_logger().warn('[RECOVERY] No escape direction found, continuing with RRT plan')
+
         # 7. MOVE: Weighted movement strategy
         next_pos, move_info = self._calculate_weighted_move(debug_info, self.current_position)
 
@@ -474,6 +493,52 @@ class RRTInfotaxisNode(Node):
 
         # Track visited position for next step's penalty
         self.visited_positions.append((self.current_position, self.step_count))
+
+    def _find_escape_direction(self):
+        """Find a valid position to escape to when stuck near walls.
+
+        Unlike normal RRT collision checks, this skips the start position validity
+        check since the robot may already be within robot_radius of a wall.
+        Only the destination and intermediate points (excluding start) are checked.
+        """
+        cx, cy = self.current_position
+        num_angles = 16
+        step_distance = self.params['delta']
+        resolution = self.active_map.resolution
+        robot_radius = self.params['robot_radius']
+        best_pos = None
+        max_clearance = 0
+
+        for i in range(num_angles):
+            angle = (2 * np.pi * i) / num_angles
+            tx = cx + step_distance * np.cos(angle)
+            ty = cy + step_distance * np.sin(angle)
+
+            # Only check destination validity (not start — robot may be too close to wall)
+            if not self.active_map.is_valid((tx, ty), radius=robot_radius):
+                continue
+
+            # Check intermediate points along path, skipping the start position
+            dist = np.hypot(tx - cx, ty - cy)
+            num_samples = max(int(np.ceil(dist / (resolution * 0.5))), 2)
+            path_clear = True
+            for j in range(1, num_samples + 1):  # start from 1 to skip current position
+                t = j / num_samples
+                sx = cx + t * (tx - cx)
+                sy = cy + t * (ty - cy)
+                if not self.active_map.is_valid((sx, sy), radius=robot_radius):
+                    path_clear = False
+                    break
+
+            if not path_clear:
+                continue
+
+            clearance = self.navigator._calculate_clearance((tx, ty), self.active_map)
+            if clearance > max_clearance:
+                max_clearance = clearance
+                best_pos = (tx, ty)
+
+        return best_pos
 
     def _calculate_weighted_move(self, debug_info, current_pos):
         """Calculate weighted movement position based on top utility paths."""
