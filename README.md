@@ -115,6 +115,23 @@ Then rebuild so GADEN picks up the new scenarios:
 cd ~/ros2_ws && colcon build
 ```
 
+### Apply Nav2 Configuration
+
+This repository includes a tuned `nav2_params.yaml` in `gaden_config/navigation_config/`. Copy it over GADEN's default to prevent the robot from getting stuck near walls:
+
+```bash
+cp ~/ros2_ws/src/base/gaden_config/navigation_config/nav2_params.yaml \
+   ~/ros2_ws/src/gaden/test_env/navigation_config/nav2_params.yaml
+```
+
+Then rebuild:
+
+```bash
+cd ~/ros2_ws && colcon build
+```
+
+**Why:** The default Nav2 config includes a `RotateToGoal` DWB critic and a tight `yaw_goal_tolerance: 0.1` rad. Together these cause the robot to spin in place to align with goal headings, which frequently results in the robot pressing against walls and getting stuck. The tuned config removes the `RotateToGoal` critic and sets `yaw_goal_tolerance: 6.28` (any orientation accepted), so the robot drives straight to the goal position without forced in-place rotation.
+
 ### Helper Scripts (Optional)
 
 Two interactive launcher scripts are provided in `scripts/` to simplify running simulations. They auto-detect your workspace path.
