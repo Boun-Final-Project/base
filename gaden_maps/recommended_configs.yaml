@@ -157,3 +157,114 @@ outdoors:
     robot_start: null   # TODO: fill in
     start_time: null    # TODO: fill in
     notes: ""
+
+# ── PMFS-only scenarios (A/B/C/D/E) ─────────────────────────────────────────
+A:
+  A1:
+    source: [5.0, 6.2]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  A2:
+    source: [1.75, 8.6]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  A3:
+    source: [7.3, 6.1]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  A4:
+    source: [3.1, 4.3]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+
+B:
+  B1:
+    source: [-0.6, 1.95]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  B2:
+    source: [-0.4, -2.9]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  B3:
+    source: [-3.7, -1.1]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  B4:
+    source: [-3.2, -3.3]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+
+C:
+  C1:
+    source: [0.0, -1.0]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  C2:
+    source: [1.5, -2.24]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  C3:
+    source: [-2.7, 0.8]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  C4:
+    source: [-0.77, 2.2]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+
+D:
+  D1:
+    source: [4.65, 2.62]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  D2:
+    source: [4.0, 6.4]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  D3:
+    source: [4.2, 6.0]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  D4:
+    source: [4.7, 4.3]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+
+E:
+  E1:
+    source: [4.3, 1.4]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  E2:
+    source: [3.2, -2.9]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  E3:
+    source: [-4.0, -1.9]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+  E4:
+    source: [-1.0, -0.9]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
