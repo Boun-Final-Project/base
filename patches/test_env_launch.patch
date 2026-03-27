@@ -1,0 +1,137 @@
+diff --git a/test_env/launch/main_simbot_launch.py b/test_env/launch/main_simbot_launch.py
+index cf566a7..a986b68 100755
+--- a/test_env/launch/main_simbot_launch.py
++++ b/test_env/launch/main_simbot_launch.py
+@@ -1,5 +1,7 @@
+ import os
++import tempfile
+ 
++import yaml as pyyaml
+ from launch import LaunchDescription
+ from launch.actions import DeclareLaunchArgument, SetLaunchConfiguration, IncludeLaunchDescription, SetEnvironmentVariable, OpaqueFunction, GroupAction
+ from launch.launch_description_sources import FrontendLaunchDescriptionSource, PythonLaunchDescriptionSource
+@@ -17,7 +19,14 @@ def launch_arguments():
+         DeclareLaunchArgument("scenario", default_value="10x6_central_obstacle"),
+         DeclareLaunchArgument("configuration", default_value="config1"),
+         DeclareLaunchArgument("simulation", default_value="sim1"),
++        DeclareLaunchArgument("playback", default_value="scene1", description="Scene name to play back (must exist in <configuration>/scenes/)"),
+         DeclareLaunchArgument("namespace", default_value="PioneerP3DX"),
++        DeclareLaunchArgument("initial_iteration", default_value="1"),
++        DeclareLaunchArgument("speed", default_value="1.0", description="Simulation speed multiplier"),
++        DeclareLaunchArgument("method", default_value="none", description="GSL agent to launch: none, efe_igdm, efe_igdm_wind, PMFS, igdm_multiple"),
++        DeclareLaunchArgument("use_rviz", default_value="True", description="Launch the default gaden.rviz window"),
++        DeclareLaunchArgument("robot_x", default_value="", description="Override robot start X position"),
++        DeclareLaunchArgument("robot_y", default_value="", description="Override robot start Y position"),
+     ]
+ # ==========================
+ 
+@@ -27,7 +36,9 @@ def launch_setup(context, *args, **kwargs):
+     namespace = LaunchConfiguration("namespace").perform(context)
+     scenario = LaunchConfiguration("scenario").perform(context)
+     simulation = LaunchConfiguration("simulation").perform(context)
++    playback = LaunchConfiguration("playback").perform(context)
+     configuration = LaunchConfiguration("configuration").perform(context)
++    initial_iteration = LaunchConfiguration("initial_iteration").perform(context)
+ 
+     # robot description for state_publisher
+     robot_desc = xacro.process_file(
+@@ -44,6 +55,28 @@ def launch_setup(context, *args, **kwargs):
+         ),
+     ]
+ 
++    sim_speed = float(LaunchConfiguration("speed").perform(context))
++    world_file = os.path.join(share_dir, "scenarios", scenario, "environment_configurations", configuration, "BasicSimScene.yaml")
++    robot_x_str = LaunchConfiguration("robot_x").perform(context)
++    robot_y_str = LaunchConfiguration("robot_y").perform(context)
++    if robot_x_str or robot_y_str:
++        with open(world_file) as f:
++            world_data = pyyaml.safe_load(f)
++        map_path = world_data.get("map", "")
++        if map_path and not os.path.isabs(map_path):
++            world_data["map"] = os.path.realpath(os.path.join(os.path.dirname(world_file), map_path))
++        for robot in world_data.get("robots", []):
++            pos = robot.get("position", [0, 0, 0])
++            if robot_x_str:
++                pos[0] = float(robot_x_str)
++            if robot_y_str:
++                pos[1] = float(robot_y_str)
++            robot["position"] = pos
++        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="basicsim_", delete=False)
++        pyyaml.dump(world_data, tmp, default_flow_style=False, sort_keys=False)
++        tmp.close()
++        world_file = tmp.name
++
+     robot_simulator = [
+         Node(
+             package="basic_sim",
+@@ -51,8 +84,8 @@ def launch_setup(context, *args, **kwargs):
+             prefix="xterm -hold -e",
+             parameters=[
+                 {"deltaTime": 0.03},
+-                {"speed": 1.0},
+-                {"worldFile": os.path.join(share_dir, "scenarios", scenario, "environment_configurations", configuration, "BasicSimScene.yaml")}
++                {"speed": sim_speed},
++                {"worldFile": world_file}
+             ],
+         )
+     ]
+@@ -68,10 +101,11 @@ def launch_setup(context, *args, **kwargs):
+             ]
+         ),
+         launch_arguments={
+-            "use_rviz": "True",
++            "use_rviz": LaunchConfiguration("use_rviz").perform(context),
+             "scenario": scenario,
+             "configuration": configuration,
+-            "simulation": simulation
++            "playback": playback,
++            "initial_iteration": initial_iteration,
+         }.items(),
+     )
+ 
+@@ -160,6 +194,37 @@ def launch_setup(context, *args, **kwargs):
+         ),
+     ]
+ 
++    # ── Agent node ────────────────────────────────────────────────────────────
++    method = LaunchConfiguration("method").perform(context)
++    agent_nodes = []
++    if method == "efe_igdm":
++        agent_nodes.append(Node(
++            package='efe_igdm',
++            executable='start',
++            name='rrt_infotaxis_node',
++            output='screen',
++            prefix='xterm -hold -e',
++            parameters=[{'use_sim_time': True}],
++        ))
++    elif method == "efe_igdm_wind":
++        agent_nodes.append(Node(
++            package='efe_igdm',
++            executable='start',
++            name='rrt_infotaxis_node',
++            output='screen',
++            prefix='xterm -hold -e',
++            parameters=[{'use_sim_time': True, 'use_wind': True}],
++        ))
++    elif method == "igdm_multiple":
++        agent_nodes.append(Node(
++            package='igdm_multiple',
++            executable='start_multi',
++            name='multi_source_node',
++            output='screen',
++            prefix='xterm -hold -e',
++            parameters=[{'use_sim_time': True}],
++        ))
++
+     namespaced_actions = [PushRosNamespace(namespace)]
+     namespaced_actions.extend(visualization_nodes)
+ 
+@@ -169,6 +234,7 @@ def launch_setup(context, *args, **kwargs):
+     other_actions.extend(PID)
+     other_actions.append(nav2_nodes)
+     other_actions.extend(TDLAS)
++    other_actions.extend(agent_nodes)
+     return [GroupAction(actions=namespaced_actions),
+             GroupAction(actions=other_actions)
+             ]

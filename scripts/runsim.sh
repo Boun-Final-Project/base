@@ -188,6 +188,55 @@ SCENE_EOF
     primary_sim="$selected_id"
 fi
 
+# ── Recommended config ───────────────────────────────────────────────────────────
+RECOMMENDED_CONFIGS="$SCRIPT_DIR/../gaden_maps/recommended_configs.yaml"
+REC_ROBOT_START=""
+REC_START_TIME=""
+REC_NOTES=""
+
+if [ -f "$RECOMMENDED_CONFIGS" ]; then
+    REC_ROBOT_START=$(python3 -c "
+import yaml
+d = yaml.safe_load(open('$RECOMMENDED_CONFIGS'))
+sc = d.get('$scenario', {}).get('$primary_sim', {})
+robot = sc.get('robot_start')
+print(f'{robot[0]},{robot[1]}' if robot else '')
+" 2>/dev/null)
+    REC_START_TIME=$(python3 -c "
+import yaml
+d = yaml.safe_load(open('$RECOMMENDED_CONFIGS'))
+sc = d.get('$scenario', {}).get('$primary_sim', {})
+t = sc.get('start_time')
+print(t if t is not None else '')
+" 2>/dev/null)
+    REC_NOTES=$(python3 -c "
+import yaml
+d = yaml.safe_load(open('$RECOMMENDED_CONFIGS'))
+sc = d.get('$scenario', {}).get('$primary_sim', {})
+print(sc.get('notes', ''))
+" 2>/dev/null)
+fi
+
+USE_REC_ROBOT_START=""
+if [ -n "$REC_ROBOT_START" ] || [ -n "$REC_START_TIME" ] || [ -n "$REC_NOTES" ]; then
+    echo ""
+    echo -e "${BOLD} Recommended config${RESET}"
+    echo -e "${DIM} ─────────────────────────────────────${RESET}"
+    [ -n "$REC_ROBOT_START" ] && echo -e "  Robot start : ${CYAN}($REC_ROBOT_START)${RESET}"
+    [ -n "$REC_START_TIME"  ] && echo -e "  Start time  : ${CYAN}${REC_START_TIME}s${RESET}"
+    [ -n "$REC_NOTES"       ] && echo -e "  Notes       : ${DIM}${REC_NOTES}${RESET}"
+
+    if [ -n "$REC_ROBOT_START" ]; then
+        echo ""
+        echo -ne "${BOLD} >>${RESET} Use recommended robot start position? ${DIM}[Y/n]${RESET}: "
+        read use_rec
+        use_rec="${use_rec:-Y}"
+        if [[ "$use_rec" =~ ^[Yy]$ ]]; then
+            USE_REC_ROBOT_START="$REC_ROBOT_START"
+        fi
+    fi
+fi
+
 # ── Step 3: Agent Selection ──────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD} Agent${RESET}"
@@ -257,9 +306,10 @@ echo -e "${DIM} ─────────────────────�
 if [ "$max_iteration" -gt 0 ]; then
     echo -e "  Available: ${GREEN}$max_iteration${RESET} iterations ${DIM}(~${max_time_s}s at ${save_delta_time}s/iter)${RESET}"
 fi
-echo -ne "${BOLD} >>${RESET} Start time in seconds ${DIM}[0]${RESET}: "
+default_start="${REC_START_TIME:-0}"
+echo -ne "${BOLD} >>${RESET} Start time in seconds ${DIM}[${default_start}]${RESET}: "
 read start_time_input
-start_time_input="${start_time_input:-0}"
+start_time_input="${start_time_input:-$default_start}"
 
 initial_iteration=$(awk "BEGIN { printf \"%d\", $start_time_input / $save_delta_time }")
 
@@ -280,9 +330,11 @@ echo -e "  Speed     ${BOLD}${speed}x${RESET}"
 echo -e "  Start     ${BOLD}iteration $initial_iteration${RESET}"
 echo ""
 
-ros2 launch test_env main_simbot_launch.py \
-    scenario:="$scenario" \
-    playback:="$playback_id" \
-    method:="$method" \
-    speed:="$speed" \
-    initial_iteration:="$initial_iteration"
+LAUNCH_ARGS="scenario:=$scenario playback:=$playback_id method:=$method speed:=$speed initial_iteration:=$initial_iteration"
+if [ -n "$USE_REC_ROBOT_START" ]; then
+    rx=$(echo "$USE_REC_ROBOT_START" | cut -d',' -f1)
+    ry=$(echo "$USE_REC_ROBOT_START" | cut -d',' -f2)
+    LAUNCH_ARGS+=" robot_x:=$rx robot_y:=$ry"
+fi
+
+ros2 launch test_env main_simbot_launch.py $LAUNCH_ARGS

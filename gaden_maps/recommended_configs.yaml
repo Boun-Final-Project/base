@@ -1,0 +1,159 @@
+# Recommended test configurations for each scenario/simulation.
+# Fields:
+#   source:      [x, y] gas source position (from sim.yaml)
+#   robot_start: [x, y] recommended robot starting position
+#   start_time:  seconds into the gas simulation to begin playback
+#   notes:       any relevant context
+
+10x6_central_obstacle:
+  sim1:
+    source: [1.45, 3.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Central obstacle blocking direct path to source."
+  sim2:
+    source: [2.5, 5.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: ""
+
+10x6_empty_room:
+  sim1:
+    source: [1.0, 4.95]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Open room, no obstacles."
+
+10x6_maze:
+  sim1:
+    source: [0.5, 2.9]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Maze layout."
+
+10x6_snake:
+  sim1:
+    source: [0.55, 3.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Snake-shaped corridor."
+
+10x6_u_left:
+  sim1:
+    source: [1.45, 3.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Source in left dead-end of U-shape. Robot starts opposite end."
+
+10x6_u_right:
+  sim1:
+    source: [1.45, 3.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Source in left dead-end, U opens to the right. Robot starts opposite end."
+
+4_rooms:
+  sim1:
+    source: [1.45, 3.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Source in first room. Robot starts far room."
+
+curved_labrinth_left:
+  sim1:
+    source: [1.45, 3.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Curved corridor, source at left end. Robot starts right end."
+
+curved_labrinth_right:
+  sim1:
+    source: [1.45, 3.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Curved corridor, source at left end, mirrored layout. Robot starts right end."
+
+many_rooms:
+  sim1:
+    source: [1.45, 3.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Multiple rooms. Source in first room, robot starts last room."
+
+ultimate:
+  sim1:
+    source: [1.45, 3.0]
+    robot_start: [9.0, 3.0]
+    start_time: 100
+    notes: "Complex layout combining multiple room types."
+
+env_a:
+  sim1:
+    source: [2.0, 4.5]
+    robot_start: [13.0, 4.75]
+    start_time: 2500
+    notes: "Larger map (~20x16m). Robot starts far side from source."
+
+env_b:
+  sim1:
+    source: [22.5, 10.5]
+    robot_start: [2.5, 14.75]
+    start_time: 200
+    notes: ""
+  sim2:
+    source: [18.0, 10.5]
+    robot_start: [2.5, 14.75]
+    start_time: 200
+    notes: ""
+  sim3:
+    source: [14.0, 12.0]
+    robot_start: [2.5, 14.75]
+    start_time: 200
+    notes: ""
+  sim4:
+    source: [6.5, 5.5]
+    robot_start: [2.5, 14.75]
+    start_time: 200
+    notes: ""
+
+env_c:
+  sim1:
+    source: [18.0, 7.5]
+    robot_start: [2.5, 4.5]
+    start_time: 20
+    notes: "Larger map (~20x10m), cell_size=0.2. Active wind."
+
+env_c_nowind:
+  sim1:
+    source: [18.0, 7.5]
+    robot_start: [2.5, 4.5]
+    start_time: 200
+    notes: "No wind variant — slower gas dispersal, longer warmup."
+
+env_c_slow:
+  sim1:
+    source: [18.0, 7.5]
+    robot_start: [2.5, 4.5]
+    start_time: 200
+    notes: "Slow wind variant — slower gas dispersal, longer warmup."
+
+Exp_C:
+  sim1:
+    source: [0.95, 8.4]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+
+MAPIRlab:
+  sim1:
+    source: [2.65, -2.95]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
+
+outdoors:
+  sim1:
+    source: [-12.55, 0.0]
+    robot_start: null   # TODO: fill in
+    start_time: null    # TODO: fill in
+    notes: ""
