@@ -54,21 +54,26 @@
 
 4_rooms:
   sim1:
-    source: [1.45, 3.0]
+    source: [2.5, 3.0]
     robot_start: [9.0, 3.0]
     start_time: 100
     notes: "Source in first room. Robot starts far room."
+  sim2:
+    source: [9.0, 6.0]
+    robot_start: null   # TODO: fill in
+    start_time: 100
+    notes: ""
 
 curved_labrinth_left:
   sim1:
-    source: [1.45, 3.0]
+    source: [0.5, 3.0]
     robot_start: [9.0, 3.0]
     start_time: 100
     notes: "Curved corridor, source at left end. Robot starts right end."
 
 curved_labrinth_right:
   sim1:
-    source: [1.45, 3.0]
+    source: [0.5, 3.0]
     robot_start: [9.0, 3.0]
     start_time: 100
     notes: "Curved corridor, source at left end, mirrored layout. Robot starts right end."
@@ -77,14 +82,19 @@ many_rooms:
   sim1:
     source: [1.45, 3.0]
     robot_start: [9.0, 3.0]
-    start_time: 100
+    start_time: 250
     notes: "Multiple rooms. Source in first room, robot starts last room."
+  sim2:
+    source: [2.0, 8.0]
+    robot_start: null   # TODO: fill in
+    start_time: 250
+    notes: ""
 
 ultimate:
   sim1:
     source: [1.45, 3.0]
     robot_start: [9.0, 3.0]
-    start_time: 100
+    start_time: 350
     notes: "Complex layout combining multiple room types."
 
 env_a:
