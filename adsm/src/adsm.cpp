@@ -49,7 +49,7 @@ Adsm::Adsm() : Node("adsm_node") {
 
     // Run parameters
     this->declare_parameter("iter_rate", 1.0);
-    this->declare_parameter("max_iter", 360);
+    this->declare_parameter("max_iter", 200);
     this->declare_parameter("source_x", 0.0);
     this->declare_parameter("source_y", 0.0);
     this->declare_parameter("source_th", 0.5);

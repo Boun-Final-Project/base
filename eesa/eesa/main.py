@@ -97,7 +97,7 @@ class EesaNode(Node):
         self.declare_parameter('source_y', 0.0)
         self.declare_parameter('find_source_th', 0.5)
         self.declare_parameter('iter_rate', 1)
-        self.declare_parameter('max_iter', 360)
+        self.declare_parameter('max_iter', 200)
         self.declare_parameter('max_stuck_time', 60.0)
         self.declare_parameter('data_path', '/tmp/eesa_results')
         self.declare_parameter('visual', True)

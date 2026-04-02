@@ -71,8 +71,8 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('number_of_particles', 1000)
         # RRT parameters - increased for better exploration in confined spaces
         self.declare_parameter('n_tn', 40)       # Increased from 20 to 40 for more tree nodes
-        self.declare_parameter('delta', 0.5)     # Reduced from 1.0 to 0.5 for finer navigation
-        self.declare_parameter('max_depth', 3)   # Increased from 2 to 3 for deeper planning horizon
+        self.declare_parameter('delta', 0.7)
+        self.declare_parameter('max_depth', 4)
         self.declare_parameter('xy_goal_tolerance', 0.3)
         self.declare_parameter('robot_radius', 0.35)
         self.declare_parameter('sigma_threshold', 0.3)
