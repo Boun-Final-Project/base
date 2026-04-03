@@ -1,6 +1,6 @@
 """
 Raycast LiDAR simulation on an OccupancyGrid.
-Uses DDA (Digital Differential Analyzer) for fast grid traversal.
+Uses batch grid sampling — all rays checked at discrete steps simultaneously.
 """
 
 import numpy as np
@@ -25,6 +25,21 @@ class LidarSim:
         self.grid = occupancy_grid
         self.ray_angles = np.linspace(0, 2 * np.pi, num_rays, endpoint=False)
 
+        res = occupancy_grid.resolution
+        # Sample points along each ray at grid resolution
+        n_steps = int(np.ceil(max_range / res))
+        # distances from origin: res, 2*res, ..., n_steps*res
+        t = np.arange(1, n_steps + 1) * res  # (S,)
+
+        cos_a = np.cos(self.ray_angles)  # (R,)
+        sin_a = np.sin(self.ray_angles)  # (R,)
+
+        # Offsets for each (ray, step): shape (R, S)
+        self._dx = cos_a[:, None] * t[None, :]  # (R, S)
+        self._dy = sin_a[:, None] * t[None, :]  # (R, S)
+        self._t = t  # (S,)
+        self._n_steps = n_steps
+
     def scan(self, position):
         """Return normalized LiDAR distances from a world-frame position.
 
@@ -38,88 +53,38 @@ class LidarSim:
         distances : np.ndarray
             Shape (num_rays,), each in [0, 1] (distance / max_range).
         """
-        distances = np.empty(self.num_rays, dtype=np.float64)
-        for i, angle in enumerate(self.ray_angles):
-            distances[i] = self._cast_ray(position, angle)
-        # Normalize to [0, 1] so all state features share a similar scale,
-        # which stabilizes neural network training (position, wind are also [0, 1]).
-        return distances / self.max_range
-
-    def _cast_ray(self, origin, angle):
-        """Cast a single ray using DDA and return distance to first obstacle.
-
-        Parameters
-        ----------
-        origin : tuple
-            (x, y) world position of the ray origin.
-        angle : float
-            Ray direction in radians.
-
-        Returns
-        -------
-        distance : float
-            Distance in meters to the nearest obstacle along this ray,
-            capped at max_range.
-        """
         res = self.grid.resolution
-        ox, oy = origin
+        gw = self.grid.grid_width
+        gh = self.grid.grid_height
+        ox, oy = position
 
-        dx = np.cos(angle)
-        dy = np.sin(angle)
+        # World coords of all sample points: (R, S)
+        wx = ox + self._dx
+        wy = oy + self._dy
 
-        # Current grid cell
-        gx = int(np.floor(ox / res))
-        gy = int(np.floor(oy / res))
+        # Convert to grid indices
+        gx = np.floor(wx / res).astype(np.int32)
+        gy = np.floor(wy / res).astype(np.int32)
 
-        # Step direction (+1 or -1) and distance to next cell boundary per axis
-        if abs(dx) < 1e-12:
-            step_x = 0
-            t_max_x = np.inf
-            t_delta_x = np.inf
-        else:
-            step_x = 1 if dx > 0 else -1
-            # Distance along ray to the next vertical grid boundary
-            if dx > 0:
-                t_max_x = ((gx + 1) * res - ox) / dx
-            else:
-                t_max_x = (gx * res - ox) / dx
-            t_delta_x = abs(res / dx)
+        # Out of bounds → treat as hit
+        oob = (gx < 0) | (gx >= gw) | (gy < 0) | (gy >= gh)
 
-        if abs(dy) < 1e-12:
-            step_y = 0
-            t_max_y = np.inf
-            t_delta_y = np.inf
-        else:
-            step_y = 1 if dy > 0 else -1
-            if dy > 0:
-                t_max_y = ((gy + 1) * res - oy) / dy
-            else:
-                t_max_y = (gy * res - oy) / dy
-            t_delta_y = abs(res / dy)
+        # Clamp for safe indexing
+        gx_safe = np.clip(gx, 0, gw - 1)
+        gy_safe = np.clip(gy, 0, gh - 1)
 
-        max_range_sq = self.max_range ** 2
-        w = self.grid.grid_width
-        h = self.grid.grid_height
+        # Batch lookup: occupied? (R, S)
+        occupied = self.grid.grid[gy_safe, gx_safe] != 0
 
-        while True:
-            # Advance to next cell boundary
-            if t_max_x < t_max_y:
-                t = t_max_x
-                gx += step_x
-                t_max_x += t_delta_x
-            else:
-                t = t_max_y
-                gy += step_y
-                t_max_y += t_delta_y
+        # A sample is a "hit" if occupied or out of bounds
+        hit = occupied | oob  # (R, S)
 
-            # Check range
-            if t * t > max_range_sq:
-                return self.max_range
+        # For each ray, find the first hit step
+        # argmax on bool returns index of first True; if no True, returns 0
+        any_hit = np.any(hit, axis=1)  # (R,)
+        first_hit_idx = np.argmax(hit, axis=1)  # (R,)
 
-            # Check bounds
-            if gx < 0 or gx >= w or gy < 0 or gy >= h:
-                return min(t, self.max_range)
+        # Distance: t[first_hit_idx] for rays that hit, else max_range
+        distances = np.where(any_hit, self._t[first_hit_idx], self.max_range)
 
-            # Check obstacle
-            if self.grid.grid[gy, gx] != 0:
-                return t
+        return distances / self.max_range
