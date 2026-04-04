@@ -33,9 +33,10 @@ class GasSourceEnv(gymnasium.Env):
 
     metadata = {"render_modes": ["human", "rgb_array"]}
 
-    def __init__(self, render_mode=None, seed=None):
+    def __init__(self, render_mode=None, seed=None, template_id=None):
         super().__init__()
         self.render_mode = render_mode
+        self._template_id = template_id  # None = random, 0-5 = fixed template
 
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(cfg.STATE_DIM,), dtype=np.float32
@@ -73,7 +74,7 @@ class GasSourceEnv(gymnasium.Env):
             self._map_gen = MapGenerator(rng=self._rng)
 
         # Generate map
-        map_data = self._map_gen.generate()
+        map_data = self._map_gen.generate(template_id=self._template_id)
         self._grid = map_data["grid"]
         self._source_pos = np.array(map_data["source_pos"], dtype=np.float64)
         self._robot_pos = np.array(map_data["robot_pos"], dtype=np.float64)

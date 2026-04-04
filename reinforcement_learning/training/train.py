@@ -1,0 +1,361 @@
+"""
+PPO training entry point for gas source localization.
+
+Usage:
+    python training/train.py --template 0 --total-timesteps 2000000
+    python -m reinforcement_learning.training.train --template 0
+"""
+
+import argparse
+import os
+import sys
+import time
+
+import numpy as np
+import torch
+
+# Support both direct execution and module execution
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
+    from reinforcement_learning import config as cfg
+    from reinforcement_learning.envs.gas_source_env import GasSourceEnv
+    from reinforcement_learning.models.actor_critic import ActorCritic
+    from reinforcement_learning.training.ppo import RolloutBuffer, compute_gae, ppo_update
+else:
+    from .. import config as cfg
+    from ..envs.gas_source_env import GasSourceEnv
+    from ..models.actor_critic import ActorCritic
+    from .ppo import RolloutBuffer, compute_gae, ppo_update
+
+
+def make_env(seed, rank, template_id=None):
+    """Create a thunk that returns a seeded GasSourceEnv."""
+    def _init():
+        env = GasSourceEnv(template_id=template_id)
+        env.reset(seed=seed + rank)
+        return env
+    return _init
+
+
+class VecEnv:
+    """Simple synchronous vectorized environment wrapper."""
+
+    def __init__(self, env_fns):
+        self.envs = [fn() for fn in env_fns]
+        self.num_envs = len(self.envs)
+
+    def reset(self):
+        obs_list, info_list = [], []
+        for env in self.envs:
+            obs, info = env.reset()
+            obs_list.append(obs)
+            info_list.append(info)
+        return np.stack(obs_list), info_list
+
+    def step(self, actions):
+        """Step all envs. Auto-resets on termination/truncation.
+
+        Parameters
+        ----------
+        actions : np.ndarray
+            Shape (num_envs, 1).
+
+        Returns
+        -------
+        obs, rewards, dones, infos
+        """
+        obs_list = []
+        reward_list = []
+        done_list = []
+        info_list = []
+
+        for i, env in enumerate(self.envs):
+            obs, reward, terminated, truncated, info = env.step(actions[i])
+            done = terminated or truncated
+
+            if done:
+                info["terminal_observation"] = obs
+                info["terminated"] = terminated  # source found
+                info["truncated"] = truncated     # timeout
+                obs, _ = env.reset()
+
+            obs_list.append(obs)
+            reward_list.append(reward)
+            done_list.append(float(done))
+            info_list.append(info)
+
+        return (
+            np.stack(obs_list),
+            np.array(reward_list, dtype=np.float32),
+            np.array(done_list, dtype=np.float32),
+            info_list,
+        )
+
+
+def train(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    # Seeding
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    # Vectorized environments
+    template_id = args.template if args.template >= 0 else None
+    env_fns = [make_env(args.seed, i, template_id=template_id) for i in range(args.num_envs)]
+    vec_env = VecEnv(env_fns)
+    obs_dim = cfg.STATE_DIM
+    action_dim = 1
+
+    # Agent and optimizer
+    agent = ActorCritic(obs_dim=obs_dim).to(device)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr, eps=1e-5)
+    print(f"Parameters: {sum(p.numel() for p in agent.parameters()):,}")
+
+    # Rollout buffer
+    buffer = RolloutBuffer(
+        args.rollout_length, args.num_envs, obs_dim, action_dim, device
+    )
+
+    # Tracking
+    num_updates = args.total_timesteps // (args.rollout_length * args.num_envs)
+    global_step = 0
+    episode_returns = []
+    episode_lengths = []
+    episode_successes = []  # True if source found, False if timeout
+    ep_return_running = np.zeros(args.num_envs)
+    ep_length_running = np.zeros(args.num_envs, dtype=int)
+
+    # Per-update metrics for plotting
+    metrics = {
+        "steps": [],
+        "mean_return": [],
+        "mean_length": [],
+        "success_rate": [],
+        "policy_loss": [],
+        "value_loss": [],
+        "entropy": [],
+        "approx_kl": [],
+        "clipfrac": [],
+        "reward_per_step": [],
+        "sps": [],
+    }
+
+    # Checkpoint directory
+    ckpt_dir = os.path.join(args.output_dir, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    print(f"\nTraining for {args.total_timesteps:,} timesteps "
+          f"({num_updates} updates, {args.rollout_length * args.num_envs} steps/update)")
+    print(f"Envs: {args.num_envs}, Rollout: {args.rollout_length}, "
+          f"Minibatches: {args.num_minibatches}, Epochs: {args.update_epochs}\n")
+
+    obs, _ = vec_env.reset()
+    start_time = time.time()
+
+    for update in range(1, num_updates + 1):
+        # Learning rate annealing
+        if args.anneal_lr:
+            frac = 1.0 - (update - 1) / num_updates
+            lr = frac * args.lr
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
+
+        # === Rollout ===
+        buffer.reset()
+        for step in range(args.rollout_length):
+            global_step += args.num_envs
+
+            obs_t = torch.tensor(obs, dtype=torch.float32, device=device)
+            with torch.no_grad():
+                action, log_prob, _, value = agent.get_action_and_value(obs_t)
+
+            action_np = action.cpu().numpy()  # (num_envs, 1)
+            next_obs, rewards, dones, infos = vec_env.step(action_np)
+
+            buffer.insert(
+                obs_t, action, log_prob,
+                torch.tensor(rewards, device=device),
+                torch.tensor(dones, device=device),
+                value.squeeze(-1),
+            )
+
+            # Track episode stats
+            ep_return_running += rewards
+            ep_length_running += 1
+            for i in range(args.num_envs):
+                if dones[i]:
+                    episode_returns.append(ep_return_running[i])
+                    episode_lengths.append(ep_length_running[i])
+                    episode_successes.append(infos[i].get("terminated", False))
+                    ep_return_running[i] = 0.0
+                    ep_length_running[i] = 0
+
+            obs = next_obs
+
+        # Bootstrap value for GAE
+        with torch.no_grad():
+            next_obs_t = torch.tensor(obs, dtype=torch.float32, device=device)
+            next_value = agent.get_value(next_obs_t).squeeze(-1)
+
+        advantages, returns = compute_gae(
+            buffer.rewards, buffer.values, buffer.dones,
+            next_value, args.gamma, args.gae_lambda,
+        )
+
+        # === PPO Update ===
+        stats = ppo_update(
+            agent, optimizer, buffer, advantages, returns,
+            args.clip_epsilon, args.entropy_coeff, args.value_loss_coeff,
+            args.max_grad_norm, args.update_epochs, args.num_minibatches,
+        )
+
+        # === Logging ===
+        elapsed = time.time() - start_time
+        sps = global_step / elapsed
+
+        n_recent = 50
+        if episode_returns:
+            recent_ret = episode_returns[-min(n_recent, len(episode_returns)):]
+            recent_len = episode_lengths[-min(n_recent, len(episode_lengths)):]
+            recent_suc = episode_successes[-min(n_recent, len(episode_successes)):]
+            mean_ret = np.mean(recent_ret)
+            mean_len = np.mean(recent_len)
+            success_rate = np.mean(recent_suc)
+        else:
+            mean_ret = mean_len = success_rate = 0.0
+
+        # Record metrics every update
+        metrics["steps"].append(global_step)
+        metrics["mean_return"].append(mean_ret)
+        metrics["mean_length"].append(mean_len)
+        metrics["success_rate"].append(success_rate)
+        metrics["policy_loss"].append(stats["policy_loss"])
+        metrics["value_loss"].append(stats["value_loss"])
+        metrics["entropy"].append(stats["entropy"])
+        metrics["approx_kl"].append(stats["approx_kl"])
+        metrics["clipfrac"].append(stats["clipfrac"])
+        metrics["reward_per_step"].append(mean_ret / max(mean_len, 1))
+        metrics["sps"].append(sps)
+
+        if update % args.log_interval == 0 or update == 1:
+            print(
+                f"Update {update:4d}/{num_updates} | "
+                f"Step {global_step:>9,} | "
+                f"SPS {sps:5.0f} | "
+                f"Return {mean_ret:7.1f} | "
+                f"EpLen {mean_len:5.0f} | "
+                f"Succ {success_rate:4.0%} | "
+                f"PgLoss {stats['policy_loss']:7.4f} | "
+                f"VLoss {stats['value_loss']:8.2f} | "
+                f"Ent {stats['entropy']:6.3f} | "
+                f"KL {stats['approx_kl']:.4f} | "
+                f"Clip {stats['clipfrac']:.3f}"
+            )
+
+        # === Checkpoint ===
+        if update % args.save_interval == 0 or update == num_updates:
+            path = os.path.join(ckpt_dir, f"agent_{global_step}.pt")
+            torch.save({
+                "model_state_dict": agent.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "global_step": global_step,
+                "update": update,
+            }, path)
+            print(f"  Saved checkpoint: {path}")
+
+    total_time = time.time() - start_time
+    print(f"\nTraining complete. {global_step:,} steps in {total_time:.0f}s "
+          f"({global_step / total_time:.0f} SPS)")
+    if episode_returns:
+        print(f"Final avg return (last 50): {np.mean(episode_returns[-50:]):.1f}")
+        print(f"Final avg length (last 50): {np.mean(episode_lengths[-50:]):.0f}")
+        print(f"Final success rate (last 50): "
+              f"{np.mean(episode_successes[-50:]):.0%}")
+
+    # Save metrics and plot
+    metrics_path = os.path.join(args.output_dir, "metrics.npz")
+    np.savez(metrics_path, **{k: np.array(v) for k, v in metrics.items()})
+    print(f"Metrics saved to {metrics_path}")
+
+    plot_path = os.path.join(args.output_dir, "training_curves.png")
+    plot_training_curves(metrics, plot_path)
+
+
+def plot_training_curves(metrics, save_path):
+    """Plot training metrics and save to file."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    steps = np.array(metrics["steps"])
+
+    fig, axes = plt.subplots(3, 3, figsize=(18, 12))
+
+    panels = [
+        ("mean_return",    "Episode Return",     None),
+        ("mean_length",    "Episode Length",      None),
+        ("success_rate",   "Success Rate",        (0, 1)),
+        ("reward_per_step","Reward / Step",       None),
+        ("policy_loss",    "Policy Loss",         None),
+        ("value_loss",     "Value Loss",          None),
+        ("entropy",        "Entropy",             None),
+        ("approx_kl",      "Approx KL",           None),
+        ("clipfrac",       "Clip Fraction",       (0, 1)),
+    ]
+
+    for ax, (key, title, ylim) in zip(axes.flatten(), panels):
+        y = np.array(metrics[key])
+        ax.plot(steps, y, linewidth=0.8, alpha=0.4)
+        # Smoothed line (rolling mean, window=max(1, len/50))
+        w = max(1, len(y) // 50)
+        if w > 1 and len(y) > w:
+            smooth = np.convolve(y, np.ones(w) / w, mode="valid")
+            ax.plot(steps[w - 1:], smooth, linewidth=2)
+        ax.set_title(title)
+        ax.set_xlabel("Timesteps")
+        ax.grid(True, alpha=0.3)
+        if ylim:
+            ax.set_ylim(ylim)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"Training curves saved to {save_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="PPO training for gas source localization")
+
+    # Environment
+    parser.add_argument("--num-envs", type=int, default=cfg.NUM_ENVS)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--template", type=int, default=-1,
+                        help="Map template ID (0-5). -1 = random (default)")
+
+    # PPO
+    parser.add_argument("--total-timesteps", type=int, default=cfg.TOTAL_TIMESTEPS)
+    parser.add_argument("--rollout-length", type=int, default=cfg.ROLLOUT_LENGTH)
+    parser.add_argument("--num-minibatches", type=int, default=cfg.NUM_MINIBATCHES)
+    parser.add_argument("--update-epochs", type=int, default=cfg.UPDATE_EPOCHS)
+    parser.add_argument("--lr", type=float, default=cfg.LEARNING_RATE)
+    parser.add_argument("--gamma", type=float, default=cfg.GAMMA)
+    parser.add_argument("--gae-lambda", type=float, default=cfg.GAE_LAMBDA)
+    parser.add_argument("--clip-epsilon", type=float, default=cfg.CLIP_EPSILON)
+    parser.add_argument("--entropy-coeff", type=float, default=cfg.ENTROPY_COEFF)
+    parser.add_argument("--value-loss-coeff", type=float, default=cfg.VALUE_LOSS_COEFF)
+    parser.add_argument("--max-grad-norm", type=float, default=cfg.MAX_GRAD_NORM)
+    parser.add_argument("--anneal-lr", action="store_true", default=True)
+
+    # Logging & output
+    parser.add_argument("--output-dir", type=str, default="runs/ppo_gsl")
+    parser.add_argument("--log-interval", type=int, default=1)
+    parser.add_argument("--save-interval", type=int, default=50)
+
+    args = parser.parse_args()
+    train(args)
+
+
+if __name__ == "__main__":
+    main()

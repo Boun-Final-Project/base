@@ -44,8 +44,8 @@ WIND_DISPERSION_FACTOR = 2.0    # how much wind shifts concentration peak
 # =============================================================================
 # Gas dispersion (IGDM)
 # =============================================================================
-SIGMA_M_BASE = 1.0              # base dispersion parameter
-DISPERSION_RATE = 3.0           # temporal growth rate (alpha)
+SIGMA_M_BASE = 1.5              # dispersion parameter (matches ali_igdm)
+DISPERSION_RATE = 0.0           # constant sigma (matches ali_igdm)
 COARSE_RESOLUTION = 0.5         # coarse grid for Dijkstra
 SENSOR_ALPHA = 0.1              # proportional noise coefficient
 SENSOR_SIGMA_ENV = 0.1          # environmental noise std
