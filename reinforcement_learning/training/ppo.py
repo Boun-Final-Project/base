@@ -7,6 +7,35 @@ import torch
 import torch.nn as nn
 
 
+class RunningMeanStd:
+    """Tracks running mean and variance using Welford's algorithm."""
+
+    def __init__(self, epsilon=1e-4):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = epsilon
+
+    def update(self, batch):
+        """Update with a batch of values (numpy array)."""
+        batch = batch.ravel()
+        batch_mean = batch.mean()
+        batch_var = batch.var()
+        batch_count = len(batch)
+
+        delta = batch_mean - self.mean
+        total = self.count + batch_count
+        self.mean += delta * batch_count / total
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta ** 2 * self.count * batch_count / total
+        self.var = m2 / total
+        self.count = total
+
+    @property
+    def std(self):
+        return max(self.var ** 0.5, 1e-6)
+
+
 def compute_gae(rewards, values, dones, next_value, gamma, gae_lambda):
     """Compute Generalized Advantage Estimation.
 
@@ -115,7 +144,8 @@ class RolloutBuffer:
 
 def ppo_update(agent, optimizer, buffer, advantages, returns,
                clip_epsilon, entropy_coeff, value_loss_coeff,
-               max_grad_norm, update_epochs, num_minibatches):
+               max_grad_norm, update_epochs, num_minibatches,
+               target_kl=None):
     """Run PPO update epochs on the collected rollout.
 
     Parameters
@@ -149,10 +179,16 @@ def ppo_update(agent, optimizer, buffer, advantages, returns,
     total_approx_kl = 0.0
     n_updates = 0
 
+    early_stopped = False
     for epoch in range(update_epochs):
+        epoch_kl = 0.0
+        epoch_batches = 0
         for mb in buffer.get_batches(advantages, returns, num_minibatches):
-            # Clamp actions away from 0 and 1 for numerical stability of Beta log_prob
-            mb_actions = mb["actions"].clamp(1e-6, 1.0 - 1e-6)
+            # Clamp actions for numerical stability (Beta needs [eps, 1-eps])
+            if mb["actions"].shape[-1] == 1:
+                mb_actions = mb["actions"].clamp(1e-6, 1.0 - 1e-6)
+            else:
+                mb_actions = mb["actions"]
 
             _, new_log_prob, entropy, new_value = agent.get_action_and_value(
                 mb["obs"], action=mb_actions
@@ -197,6 +233,14 @@ def ppo_update(agent, optimizer, buffer, advantages, returns,
             total_clipfrac += clipfrac.item()
             total_approx_kl += approx_kl.item()
             n_updates += 1
+            epoch_kl += approx_kl.item()
+            epoch_batches += 1
+
+        # KL early stopping: if mean KL over this epoch exceeds threshold, stop
+        if target_kl is not None and epoch_batches > 0:
+            if epoch_kl / epoch_batches > target_kl:
+                early_stopped = True
+                break
 
     return {
         "policy_loss": total_pg_loss / n_updates,

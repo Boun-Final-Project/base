@@ -24,8 +24,10 @@ class MapGenerator:
         "_generate_multi_room",
     ]
 
-    def __init__(self, rng=None):
+    def __init__(self, rng=None, width_range=None, height_range=None):
         self.rng = rng or np.random.default_rng()
+        self.width_range = width_range or cfg.ROOM_WIDTH_RANGE
+        self.height_range = height_range or cfg.ROOM_HEIGHT_RANGE
 
     def generate(self, template_id=None):
         """Generate a random map.
@@ -62,14 +64,14 @@ class MapGenerator:
     # ------------------------------------------------------------------
 
     def _generate_empty(self):
-        w = self.rng.uniform(*cfg.ROOM_WIDTH_RANGE)
-        h = self.rng.uniform(*cfg.ROOM_HEIGHT_RANGE)
+        w = self.rng.uniform(*self.width_range)
+        h = self.rng.uniform(*self.height_range)
         grid = self._make_grid_with_walls(w, h)
         return grid
 
     def _generate_single_wall(self):
-        w = self.rng.uniform(10.0, 20.0)
-        h = self.rng.uniform(6.0, 15.0)
+        w = self.rng.uniform(max(10.0, self.width_range[0]), self.width_range[1])
+        h = self.rng.uniform(*self.height_range)
         grid = self._make_grid_with_walls(w, h)
 
         t = cfg.WALL_THICKNESS
@@ -92,8 +94,8 @@ class MapGenerator:
         return grid
 
     def _generate_u_shape(self):
-        w = self.rng.uniform(10.0, 20.0)
-        h = self.rng.uniform(8.0, 15.0)
+        w = self.rng.uniform(max(10.0, self.width_range[0]), self.width_range[1])
+        h = self.rng.uniform(max(8.0, self.height_range[0]), self.height_range[1])
         grid = self._make_grid_with_walls(w, h)
 
         t = cfg.WALL_THICKNESS
@@ -172,8 +174,8 @@ class MapGenerator:
         return grid
 
     def _generate_three_walls(self):
-        w = self.rng.uniform(12.0, 22.0)
-        h = self.rng.uniform(8.0, 16.0)
+        w = self.rng.uniform(max(12.0, self.width_range[0]), max(12.0, self.width_range[1]))
+        h = self.rng.uniform(max(8.0, self.height_range[0]), max(8.0, self.height_range[1]))
         grid = self._make_grid_with_walls(w, h)
 
         t = cfg.WALL_THICKNESS
@@ -217,8 +219,8 @@ class MapGenerator:
         return grid
 
     def _generate_complex_maze(self):
-        w = self.rng.uniform(12.0, 22.0)
-        h = self.rng.uniform(8.0, 16.0)
+        w = self.rng.uniform(max(12.0, self.width_range[0]), max(12.0, self.width_range[1]))
+        h = self.rng.uniform(max(8.0, self.height_range[0]), max(8.0, self.height_range[1]))
         grid = self._make_grid_with_walls(w, h)
 
         t = cfg.WALL_THICKNESS
@@ -293,7 +295,7 @@ class MapGenerator:
 
     def _generate_multi_room(self):
         # Near-square footprint
-        base = self.rng.uniform(12.0, 20.0)
+        base = self.rng.uniform(max(12.0, self.width_range[0]), max(12.0, self.width_range[1]))
         aspect = self.rng.uniform(0.8, 1.2)
         w = base
         h = base * aspect

@@ -47,8 +47,13 @@ class IGDMModel:
         else:
             self.coarse_grid = None
 
-    def _create_coarse_map(self, fine_grid):
-        """Downsample fine grid to coarse grid using max pooling."""
+    def _create_coarse_map(self, fine_grid, occupancy_threshold=0.5):
+        """Downsample fine grid to coarse grid using majority voting.
+
+        A coarse cell is marked occupied only if more than occupancy_threshold
+        fraction of its fine cells are walls. This prevents thin boundary walls
+        from blocking gas dispersion through cells that are mostly free space.
+        """
         ratio = self.coarse_res / self.high_res
         coarse = np.zeros((self.coarse_rows, self.coarse_cols), dtype=int)
 
@@ -60,7 +65,7 @@ class IGDMModel:
                 c_end = int((c + 1) * ratio)
 
                 chunk = fine_grid[r_start:r_end, c_start:c_end]
-                if np.any(chunk == 1):
+                if chunk.size > 0 and np.mean(chunk) > occupancy_threshold:
                     coarse[r, c] = 1
 
         return coarse
@@ -72,6 +77,41 @@ class IGDMModel:
         c = max(0, min(c, self.coarse_cols - 1))
         r = max(0, min(r, self.coarse_rows - 1))
         return r, c
+
+    def snap_to_free_cell(self, x, y):
+        """Snap world position to nearest free cell on the coarse grid.
+
+        If (x, y) already maps to a free cell, returns it unchanged.
+        Otherwise searches outward (BFS) for the nearest free cell and
+        returns its center in world coordinates.
+        """
+        if self.coarse_grid is None:
+            return x, y
+
+        r, c = self._world_to_coarse_idx(x, y)
+        if self.coarse_grid[r, c] == 0:
+            return x, y
+
+        # BFS outward from (r, c) to find nearest free cell
+        from collections import deque
+        visited = {(r, c)}
+        queue = deque([(r, c)])
+        while queue:
+            cr, cc = queue.popleft()
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1),
+                           (-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                nr, nc = cr + dr, cc + dc
+                if (nr, nc) in visited:
+                    continue
+                if 0 <= nr < self.coarse_rows and 0 <= nc < self.coarse_cols:
+                    visited.add((nr, nc))
+                    if self.coarse_grid[nr, nc] == 0:
+                        # Return center of this free cell
+                        return (nc + 0.5) * self.coarse_res, (nr + 0.5) * self.coarse_res
+                    queue.append((nr, nc))
+
+        # Fallback (shouldn't happen — no free cells at all)
+        return x, y
 
     def _dijkstra_full_coarse(self, start_idx):
         """Full Dijkstra on the coarse grid, returns 2D distance array in meters."""
@@ -153,13 +193,12 @@ class IGDMModel:
         """
         # Apply wind bias: shift effective source downwind
         if wind_offset is not None:
-            eff_source = (source_location[0] + wind_offset[0],
-                          source_location[1] + wind_offset[1])
-            # Clamp to map bounds
-            eff_source = (
-                max(0, min(eff_source[0], self.width_m - self.coarse_res)),
-                max(0, min(eff_source[1], self.height_m - self.coarse_res))
-            )
+            eff_x = max(0, min(source_location[0] + wind_offset[0],
+                               self.width_m - self.coarse_res))
+            eff_y = max(0, min(source_location[1] + wind_offset[1],
+                               self.height_m - self.coarse_res))
+            # Snap to nearest free cell if wind pushed source into a wall
+            eff_source = self.snap_to_free_cell(eff_x, eff_y)
         else:
             eff_source = source_location
 

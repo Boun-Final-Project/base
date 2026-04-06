@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -20,13 +21,13 @@ if __package__ is None or __package__ == "":
         os.path.abspath(__file__)))))
     from reinforcement_learning import config as cfg
     from reinforcement_learning.envs.gas_source_env import GasSourceEnv
-    from reinforcement_learning.models.actor_critic import ActorCritic
-    from reinforcement_learning.training.ppo import RolloutBuffer, compute_gae, ppo_update
+    from reinforcement_learning.models.actor_critic import ActorCritic, ActorCriticModular, ActorCriticDualBackbone
+    from reinforcement_learning.training.ppo import RolloutBuffer, RunningMeanStd, compute_gae, ppo_update
 else:
     from .. import config as cfg
     from ..envs.gas_source_env import GasSourceEnv
-    from ..models.actor_critic import ActorCritic
-    from .ppo import RolloutBuffer, compute_gae, ppo_update
+    from ..models.actor_critic import ActorCritic, ActorCriticModular, ActorCriticDualBackbone
+    from .ppo import RolloutBuffer, RunningMeanStd, compute_gae, ppo_update
 
 
 def make_env(seed, rank, template_id=None):
@@ -93,6 +94,32 @@ class VecEnv:
         )
 
 
+def get_curriculum_ranges(progress):
+    """Compute room size ranges based on training progress (0→1).
+
+    Linearly interpolates from small rooms to full range over
+    CURRICULUM_FRACTION of training, then stays at full range.
+    """
+    t = min(progress / cfg.CURRICULUM_FRACTION, 1.0)
+    w_lo = cfg.CURRICULUM_WIDTH_START[0] + t * (cfg.ROOM_WIDTH_RANGE[0] - cfg.CURRICULUM_WIDTH_START[0])
+    w_hi = cfg.CURRICULUM_WIDTH_START[1] + t * (cfg.ROOM_WIDTH_RANGE[1] - cfg.CURRICULUM_WIDTH_START[1])
+    h_lo = cfg.CURRICULUM_HEIGHT_START[0] + t * (cfg.ROOM_HEIGHT_RANGE[0] - cfg.CURRICULUM_HEIGHT_START[0])
+    h_hi = cfg.CURRICULUM_HEIGHT_START[1] + t * (cfg.ROOM_HEIGHT_RANGE[1] - cfg.CURRICULUM_HEIGHT_START[1])
+    return (w_lo, w_hi), (h_lo, h_hi)
+
+
+def get_template_curriculum(progress):
+    """Return max template index based on training progress (0→1).
+
+    Uses TEMPLATE_CURRICULUM_STAGES from config: list of (threshold, max_id).
+    """
+    max_id = cfg.TEMPLATE_CURRICULUM_STAGES[0][1]
+    for threshold, tid in cfg.TEMPLATE_CURRICULUM_STAGES:
+        if progress >= threshold:
+            max_id = tid
+    return max_id
+
+
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -106,21 +133,44 @@ def train(args):
     env_fns = [make_env(args.seed, i, template_id=template_id) for i in range(args.num_envs)]
     vec_env = VecEnv(env_fns)
     obs_dim = cfg.STATE_DIM
-    action_dim = 1
+    action_dim = 2 if args.arch == "dual" else 1
 
     # Agent and optimizer
-    agent = ActorCritic(obs_dim=obs_dim).to(device)
+    if args.arch == "dual":
+        agent = ActorCriticDualBackbone(obs_dim=obs_dim).to(device)
+    elif args.arch == "modular":
+        agent = ActorCriticModular(obs_dim=obs_dim).to(device)
+    else:
+        agent = ActorCritic(obs_dim=obs_dim).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr, eps=1e-5)
     print(f"Parameters: {sum(p.numel() for p in agent.parameters()):,}")
+
+    # Resume from checkpoint
+    start_update = 0
+    global_step = 0
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        agent.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        # Optionally reset learning rate to initial value
+        if args.reset_lr:
+            for pg in optimizer.param_groups:
+                pg["lr"] = args.lr
+            print(f"  Learning rate reset to {args.lr}")
+        global_step = ckpt["global_step"]
+        start_update = ckpt["update"]
+        print(f"Resumed from {args.resume} (step {global_step:,}, update {start_update})")
 
     # Rollout buffer
     buffer = RolloutBuffer(
         args.rollout_length, args.num_envs, obs_dim, action_dim, device
     )
 
+    # Reward normalization (divide by running std)
+    reward_rms = RunningMeanStd()
+
     # Tracking
     num_updates = args.total_timesteps // (args.rollout_length * args.num_envs)
-    global_step = 0
     episode_returns = []
     episode_lengths = []
     episode_successes = []  # True if source found, False if timeout
@@ -149,18 +199,68 @@ def train(args):
     print(f"\nTraining for {args.total_timesteps:,} timesteps "
           f"({num_updates} updates, {args.rollout_length * args.num_envs} steps/update)")
     print(f"Envs: {args.num_envs}, Rollout: {args.rollout_length}, "
-          f"Minibatches: {args.num_minibatches}, Epochs: {args.update_epochs}\n")
+          f"Minibatches: {args.num_minibatches}, Epochs: {args.update_epochs}")
+    if args.curriculum:
+        print(f"Curriculum: rooms {cfg.CURRICULUM_WIDTH_START}x{cfg.CURRICULUM_HEIGHT_START} "
+              f"→ {cfg.ROOM_WIDTH_RANGE}x{cfg.ROOM_HEIGHT_RANGE} "
+              f"over {cfg.CURRICULUM_FRACTION:.0%} of training")
+        print(f"Curriculum: templates unlock at "
+              + ", ".join(f"{int(t*100)}%→0-{i}" for t, i in cfg.TEMPLATE_CURRICULUM_STAGES))
+    print()
+
+    # Save config snapshot: cfg constants with CLI overrides applied
+    # Map CLI arg names to their corresponding cfg constant names
+    cli_to_cfg = {
+        "total_timesteps": "TOTAL_TIMESTEPS", "lr": "LEARNING_RATE",
+        "gamma": "GAMMA", "gae_lambda": "GAE_LAMBDA",
+        "clip_epsilon": "CLIP_EPSILON", "entropy_coeff": "ENTROPY_COEFF",
+        "value_loss_coeff": "VALUE_LOSS_COEFF", "max_grad_norm": "MAX_GRAD_NORM",
+        "num_envs": "NUM_ENVS", "rollout_length": "ROLLOUT_LENGTH",
+        "num_minibatches": "NUM_MINIBATCHES", "update_epochs": "UPDATE_EPOCHS",
+    }
+    config_snapshot = {}
+    for k in sorted(dir(cfg)):
+        if k.isupper():
+            v = getattr(cfg, k)
+            if isinstance(v, (int, float, str, bool, list, tuple)):
+                config_snapshot[k] = v
+    # Override with actual CLI values used
+    args_dict = vars(args)
+    for cli_name, cfg_name in cli_to_cfg.items():
+        if cli_name in args_dict:
+            config_snapshot[cfg_name] = args_dict[cli_name]
+    # Add CLI-only args (no cfg equivalent)
+    for k in ["seed", "template", "arch", "curriculum", "anneal_lr", "anneal_start", "target_kl", "output_dir"]:
+        if k in args_dict:
+            config_snapshot[k] = args_dict[k]
+    config_path = os.path.join(args.output_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(config_snapshot, f, indent=2)
+    print(f"Config saved to {config_path}")
 
     obs, _ = vec_env.reset()
     start_time = time.time()
 
-    for update in range(1, num_updates + 1):
-        # Learning rate annealing
+    for update in range(start_update + 1, num_updates + 1):
+        # Learning rate annealing (only after anneal_start fraction of training)
         if args.anneal_lr:
-            frac = 1.0 - (update - 1) / num_updates
-            lr = frac * args.lr
+            progress = (update - 1) / num_updates
+            if progress < args.anneal_start:
+                lr = args.lr
+            else:
+                frac = 1.0 - (progress - args.anneal_start) / (1.0 - args.anneal_start)
+                lr = frac * args.lr
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
+
+        # Curriculum: update room size ranges and template availability
+        if args.curriculum:
+            progress = global_step / args.total_timesteps
+            w_range, h_range = get_curriculum_ranges(progress)
+            max_template = get_template_curriculum(progress)
+            for env in vec_env.envs:
+                env.set_room_size_range(w_range, h_range)
+                env.set_max_template(max_template)
 
         # === Rollout ===
         buffer.reset()
@@ -174,9 +274,13 @@ def train(args):
             action_np = action.cpu().numpy()  # (num_envs, 1)
             next_obs, rewards, dones, infos = vec_env.step(action_np)
 
+            # Normalize rewards by running std
+            reward_rms.update(rewards)
+            normalized_rewards = rewards / reward_rms.std
+
             buffer.insert(
                 obs_t, action, log_prob,
-                torch.tensor(rewards, device=device),
+                torch.tensor(normalized_rewards, device=device),
                 torch.tensor(dones, device=device),
                 value.squeeze(-1),
             )
@@ -209,6 +313,7 @@ def train(args):
             agent, optimizer, buffer, advantages, returns,
             args.clip_epsilon, args.entropy_coeff, args.value_loss_coeff,
             args.max_grad_norm, args.update_epochs, args.num_minibatches,
+            target_kl=args.target_kl,
         )
 
         # === Logging ===
@@ -333,6 +438,10 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--template", type=int, default=-1,
                         help="Map template ID (0-5). -1 = random (default)")
+    parser.add_argument("--arch", type=str, default="mlp",
+                        choices=["mlp", "modular", "dual"],
+                        help="Network: 'mlp' (flat), 'modular' (GRU+Conv shared fusion), "
+                             "'dual' (GRU+Conv separate actor/critic fusion)")
 
     # PPO
     parser.add_argument("--total-timesteps", type=int, default=cfg.TOTAL_TIMESTEPS)
@@ -346,7 +455,19 @@ def main():
     parser.add_argument("--entropy-coeff", type=float, default=cfg.ENTROPY_COEFF)
     parser.add_argument("--value-loss-coeff", type=float, default=cfg.VALUE_LOSS_COEFF)
     parser.add_argument("--max-grad-norm", type=float, default=cfg.MAX_GRAD_NORM)
-    parser.add_argument("--anneal-lr", action="store_true", default=True)
+    parser.add_argument("--anneal-lr", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--anneal-start", type=float, default=0.5,
+                        help="Fraction of training before LR annealing begins (default: 0.5)")
+    parser.add_argument("--target-kl", type=float, default=None,
+                        help="KL early stopping threshold (e.g. 0.03). None = disabled")
+    parser.add_argument("--curriculum", action="store_true", default=False,
+                        help="Enable room size curriculum (small → large)")
+
+    # Resume
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint .pt file to resume training from")
+    parser.add_argument("--reset-lr", action="store_true", default=False,
+                        help="Reset learning rate to initial value when resuming")
 
     # Logging & output
     parser.add_argument("--output-dir", type=str, default="runs/ppo_gsl")

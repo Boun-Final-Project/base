@@ -6,12 +6,12 @@ Single source of truth — all other modules import from here.
 # =============================================================================
 # Environment
 # =============================================================================
-MAX_STEPS = 300
+MAX_STEPS = 600
 STEP_SIZE = 0.5                 # meters per action
 GRID_RESOLUTION = 0.1           # meters (occupancy grid cell size)
 VISITED_CELL_RESOLUTION = 0.5   # meters (for new-cell reward tracking)
 D_SUCCESS = 0.5                 # meters, source-found threshold
-ROBOT_RADIUS = 0.2              # meters, collision checking radius
+ROBOT_RADIUS = 0.25             # meters, collision checking radius (matches GADEN planners)
 MIN_SOURCE_ROBOT_DIST = 3.0     # meters, minimum initial separation
 
 # LiDAR
@@ -20,19 +20,20 @@ LIDAR_MAX_RANGE = 3.0           # meters
 
 # Gas sensor
 GAS_HISTORY_LENGTH = 10
+GAS_FEATURES_PER_STEP = 3           # (rel_x, rel_y, binary) per timestep
 
 # State dimensions (derived)
-STATE_DIM = GAS_HISTORY_LENGTH + LIDAR_NUM_RAYS + 2 + 2 + 1  # 39
+STATE_DIM = GAS_HISTORY_LENGTH * GAS_FEATURES_PER_STEP + LIDAR_NUM_RAYS + 2 + 2 + 1  # 59
 
 # =============================================================================
 # Rewards
 # =============================================================================
-R_SUCCESS = 100.0
-R_DETECTION = 1.0
+R_SUCCESS = 200.0
+R_DETECTION = 2.0
 R_NEW_CELL = 0.2
 R_STEP = -0.1
 R_COLLISION = -2.0
-R_MAX_STEPS = -10.0
+R_MAX_STEPS = -20.0
 
 # =============================================================================
 # Wind
@@ -57,8 +58,21 @@ SOURCE_RELEASE_RATE = 1.0       # Q for gas source
 # =============================================================================
 WALL_THICKNESS = 0.2            # meters
 MIN_GAP_SIZE = 0.8              # meters, minimum doorway/gap width
-ROOM_WIDTH_RANGE = (8.0, 20.0)  # meters
-ROOM_HEIGHT_RANGE = (6.0, 15.0) # meters
+ROOM_WIDTH_RANGE = (8.0, 20.0)  # meters (full range)
+ROOM_HEIGHT_RANGE = (6.0, 15.0) # meters (full range)
+
+# Curriculum: room size grows linearly from small to full range
+CURRICULUM_WIDTH_START = (8.0, 10.0)    # small rooms at start
+CURRICULUM_HEIGHT_START = (6.0, 8.0)
+CURRICULUM_FRACTION = 0.5               # fraction of training to reach full size
+
+# Curriculum: template unlock schedule (progress → max template index)
+# Templates: 0=empty, 1=single_wall, 2=u_shape, 3=three_walls, 4=complex_maze, 5=multi_room
+TEMPLATE_CURRICULUM_STAGES = [
+    (0.00, 1),   # 0-25%:  templates 0-1 (open rooms, learn gas-following)
+    (0.25, 3),   # 25-50%: templates 0-3 (obstacles, learn wall navigation)
+    (0.50, 5),   # 50%+:   templates 0-5 (full set, corridors and multi-room)
+]
 
 # =============================================================================
 # PPO
@@ -67,19 +81,24 @@ LEARNING_RATE = 3e-4
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_EPSILON = 0.2
-ENTROPY_COEFF = 0.01
+ENTROPY_COEFF = 0.02
 VALUE_LOSS_COEFF = 0.5
 MAX_GRAD_NORM = 0.5
 NUM_ENVS = 8
 ROLLOUT_LENGTH = 2048
 NUM_MINIBATCHES = 32
 UPDATE_EPOCHS = 10
-TOTAL_TIMESTEPS = 10_000_000
+TOTAL_TIMESTEPS = 100_000_000
 
 # =============================================================================
-# Network
+# Network (shared by both architectures)
 # =============================================================================
 HIDDEN_DIM = 256
 BACKBONE_LAYERS = 2
 ACTOR_HEAD_DIM = 128
 CRITIC_HEAD_DIM = 128
+
+# Modular architecture
+GAS_GRU_HIDDEN = 64
+LIDAR_CONV_CHANNELS = 2
+LIDAR_CONV_KERNEL = 5

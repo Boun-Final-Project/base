@@ -22,12 +22,15 @@ from .sensor_model import BinarySensorModel
 class GasSourceEnv(gymnasium.Env):
     """Gas source localization environment.
 
-    Observation (39-dim):
-        [gas_history (10)] + [lidar (24)] + [pos_x, pos_y] + [wind_speed, wind_dir] + [time]
+    Observation (59-dim):
+        [gas_history (30)] + [lidar (24)] + [pos_x, pos_y] + [wind_speed, wind_dir] + [time]
+        Gas history: 10 timesteps x 3 features (rel_x, rel_y, binary).
+        Positions are relative to current robot position, normalized to [0, 1].
         All values normalized to [0, 1].
 
-    Action (1-dim):
-        Scalar in [0, 1], scaled internally to angle [0, 2*pi).
+    Action:
+        1-dim scalar in [0, 1] (Beta) → angle = action * 2π, OR
+        2-dim (cos θ, sin θ) (Gaussian) → angle = atan2(sin, cos).
         Robot moves STEP_SIZE meters in that direction.
     """
 
@@ -37,6 +40,7 @@ class GasSourceEnv(gymnasium.Env):
         super().__init__()
         self.render_mode = render_mode
         self._template_id = template_id  # None = random, 0-5 = fixed template
+        self._max_template_id = None     # None = all templates, set by curriculum
 
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(cfg.STATE_DIM,), dtype=np.float32
@@ -68,13 +72,25 @@ class GasSourceEnv(gymnasium.Env):
         self._wind_offset = None
         self._dijkstra_from_source = None
 
+    def set_room_size_range(self, width_range, height_range):
+        """Update room size range (for curriculum learning)."""
+        self._map_gen.width_range = width_range
+        self._map_gen.height_range = height_range
+
+    def set_max_template(self, max_template_id):
+        """Set maximum template index for curriculum (0-5). None = use all."""
+        self._max_template_id = max_template_id
+
     def reset(self, seed=None, options=None):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
             self._map_gen = MapGenerator(rng=self._rng)
 
-        # Generate map
-        map_data = self._map_gen.generate(template_id=self._template_id)
+        # Generate map (curriculum may cap template selection)
+        tid = self._template_id
+        if tid is None and self._max_template_id is not None:
+            tid = int(self._rng.integers(0, self._max_template_id + 1))
+        map_data = self._map_gen.generate(template_id=tid)
         self._grid = map_data["grid"]
         self._source_pos = np.array(map_data["source_pos"], dtype=np.float64)
         self._robot_pos = np.array(map_data["robot_pos"], dtype=np.float64)
@@ -102,14 +118,12 @@ class GasSourceEnv(gymnasium.Env):
 
         # Pre-compute Dijkstra once from the effective source (fixed per episode).
         # Dijkstra distance is symmetric, so we look up the robot's cell each step.
-        eff_source = (
-            self._source_pos[0] + self._wind_offset[0],
-            self._source_pos[1] + self._wind_offset[1],
-        )
-        eff_source = (
-            max(0, min(eff_source[0], self._map_width - cfg.COARSE_RESOLUTION)),
-            max(0, min(eff_source[1], self._map_height - cfg.COARSE_RESOLUTION)),
-        )
+        eff_x = max(0, min(self._source_pos[0] + self._wind_offset[0],
+                           self._map_width - cfg.COARSE_RESOLUTION))
+        eff_y = max(0, min(self._source_pos[1] + self._wind_offset[1],
+                           self._map_height - cfg.COARSE_RESOLUTION))
+        # Snap to nearest free cell if wind pushed source into a wall
+        eff_source = self._igdm.snap_to_free_cell(eff_x, eff_y)
         self._dijkstra_from_source = self._igdm.get_dijkstra_distances_from(eff_source)
 
         # Sensor
@@ -121,8 +135,10 @@ class GasSourceEnv(gymnasium.Env):
 
         # State
         self._current_step = 0
-        self._gas_history = deque([0] * cfg.GAS_HISTORY_LENGTH,
-                                  maxlen=cfg.GAS_HISTORY_LENGTH)
+        self._gas_history = deque(
+            [(None, None, 0)] * cfg.GAS_HISTORY_LENGTH,
+            maxlen=cfg.GAS_HISTORY_LENGTH,
+        )
         self._visited_cells = set()
         self._trajectory = [self._robot_pos.copy()]
 
@@ -135,15 +151,20 @@ class GasSourceEnv(gymnasium.Env):
         noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
         self._sensor.initialize_threshold(noisy)
         # First reading is always 0 by definition (at threshold)
-        self._gas_history.append(0)
+        self._gas_history.append((self._robot_pos[0], self._robot_pos[1], 0))
 
         obs = self._build_observation()
         info = self._build_info(0.0, False, 0)
         return obs, info
 
     def step(self, action):
-        action_val = float(np.clip(action, 0.0, 1.0).flat[0])
-        theta = action_val * 2 * np.pi
+        action = np.asarray(action).flatten()
+        if len(action) == 1:
+            # Beta-style: scalar in [0, 1] -> angle
+            theta = float(np.clip(action[0], 0.0, 1.0)) * 2 * np.pi
+        else:
+            # Gaussian-style: (cos θ, sin θ) -> angle
+            theta = float(np.arctan2(action[1], action[0]))
 
         # Compute target position
         dx = cfg.STEP_SIZE * np.cos(theta)
@@ -165,7 +186,7 @@ class GasSourceEnv(gymnasium.Env):
         noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
         self._sensor.update_threshold(noisy)
         binary = self._sensor.get_binary_measurement(noisy)
-        self._gas_history.append(binary)
+        self._gas_history.append((self._robot_pos[0], self._robot_pos[1], binary))
 
         # LiDAR (part of observation, computed in _build_observation)
 
@@ -270,7 +291,7 @@ class GasSourceEnv(gymnasium.Env):
         ax.text(1.5, self._map_height - 0.5, f"wind {ws:.1f} m/s", fontsize=8, color="purple")
 
         # Info text
-        gas_str = "".join(str(g) for g in self._gas_history)
+        gas_str = "".join(str(int(entry[2])) for entry in self._gas_history)
         dist = np.linalg.norm(self._robot_pos - self._source_pos)
         ax.set_title(
             f"Step {self._current_step}/{cfg.MAX_STEPS}  "
@@ -314,8 +335,20 @@ class GasSourceEnv(gymnasium.Env):
                 int(pos[1] / cfg.VISITED_CELL_RESOLUTION))
 
     def _build_observation(self):
-        """Build the 39-dim normalized observation vector."""
-        gas = np.array(list(self._gas_history), dtype=np.float32)
+        """Build the 59-dim normalized observation vector."""
+        gas_entries = []
+        for ax, ay, b in self._gas_history:
+            if ax is None:
+                gas_entries.extend([0.5, 0.5, 0.0])
+            else:
+                rel_x = 0.5 + (ax - self._robot_pos[0]) / (2.0 * self._map_width)
+                rel_y = 0.5 + (ay - self._robot_pos[1]) / (2.0 * self._map_height)
+                gas_entries.extend([
+                    np.clip(rel_x, 0.0, 1.0),
+                    np.clip(rel_y, 0.0, 1.0),
+                    float(b),
+                ])
+        gas = np.array(gas_entries, dtype=np.float32)
         lidar = self._lidar.scan(tuple(self._robot_pos)).astype(np.float32)
         pos = np.array([
             self._robot_pos[0] / self._map_width,
