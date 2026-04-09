@@ -63,6 +63,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import logging
 import sys
+import argparse
 
 # Suppress matplotlib font warnings
 import warnings
@@ -108,7 +109,7 @@ def setup_logging(log_file):
 class RRTInfotaxisIGDMRoomsDiscreteWeighted:
     """Standalone RRT-Infotaxis with IGDM, discrete sensor, and weighted movement for multi-room building."""
 
-    def __init__(self, sigma_m=1.0, logger=None):
+    def __init__(self, sigma_m=1.0, logger=None, threshold_mode='default'):
         """
         Parameters:
         -----------
@@ -116,6 +117,8 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
             Base dispersion parameter for IGDM model
         logger : logging.Logger
             Logger instance for output
+        threshold_mode : str
+            Threshold adaptation mode: 'default' (monotonic increase) or 'decay' (0.97 decay)
         """
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
@@ -170,7 +173,8 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         # This ensures measurements change significantly at same locations, providing
         # information for the particle filter to converge
         self.igdm = IGDMModel(sigma_m=sigma_m, occupancy_grid=self.grid, dispersion_rate=3.00)
-        self.sensor = DiscreteSensorModel()
+        self.threshold_mode = threshold_mode
+        self.sensor = DiscreteSensorModel(threshold_mode=self.threshold_mode)
 
         self.particle_filter = ParticleFilter(
             num_particles=400,
@@ -439,7 +443,10 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         self.log(f"[MEASURE] Continuous concentration: {measurement:.6f}")
 
         # Update threshold (Eq. 27): only increases if measurement > current threshold
-        self.sensor.update_threshold(measurement)
+        if self.threshold_mode == 'decay':
+            self.sensor.update_threshold_decay(measurement)
+        else:
+            self.sensor.update_threshold(measurement)
 
         # Convert to discrete measurement (5 levels: 0-4)
         discrete_measurement = self.sensor.get_discrete_measurement(measurement)
@@ -816,12 +823,17 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="RRT-Infotaxis with IGDM, discrete sensor, weighted movement (multi-room)")
+    parser.add_argument('--threshold-mode', type=str, default='default', choices=['default', 'decay'],
+                        help="Threshold adaptation mode: 'default' (monotonic increase) or 'decay' (0.97 decay)")
+    args = parser.parse_args()
+
     # Setup logging
     log_dir = Path(__file__).parent / "results"
     log_file = log_dir / "updated_weighted_rrt_infotaxis_igdm_rooms_discrete.log"
     logger = setup_logging(str(log_file))
 
-    # Run with default sigma_m=1.0
-    infotaxis = RRTInfotaxisIGDMRoomsDiscreteWeighted(sigma_m=1.0, logger=logger)
+    # Run with sigma_m=1.0 and specified threshold mode
+    infotaxis = RRTInfotaxisIGDMRoomsDiscreteWeighted(sigma_m=1.0, logger=logger, threshold_mode=args.threshold_mode)
     infotaxis.run()
     infotaxis.visualize_final()

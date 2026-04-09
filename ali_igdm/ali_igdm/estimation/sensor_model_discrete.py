@@ -66,6 +66,33 @@ class DiscreteSensorModel:
             scale_factor = self.threshold / old_threshold if old_threshold > 0 else 1.0
             self.level_thresholds = [t * scale_factor for t in self.level_thresholds]
 
+    def update_threshold_decay(self, current_measurement, decay_factor=0.97):
+        """Update threshold with exponential decay when readings stay below threshold.
+
+        If measurement exceeds threshold, uses normal weighted update.
+        Otherwise, decays both main threshold and level thresholds by decay_factor.
+
+        Parameters:
+        -----------
+        current_measurement : float
+            Current raw sensor reading
+        decay_factor : float
+            Multiplicative decay factor per step (default: 0.97)
+        """
+        if self.threshold is None:
+            self.initialize_threshold(current_measurement)
+        elif current_measurement > self.threshold:
+            # Normal weighted update (same as existing)
+            old_threshold = self.threshold
+            self.threshold = (self.threshold_weight * current_measurement +
+                            (1 - self.threshold_weight) * self.threshold)
+            scale_factor = self.threshold / old_threshold if old_threshold > 0 else 1.0
+            self.level_thresholds = [t * scale_factor for t in self.level_thresholds]
+        else:
+            # Decay: threshold *= decay_factor
+            self.threshold *= decay_factor
+            self.level_thresholds = [t * decay_factor for t in self.level_thresholds]
+
     def get_measurement_levels(self):
         """Get list of possible measurement values for this sensor.
 

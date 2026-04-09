@@ -74,7 +74,7 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('delta', 0.7)
         self.declare_parameter('max_depth', 4)
         self.declare_parameter('xy_goal_tolerance', 0.3)
-        self.declare_parameter('robot_radius', 0.35)
+        self.declare_parameter('robot_radius', 0.25)
         self.declare_parameter('sigma_threshold', 0.3)
         self.declare_parameter('success_distance', 0.5)
         self.declare_parameter('termination_mode', 'distance')  # 'convergence' or 'distance'
@@ -89,6 +89,9 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('sensor_alpha', 0.1)
         self.declare_parameter('sensor_sigma_env', 0.1)
         self.declare_parameter('sensor_threshold_weight', 0.5)
+
+        # Threshold mode: 'default' or 'decay'
+        self.declare_parameter('threshold_mode', 'default')
 
         # NEW: Coarse grid optimization
         self.declare_parameter('coarse_resolution', 0.5)
@@ -119,6 +122,7 @@ class RRTInfotaxisNode(Node):
             'sensor_alpha': self.get_parameter('sensor_alpha').value,
             'sensor_sigma_env': self.get_parameter('sensor_sigma_env').value,
             'sensor_threshold_weight': self.get_parameter('sensor_threshold_weight').value,
+            'threshold_mode': self.get_parameter('threshold_mode').value,
             'coarse_resolution': self.get_parameter('coarse_resolution').value,
             'penalty_radius': self.get_parameter('penalty_radius').value,
             'penalty_max_steps': self.get_parameter('penalty_max_steps').value,
@@ -381,7 +385,10 @@ class RRTInfotaxisNode(Node):
 
         # 3. MEASURE: Process sensor reading
         if self.params['use_discrete_sensor']:
-            self.sensor_model.update_threshold(self.sensor_raw_value)
+            if self.params['threshold_mode'] == 'decay':
+                self.sensor_model.update_threshold_decay(self.sensor_raw_value)
+            else:
+                self.sensor_model.update_threshold(self.sensor_raw_value)
             discrete_measurement = self.sensor_model.get_discrete_measurement(self.sensor_raw_value)
             level_names = ["Very Low (0)", "Low (1)", "Medium (2)", "High (3)", "Very High (4)"]
             self.get_logger().info(f'Discrete level: {discrete_measurement} ({level_names[discrete_measurement]})')
