@@ -43,7 +43,25 @@ WIND_MAX_SPEED = 2.0            # for normalization
 WIND_DISPERSION_FACTOR = 2.0    # how much wind shifts concentration peak
 
 # =============================================================================
-# Gas dispersion (IGDM)
+# Gas dispersion model selection
+# =============================================================================
+GAS_MODEL = "filament"          # "filament" or "igdm"
+
+# =============================================================================
+# Filament-based gas dispersion (Lagrangian model)
+# =============================================================================
+FILAMENTS_PER_STEP = 2          # new filaments released per env.step()
+FILAMENT_DT = 0.5               # seconds per filament timestep
+FILAMENT_K = 0.02               # atmospheric diffusivity (m^2/s)
+FILAMENT_TURBULENCE_SCALE = 0.2 # turbulence as fraction of wind speed
+FILAMENT_MAX_AGE = 120          # steps before filament is culled (~60 s)
+FILAMENT_INITIAL_SIGMA = 0.05  # meters, initial filament size
+FILAMENT_MIN_SIGMA = 0.01       # meters, clamp to prevent div-by-zero
+FILAMENT_MASS = 1.0             # arbitrary, per-filament mass
+FILAMENT_REFLECTION_ENERGY = 0.8 # velocity retention factor on wall bounce
+
+# =============================================================================
+# IGDM-based gas dispersion (Gaussian + Dijkstra, legacy)
 # =============================================================================
 SIGMA_M_BASE = 1.5              # dispersion parameter (matches ali_igdm)
 DISPERSION_RATE = 0.12          # time-dependent dispersion (matches igdm_improved)
