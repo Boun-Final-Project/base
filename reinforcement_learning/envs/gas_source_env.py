@@ -17,6 +17,7 @@ from .igdm_model import IGDMModel
 from .lidar_sim import LidarSim
 from .wind_model import WindModel
 from .sensor_model import BinarySensorModel
+from .visualizer import StepVisualizer
 
 
 class GasSourceEnv(gymnasium.Env):
@@ -36,11 +37,14 @@ class GasSourceEnv(gymnasium.Env):
 
     metadata = {"render_modes": ["human", "rgb_array"]}
 
-    def __init__(self, render_mode=None, seed=None, template_id=None):
+    def __init__(self, render_mode=None, seed=None, template_id=None,
+                 viz_output_dir=None):
         super().__init__()
         self.render_mode = render_mode
         self._template_id = template_id  # None = random, 0-5 = fixed template
         self._max_template_id = None     # None = all templates, set by curriculum
+        self._viz_output_dir = viz_output_dir
+        self._visualizer = None
 
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(cfg.STATE_DIM,), dtype=np.float32
@@ -149,9 +153,19 @@ class GasSourceEnv(gymnasium.Env):
         # Initialize sensor with first reading at start position
         conc = self._get_concentration()
         noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
+        self._last_noisy = noisy
         self._sensor.initialize_threshold(noisy)
         # First reading is always 0 by definition (at threshold)
         self._gas_history.append((self._robot_pos[0], self._robot_pos[1], 0))
+
+        # Visualizer (PNG-to-disk, igdm_improved style)
+        if self._viz_output_dir is not None:
+            self._visualizer = StepVisualizer(
+                output_dir=self._viz_output_dir,
+                igdm_model=self._igdm,
+            )
+        else:
+            self._visualizer = None
 
         obs = self._build_observation()
         info = self._build_info(0.0, False, 0)
@@ -184,6 +198,7 @@ class GasSourceEnv(gymnasium.Env):
         # Gas measurement
         conc = self._get_concentration()
         noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
+        self._last_noisy = noisy
         self._sensor.update_threshold(noisy)
         binary = self._sensor.get_binary_measurement(noisy)
         self._gas_history.append((self._robot_pos[0], self._robot_pos[1], binary))
@@ -222,93 +237,43 @@ class GasSourceEnv(gymnasium.Env):
         return obs, float(reward), terminated, truncated, info
 
     def render(self):
-        import matplotlib.pyplot as plt
-        import matplotlib
-        if self.render_mode == "rgb_array":
-            matplotlib.use("Agg")
+        """Save a 2-panel PNG frame via StepVisualizer (igdm_improved style).
 
-        fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+        Requires the env to have been constructed with ``viz_output_dir``.
+        Returns ``None``.
+        """
+        if self._visualizer is None:
+            raise RuntimeError(
+                "render() requires viz_output_dir to be set on the environment."
+            )
 
-        # Gas concentration heatmap (on the coarse Dijkstra grid)
-        dists = self._dijkstra_from_source  # (rows, cols)
-        sigma_m = self._igdm.get_sigma_m(self._current_step)
-        conc = np.where(
-            np.isinf(dists), 0.0,
-            cfg.SOURCE_RELEASE_RATE * np.exp(
-                -np.maximum(dists, 0.1) ** 2 / (2 * sigma_m ** 2)
-            ),
+        last_entry = self._gas_history[-1]
+        digital_value = int(last_entry[2]) if last_entry[0] is not None else None
+        dist = float(np.linalg.norm(self._robot_pos - self._source_pos))
+
+        # Effective source = true source + wind offset, snapped to a free cell
+        eff_x = max(0, min(self._source_pos[0] + self._wind_offset[0],
+                           self._map_width - cfg.COARSE_RESOLUTION))
+        eff_y = max(0, min(self._source_pos[1] + self._wind_offset[1],
+                           self._map_height - cfg.COARSE_RESOLUTION))
+        eff_source = self._igdm.snap_to_free_cell(eff_x, eff_y)
+
+        self._visualizer.save_step(
+            robot_pos=tuple(self._robot_pos),
+            trajectory=self._trajectory,
+            true_source=tuple(self._source_pos),
+            step_num=self._current_step,
+            current_step=self._current_step,
+            occupancy_grid=self._grid,
+            distance_to_true=dist,
+            d_success_thr=cfg.D_SUCCESS,
+            sensor_reading=float(self._last_noisy),
+            sensor_threshold=float(self._sensor.threshold),
+            digital_value=digital_value,
+            wind_offset=self._wind_offset,
+            eff_source=eff_source,
         )
-        ax.imshow(
-            conc,
-            origin="lower",
-            extent=[0, self._map_width, 0, self._map_height],
-            cmap="YlOrRd",
-            alpha=0.5,
-            aspect="equal",
-            interpolation="bilinear",
-        )
-
-        # Occupancy grid (walls on top of heatmap)
-        wall_mask = np.ma.masked_where(self._grid.grid == 0, self._grid.grid)
-        ax.imshow(
-            wall_mask,
-            origin="lower",
-            extent=[0, self._map_width, 0, self._map_height],
-            cmap="Greys",
-            vmin=0, vmax=1,
-            aspect="equal",
-        )
-
-        # Trajectory
-        if len(self._trajectory) > 1:
-            traj = np.array(self._trajectory)
-            ax.plot(traj[:, 0], traj[:, 1], "b-", linewidth=1, alpha=0.5)
-
-        # Robot
-        ax.plot(self._robot_pos[0], self._robot_pos[1], "bo", markersize=8)
-
-        # Source
-        ax.plot(self._source_pos[0], self._source_pos[1], "r*", markersize=15)
-
-        # LiDAR rays
-        lidar_dists = self._lidar.scan(tuple(self._robot_pos))
-        for i, angle in enumerate(self._lidar.ray_angles):
-            d = lidar_dists[i] * cfg.LIDAR_MAX_RANGE
-            ex = self._robot_pos[0] + d * np.cos(angle)
-            ey = self._robot_pos[1] + d * np.sin(angle)
-            ax.plot([self._robot_pos[0], ex], [self._robot_pos[1], ey],
-                    "g-", linewidth=0.5, alpha=0.3)
-
-        # Wind arrow
-        ws, wd = self._wind.speed, self._wind.direction
-        arrow_len = 1.0
-        ax.annotate(
-            "",
-            xy=(1.5 + arrow_len * np.cos(wd), self._map_height - 1.5 + arrow_len * np.sin(wd)),
-            xytext=(1.5, self._map_height - 1.5),
-            arrowprops=dict(arrowstyle="->", color="purple", lw=2),
-        )
-        ax.text(1.5, self._map_height - 0.5, f"wind {ws:.1f} m/s", fontsize=8, color="purple")
-
-        # Info text
-        gas_str = "".join(str(int(entry[2])) for entry in self._gas_history)
-        dist = np.linalg.norm(self._robot_pos - self._source_pos)
-        ax.set_title(
-            f"Step {self._current_step}/{cfg.MAX_STEPS}  "
-            f"Dist: {dist:.1f}m  Gas: [{gas_str}]"
-        )
-        ax.set_xlabel("x (m)")
-        ax.set_ylabel("y (m)")
-
-        if self.render_mode == "rgb_array":
-            fig.canvas.draw()
-            buf = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
-            plt.close(fig)
-            return buf
-        else:
-            plt.show()
-            plt.close(fig)
-            return None
+        return None
 
     # ------------------------------------------------------------------
     # Internal helpers

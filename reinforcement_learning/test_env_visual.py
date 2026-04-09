@@ -6,16 +6,14 @@ Runs one episode with random actions and saves key frames + a final trajectory i
 import os
 import sys
 import numpy as np
-import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from reinforcement_learning.envs.gas_source_env import GasSourceEnv
 
 out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visual_test")
-os.makedirs(out_dir, exist_ok=True)
 
-env = GasSourceEnv(render_mode="rgb_array")
+env = GasSourceEnv(viz_output_dir=out_dir)
 obs, info = env.reset()
 
 print(f"Map: {env._map_width:.1f} x {env._map_height:.1f} m")
@@ -30,8 +28,7 @@ total_reward = 0.0
 gas_detections = 0
 
 # Save initial frame
-img = env.render()
-plt.imsave(os.path.join(out_dir, "step_000.png"), img)
+env.render()
 
 for step in range(300):
     action = env.action_space.sample()
@@ -42,21 +39,18 @@ for step in range(300):
         gas_detections += 1
 
     if step + 1 in save_at:
-        img = env.render()
-        plt.imsave(os.path.join(out_dir, f"step_{step+1:03d}.png"), img)
+        env.render()
         print(f"  Step {step+1:3d}: dist={info['distance_to_source']:.1f}m, "
               f"reward={reward:+.1f}, gas={info['gas_reading']}, "
               f"collision={info['collision']}")
 
     if terminated:
         print(f"\n  SOURCE FOUND at step {step+1}!")
-        img = env.render()
-        plt.imsave(os.path.join(out_dir, f"step_{step+1:03d}_found.png"), img)
+        env.render()
         break
     if truncated:
         print(f"\n  Timeout at step {step+1}")
-        img = env.render()
-        plt.imsave(os.path.join(out_dir, f"step_{step+1:03d}_timeout.png"), img)
+        env.render()
         break
 
 print(f"\nTotal reward: {total_reward:.1f}")

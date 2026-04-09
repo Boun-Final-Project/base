@@ -47,12 +47,12 @@ class IGDMModel:
         else:
             self.coarse_grid = None
 
-    def _create_coarse_map(self, fine_grid, occupancy_threshold=0.5):
-        """Downsample fine grid to coarse grid using majority voting.
+    def _create_coarse_map(self, fine_grid):
+        """Downsample fine grid to coarse grid.
 
-        A coarse cell is marked occupied only if more than occupancy_threshold
-        fraction of its fine cells are walls. This prevents thin boundary walls
-        from blocking gas dispersion through cells that are mostly free space.
+        A coarse cell is marked occupied if ANY of its fine cells is a wall.
+        This guarantees thin (1-fine-cell) walls still block gas dispersion
+        on the coarse grid.
         """
         ratio = self.coarse_res / self.high_res
         coarse = np.zeros((self.coarse_rows, self.coarse_cols), dtype=int)
@@ -65,7 +65,7 @@ class IGDMModel:
                 c_end = int((c + 1) * ratio)
 
                 chunk = fine_grid[r_start:r_end, c_start:c_end]
-                if chunk.size > 0 and np.mean(chunk) > occupancy_threshold:
+                if chunk.size > 0 and np.any(chunk > 0):
                     coarse[r, c] = 1
 
         return coarse

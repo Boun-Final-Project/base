@@ -141,21 +141,22 @@ def test_source_discovery():
 
 
 def test_render():
-    """Verify render returns an RGB array."""
+    """Verify render writes a PNG frame to viz_output_dir."""
     print("=== Test: Render ===")
-    env = GasSourceEnv(render_mode="rgb_array")
-    env.reset(seed=42)
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as d:
+        env = GasSourceEnv(viz_output_dir=d)
+        env.reset(seed=42)
 
-    # Take a few steps first
-    for _ in range(5):
-        env.step(env.action_space.sample())
+        # Take a few steps first
+        for _ in range(5):
+            env.step(env.action_space.sample())
 
-    img = env.render()
-    assert img is not None
-    assert img.ndim == 3 and img.shape[2] == 3, f"Expected RGB, got shape {img.shape}"
-    assert img.dtype == np.uint8
-
-    print(f"  Render output: {img.shape}, dtype={img.dtype}  ✓")
+        env.render()
+        files = sorted(os.listdir(d))
+        assert files, "render() did not write any PNG"
+        assert files[0].endswith(".png")
+        print(f"  Wrote {files[0]}  ✓")
     print("PASSED\n")
 
 

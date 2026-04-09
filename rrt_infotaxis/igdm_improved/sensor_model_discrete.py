@@ -10,7 +10,7 @@ from scipy.stats import norm as scipy_norm
 class DiscreteSensorModel:
     """5-level discrete sensor model for detecting gas concentration levels."""
 
-    def __init__(self, alpha=0.1, sigma_env=0.1, threshold_weight=0.5):
+    def __init__(self, alpha=0.1, sigma_env=0.1, threshold_weight=0.5, threshold_mode='default'):
         """
         Parameters:
         -----------
@@ -20,10 +20,13 @@ class DiscreteSensorModel:
             Environmental noise standard deviation
         threshold_weight : float
             Weight for threshold update (0-1)
+        threshold_mode : str
+            Threshold adaptation mode: 'default' (monotonic increase) or 'decay' (0.97 decay)
         """
         self.alpha = alpha
         self.sigma_env = sigma_env
         self.threshold_weight = threshold_weight
+        self.threshold_mode = threshold_mode
         self.threshold = None
         self.level_thresholds = None  # Will store 4 thresholds for 5 levels
 
@@ -65,6 +68,20 @@ class DiscreteSensorModel:
             # Update level thresholds proportionally to maintain spacing
             scale_factor = self.threshold / old_threshold if old_threshold > 0 else 1.0
             self.level_thresholds = [t * scale_factor for t in self.level_thresholds]
+
+    def update_threshold_decay(self, current_measurement):
+        """Update threshold with decay: decay by 0.97 when measurement stays below threshold."""
+        if self.threshold is None:
+            self.initialize_threshold(current_measurement)
+        elif current_measurement > self.threshold:
+            old_threshold = self.threshold
+            self.threshold = (self.threshold_weight * current_measurement +
+                            (1 - self.threshold_weight) * self.threshold)
+            scale_factor = self.threshold / old_threshold if old_threshold > 0 else 1.0
+            self.level_thresholds = [t * scale_factor for t in self.level_thresholds]
+        else:
+            self.threshold *= 0.97
+            self.level_thresholds = [t * 0.97 for t in self.level_thresholds]
 
     def get_measurement_levels(self):
         """Get list of possible measurement values for this sensor.

@@ -54,6 +54,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import logging
 import sys
+import argparse
 
 # Suppress matplotlib font warnings
 import warnings
@@ -99,7 +100,7 @@ def setup_logging(log_file):
 class RRTInfotaxisIGDMDiscreteWeightedLargeMap:
     """Standalone RRT-Infotaxis with IGDM, discrete sensor, and weighted movement on large map."""
 
-    def __init__(self, sigma_m=1.0, logger=None):
+    def __init__(self, sigma_m=1.0, logger=None, threshold_mode='default'):
         """
         Parameters:
         -----------
@@ -107,6 +108,8 @@ class RRTInfotaxisIGDMDiscreteWeightedLargeMap:
             Base dispersion parameter for IGDM model
         logger : logging.Logger
             Logger instance for output
+        threshold_mode : str
+            Threshold adaptation mode: 'default' (monotonic increase) or 'decay' (0.97 decay)
         """
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
@@ -141,7 +144,8 @@ class RRTInfotaxisIGDMDiscreteWeightedLargeMap:
         # This ensures measurements change significantly at same locations, providing
         # information for the particle filter to converge
         self.igdm = IGDMModel(sigma_m=sigma_m, occupancy_grid=self.grid, dispersion_rate=3.00)
-        self.sensor = DiscreteSensorModel()
+        self.threshold_mode = threshold_mode
+        self.sensor = DiscreteSensorModel(threshold_mode=self.threshold_mode)
 
         self.particle_filter = ParticleFilter(
             num_particles=400,
@@ -165,7 +169,7 @@ class RRTInfotaxisIGDMDiscreteWeightedLargeMap:
         self.current_step = 0  # Track current time step for time-dependent gas model
 
         # Visualization - use specified directory for visualization steps
-        viz_dir = Path("/Users/simalguven/Desktop/bitirme/updated_rrt_igdm_improved_large_map_discrete_weighted_steps")
+        viz_dir = Path(__file__).parent / "results" / "updated_rrt_igdm_improved_large_map_discrete_weighted_steps"
         viz_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
@@ -411,7 +415,10 @@ class RRTInfotaxisIGDMDiscreteWeightedLargeMap:
         self.log(f"[MEASURE] Continuous concentration: {measurement:.6f}")
 
         # Update threshold (Eq. 27): only increases if measurement > current threshold
-        self.sensor.update_threshold(measurement)
+        if self.threshold_mode == 'decay':
+            self.sensor.update_threshold_decay(measurement)
+        else:
+            self.sensor.update_threshold(measurement)
 
         # Convert to discrete measurement (5 levels: 0-4)
         discrete_measurement = self.sensor.get_discrete_measurement(measurement)
@@ -766,14 +773,19 @@ class RRTInfotaxisIGDMDiscreteWeightedLargeMap:
 
 
 if __name__ == "__main__":
-    # Setup logging - use specified directory
-    log_dir = Path("/Users/simalguven/Desktop/bitirme")
-    log_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+    parser = argparse.ArgumentParser(description="RRT-Infotaxis with IGDM, discrete sensor, weighted movement (large map)")
+    parser.add_argument('--threshold-mode', type=str, default='default', choices=['default', 'decay'],
+                        help="Threshold adaptation mode: 'default' (monotonic increase) or 'decay' (0.97 decay)")
+    args = parser.parse_args()
+
+    # Setup logging - use results directory relative to script
+    log_dir = Path(__file__).parent / "results"
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "updated_weighted_rrt_infotaxis_igdm_large_map_discrete.log"
     logger = setup_logging(str(log_file))
 
-    # Run with default sigma_m=1.0
-    infotaxis = RRTInfotaxisIGDMDiscreteWeightedLargeMap(sigma_m=1.0, logger=logger)
+    # Run with sigma_m=1.0 and specified threshold mode
+    infotaxis = RRTInfotaxisIGDMDiscreteWeightedLargeMap(sigma_m=1.0, logger=logger, threshold_mode=args.threshold_mode)
     infotaxis.run()
     final_result_path = log_dir / "updated_weighted_rrt_infotaxis_igdm_large_map_discrete_result.png"
     infotaxis.visualize_final(str(final_result_path))
