@@ -28,14 +28,19 @@ import matplotlib.animation as animation
 from matplotlib.collections import PatchCollection
 import matplotlib.patches as mpatches
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from reinforcement_learning import config as cfg
 from reinforcement_learning.envs.map_generator import MapGenerator
 from reinforcement_learning.envs.filament_plume import FilamentPlume
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_OUTPUT_DIR = os.path.join(_SCRIPT_DIR, "visual_test", "filament")
 
-def run_visual_test(seed=42, total_steps=200, output_dir="visual_test/filament"):
+
+def run_visual_test(seed=42, total_steps=200, output_dir=None):
+    if output_dir is None:
+        output_dir = _DEFAULT_OUTPUT_DIR
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -277,7 +282,7 @@ def run_visual_test(seed=42, total_steps=200, output_dir="visual_test/filament")
     print("=" * 60)
 
 
-def run_animation(seed=42, total_steps=300, output_dir="visual_test/filament",
+def run_animation(seed=42, total_steps=300, output_dir=None,
                   fps=15, every_n=1):
     """Animate the plume evolving step by step and save as a GIF.
 
@@ -294,6 +299,8 @@ def run_animation(seed=42, total_steps=300, output_dir="visual_test/filament",
     every_n : int
         Capture one frame every *every_n* simulation steps (thins the GIF).
     """
+    if output_dir is None:
+        output_dir = _DEFAULT_OUTPUT_DIR
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -475,7 +482,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--steps", type=int, default=200)
-    parser.add_argument("--output-dir", type=str, default="visual_test/filament")
+    parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument(
         "--animate", action="store_true",
         help="Generate a GIF animation instead of static plots.",

@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from reinforcement_learning import config as cfg
 from reinforcement_learning.envs.gas_source_env import GasSourceEnv

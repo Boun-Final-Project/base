@@ -14,6 +14,7 @@ from .. import config as cfg
 from .map_generator import MapGenerator
 from .occupancy_grid import OccupancyGrid
 from .igdm_model import IGDMModel
+from .filament_plume import FilamentPlume
 from .lidar_sim import LidarSim
 from .wind_model import WindModel
 from .sensor_model import BinarySensorModel
@@ -63,6 +64,7 @@ class GasSourceEnv(gymnasium.Env):
         # Populated on reset
         self._grid = None
         self._igdm = None
+        self._plume = None
         self._lidar = None
         self._sensor = None
         self._source_pos = None
@@ -101,13 +103,66 @@ class GasSourceEnv(gymnasium.Env):
         self._map_width = map_data["width"]
         self._map_height = map_data["height"]
 
-        # IGDM
-        self._igdm = IGDMModel(
-            sigma_m=cfg.SIGMA_M_BASE,
-            occupancy_grid=self._grid,
-            dispersion_rate=cfg.DISPERSION_RATE,
-            coarse_resolution=cfg.COARSE_RESOLUTION,
-        )
+        # Wind
+        self._wind.randomize(self._rng)
+
+        # Gas model selection
+        if cfg.GAS_MODEL == "filament":
+            self._plume = FilamentPlume(
+                source_pos=self._source_pos,
+                wind_speed=self._wind.speed,
+                wind_angle=self._wind.direction,
+                occupancy_grid=self._grid,
+                dt=cfg.FILAMENT_DT,
+                K=cfg.FILAMENT_K,
+                turbulence_scale=cfg.FILAMENT_TURBULENCE_SCALE,
+                max_age=cfg.FILAMENT_MAX_AGE,
+                filaments_per_step=cfg.FILAMENTS_PER_STEP,
+                initial_sigma=cfg.FILAMENT_INITIAL_SIGMA,
+                mass=cfg.FILAMENT_MASS,
+                min_sigma=cfg.FILAMENT_MIN_SIGMA,
+                reflection_energy=cfg.FILAMENT_REFLECTION_ENERGY,
+                rng=self._rng,
+            )
+            # Warm up the plume so step 0 has some initial filaments
+            for _ in range(cfg.FILAMENT_WARMUP_STEPS):
+                self._plume.update()
+            self._igdm = None
+            self._wind_offset = None
+            self._dijkstra_from_source = None
+        else:
+            # IGDM model
+            self._igdm = IGDMModel(
+                sigma_m=cfg.SIGMA_M_BASE,
+                occupancy_grid=self._grid,
+                dispersion_rate=cfg.DISPERSION_RATE,
+                coarse_resolution=cfg.COARSE_RESOLUTION,
+            )
+            self._plume = None
+            self._wind_offset = self._wind.get_dispersion_offset(
+                cfg.WIND_DISPERSION_FACTOR
+            )
+            # Pre-compute Dijkstra once from the effective source (fixed per episode).
+            # Dijkstra distance is symmetric, so we look up the robot's cell each step.
+            eff_x = max(
+                0,
+                min(
+                    self._source_pos[0] + self._wind_offset[0],
+                    self._map_width - cfg.COARSE_RESOLUTION,
+                ),
+            )
+            eff_y = max(
+                0,
+                min(
+                    self._source_pos[1] + self._wind_offset[1],
+                    self._map_height - cfg.COARSE_RESOLUTION,
+                ),
+            )
+            # Snap to nearest free cell if wind pushed source into a wall
+            eff_source = self._igdm.snap_to_free_cell(eff_x, eff_y)
+            self._dijkstra_from_source = self._igdm.get_dijkstra_distances_from(
+                eff_source
+            )
 
         # LiDAR
         self._lidar = LidarSim(
@@ -115,20 +170,6 @@ class GasSourceEnv(gymnasium.Env):
             max_range=cfg.LIDAR_MAX_RANGE,
             occupancy_grid=self._grid,
         )
-
-        # Wind
-        self._wind.randomize(self._rng)
-        self._wind_offset = self._wind.get_dispersion_offset(cfg.WIND_DISPERSION_FACTOR)
-
-        # Pre-compute Dijkstra once from the effective source (fixed per episode).
-        # Dijkstra distance is symmetric, so we look up the robot's cell each step.
-        eff_x = max(0, min(self._source_pos[0] + self._wind_offset[0],
-                           self._map_width - cfg.COARSE_RESOLUTION))
-        eff_y = max(0, min(self._source_pos[1] + self._wind_offset[1],
-                           self._map_height - cfg.COARSE_RESOLUTION))
-        # Snap to nearest free cell if wind pushed source into a wall
-        eff_source = self._igdm.snap_to_free_cell(eff_x, eff_y)
-        self._dijkstra_from_source = self._igdm.get_dijkstra_distances_from(eff_source)
 
         # Sensor
         self._sensor = BinarySensorModel(
@@ -151,7 +192,10 @@ class GasSourceEnv(gymnasium.Env):
         self._visited_cells.add(cell_key)
 
         # Initialize sensor with first reading at start position
-        conc = self._get_concentration()
+        if cfg.GAS_MODEL == "filament":
+            conc = self._plume.concentration_at(self._robot_pos)
+        else:
+            conc = self._get_concentration_igdm()
         noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
         self._last_noisy = noisy
         self._sensor.initialize_threshold(noisy)
@@ -160,9 +204,12 @@ class GasSourceEnv(gymnasium.Env):
 
         # Visualizer (PNG-to-disk, igdm_improved style)
         if self._viz_output_dir is not None:
+            # For filament model, pass None for IGDM (visualizer falls back
+            # to simple rendering). For IGDM, pass the actual model.
+            igdm_for_viz = self._igdm if cfg.GAS_MODEL != "filament" else None
             self._visualizer = StepVisualizer(
                 output_dir=self._viz_output_dir,
-                igdm_model=self._igdm,
+                igdm_model=igdm_for_viz,
             )
         else:
             self._visualizer = None
@@ -196,7 +243,12 @@ class GasSourceEnv(gymnasium.Env):
         self._trajectory.append(self._robot_pos.copy())
 
         # Gas measurement
-        conc = self._get_concentration()
+        if cfg.GAS_MODEL == "filament":
+            self._plume.update()
+            conc = self._plume.concentration_at(self._robot_pos)
+        else:
+            conc = self._get_concentration_igdm()
+
         noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
         self._last_noisy = noisy
         self._sensor.update_threshold(noisy)
@@ -251,12 +303,26 @@ class GasSourceEnv(gymnasium.Env):
         digital_value = int(last_entry[2]) if last_entry[0] is not None else None
         dist = float(np.linalg.norm(self._robot_pos - self._source_pos))
 
-        # Effective source = true source + wind offset, snapped to a free cell
-        eff_x = max(0, min(self._source_pos[0] + self._wind_offset[0],
-                           self._map_width - cfg.COARSE_RESOLUTION))
-        eff_y = max(0, min(self._source_pos[1] + self._wind_offset[1],
-                           self._map_height - cfg.COARSE_RESOLUTION))
-        eff_source = self._igdm.snap_to_free_cell(eff_x, eff_y)
+        if cfg.GAS_MODEL == "filament":
+            # Filament model: no effective source, no IGDM concentration field
+            eff_source = None
+        else:
+            # IGDM model: compute effective source for rendering
+            eff_x = max(
+                0,
+                min(
+                    self._source_pos[0] + self._wind_offset[0],
+                    self._map_width - cfg.COARSE_RESOLUTION,
+                ),
+            )
+            eff_y = max(
+                0,
+                min(
+                    self._source_pos[1] + self._wind_offset[1],
+                    self._map_height - cfg.COARSE_RESOLUTION,
+                ),
+            )
+            eff_source = self._igdm.snap_to_free_cell(eff_x, eff_y)
 
         self._visualizer.save_step(
             robot_pos=tuple(self._robot_pos),
@@ -272,6 +338,8 @@ class GasSourceEnv(gymnasium.Env):
             digital_value=digital_value,
             wind_offset=self._wind_offset,
             eff_source=eff_source,
+            filaments=self._plume.get_all_filaments()
+            if cfg.GAS_MODEL == "filament" else None,
         )
         return None
 
@@ -279,8 +347,8 @@ class GasSourceEnv(gymnasium.Env):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_concentration(self):
-        """Compute true gas concentration at robot position.
+    def _get_concentration_igdm(self):
+        """Compute true gas concentration at robot position using IGDM.
 
         Uses the precomputed Dijkstra grid from the effective source.
         Distance is symmetric so dist(source→robot) == dist(robot→source).

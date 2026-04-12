@@ -26,13 +26,13 @@ class ActorCritic(nn.Module):
     """MLP actor-critic with shared backbone and Beta-distribution actor.
 
     Architecture:
-        Observation (39)
+        Observation (STATE_DIM)
             |
-        Shared backbone [256, 256] (tanh)
+        Shared backbone [HIDDEN_DIM x BACKBONE_LAYERS] (tanh)
             |
-            +-- Actor head [128] --> (alpha, beta) --> Beta distribution --> angle
+            +-- Actor head [ACTOR_HEAD_DIM] --> (alpha, beta) --> Beta distribution --> angle
             |
-            +-- Critic head [128] --> V(s) scalar
+            +-- Critic head [CRITIC_HEAD_DIM] --> V(s) scalar
     """
 
     def __init__(self, obs_dim=cfg.STATE_DIM, hidden_dim=cfg.HIDDEN_DIM,
@@ -136,9 +136,9 @@ class ActorCriticModular(nn.Module):
     """Modality-aware actor-critic with shared encoders and shared fusion.
 
     Architecture:
-        Gas history (30) --> GRU --> gas_features (GRU_HIDDEN)
-        LiDAR (24)        --> CircularConv1D --> lidar_features (CONV_CHANNELS)
-        Context (5)       --> pass-through
+        Gas history (GAS_HISTORY_LENGTH * GAS_FEATURES_PER_STEP) --> GRU --> gas_features (GAS_GRU_HIDDEN)
+        LiDAR (LIDAR_NUM_RAYS)                                    --> CircularConv1D --> lidar_features (LIDAR_CONV_CHANNELS * LIDAR_NUM_RAYS)
+        Context (5)                                               --> pass-through
 
         [gas_features | lidar_features | context] --> fusion MLP --> shared features
             |
@@ -204,19 +204,19 @@ class ActorCriticModular(nn.Module):
 
     def _encode(self, obs):
         """Split observation and encode each modality."""
-        gas = obs[:, :self.gas_len]                                    # (B, 30)
-        lidar = obs[:, self.gas_len:self.gas_len + self.lidar_len]     # (B, 24)
+        gas = obs[:, :self.gas_len]                                    # (B, GAS_HISTORY_LENGTH*GAS_FEATURES_PER_STEP)
+        lidar = obs[:, self.gas_len:self.gas_len + self.lidar_len]     # (B, LIDAR_NUM_RAYS)
         context = obs[:, self.gas_len + self.lidar_len:]               # (B, 5)
 
-        # GRU: (B, 30) -> (B, 10, 3) -> GRU -> last hidden (B, gru_hidden)
+        # GRU: (B, GAS_HISTORY_LENGTH*GAS_FEATURES_PER_STEP) -> (B, GAS_HISTORY_LENGTH, GAS_FEATURES_PER_STEP) -> GRU -> last hidden (B, GAS_GRU_HIDDEN)
         gas_seq = gas.view(gas.size(0), self.gas_steps, cfg.GAS_FEATURES_PER_STEP)
-        _, gas_h = self.gas_gru(gas_seq)         # gas_h: (1, B, gru_hidden)
-        gas_feat = gas_h.squeeze(0)              # (B, gru_hidden)
+        _, gas_h = self.gas_gru(gas_seq)         # gas_h: (1, B, GAS_GRU_HIDDEN)
+        gas_feat = gas_h.squeeze(0)              # (B, GAS_GRU_HIDDEN)
 
-        # Conv1D: (B, 24) -> (B, 1, 24) -> conv -> (B, C, 24) -> flatten
-        lidar_seq = lidar.unsqueeze(1)           # (B, 1, 24)
-        lidar_feat = self.lidar_conv(lidar_seq)  # (B, C, 24)
-        lidar_feat = lidar_feat.flatten(1)       # (B, C*24)
+        # Conv1D: (B, LIDAR_NUM_RAYS) -> (B, 1, LIDAR_NUM_RAYS) -> conv -> (B, LIDAR_CONV_CHANNELS, LIDAR_NUM_RAYS) -> flatten
+        lidar_seq = lidar.unsqueeze(1)           # (B, 1, LIDAR_NUM_RAYS)
+        lidar_feat = self.lidar_conv(lidar_seq)  # (B, LIDAR_CONV_CHANNELS, LIDAR_NUM_RAYS)
+        lidar_feat = lidar_feat.flatten(1)       # (B, LIDAR_CONV_CHANNELS*LIDAR_NUM_RAYS)
 
         fused = torch.cat([gas_feat, lidar_feat, context], dim=1)
         return self.fusion(fused)
@@ -273,11 +273,11 @@ class ActorCriticDualBackbone(nn.Module):
     residual connections, LayerNorm, and circular Gaussian action space.
 
     Architecture:
-        Gas history (30) --> GRU (2-layer, shared) --> 64 dims
-        LiDAR (24)       --> CircConv1D (shared)   --> 48 dims
-        Context (5)      --> pass-through           -->  5 dims
+        Gas history (GAS_HISTORY_LENGTH * GAS_FEATURES_PER_STEP) --> GRU (2-layer, shared) --> GAS_GRU_HIDDEN dims
+        LiDAR (LIDAR_NUM_RAYS)                                    --> CircConv1D (shared)   --> LIDAR_CONV_CHANNELS*LIDAR_NUM_RAYS dims
+        Context (5)                                               --> pass-through           --> 5 dims
                                     |
-                          concat --> GatedFusion (85 dims)
+                          concat --> GatedFusion (GAS_GRU_HIDDEN + LIDAR_CONV_CHANNELS*LIDAR_NUM_RAYS + 5 dims)
                          /                          \\
             Actor projection [128]          Critic projection [256]
             + LayerNorm + ReLU              + LayerNorm + ReLU

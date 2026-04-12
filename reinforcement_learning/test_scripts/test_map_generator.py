@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 # Ensure 'reinforcement_learning' is importable regardless of cwd
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from reinforcement_learning import config as cfg
 from reinforcement_learning.envs.map_generator import MapGenerator
