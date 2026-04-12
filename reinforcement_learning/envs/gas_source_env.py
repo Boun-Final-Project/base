@@ -176,6 +176,7 @@ class GasSourceEnv(gymnasium.Env):
             alpha=cfg.SENSOR_ALPHA,
             sigma_env=cfg.SENSOR_SIGMA_ENV,
             threshold_weight=cfg.SENSOR_THRESHOLD_WEIGHT,
+            threshold_decay=cfg.SENSOR_THRESHOLD_DECAY,
         )
 
         # State
