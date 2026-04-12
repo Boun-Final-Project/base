@@ -8,7 +8,7 @@ from scipy.stats import norm as scipy_norm
 class BinarySensorModel:
     """Binary sensor model for detecting gas concentration above/below threshold."""
 
-    def __init__(self, alpha=0.1, sigma_env=0.1, threshold_weight=0.5):
+    def __init__(self, alpha=0.1, sigma_env=0.1, threshold_weight=0.5, threshold_decay=0.97):
         """
         Parameters:
         -----------
@@ -18,10 +18,15 @@ class BinarySensorModel:
             Environmental noise standard deviation
         threshold_weight : float
             Weight for threshold update (0-1)
+        threshold_decay : float
+            Multiplicative decay applied to threshold each step when
+            measurement stays below it. Allows the sensor to regain
+            sensitivity after a period with no gas detection.
         """
         self.alpha = alpha
         self.sigma_env = sigma_env
         self.threshold_weight = threshold_weight
+        self.threshold_decay = threshold_decay
         self.threshold = None
 
     def get_std(self, true_concentration):
@@ -33,12 +38,20 @@ class BinarySensorModel:
         self.threshold = initial_measurement
 
     def update_threshold(self, current_measurement):
-        """Update threshold (Eq. 27): only increases if measurement > current threshold."""
+        """Update threshold with decay.
+
+        If measurement exceeds the threshold, pull it upward via an
+        exponential moving average (ratchet up).  Otherwise decay it
+        by ``threshold_decay`` so the sensor regains sensitivity during
+        gas-free stretches.
+        """
         if self.threshold is None:
             self.initialize_threshold(current_measurement)
         elif current_measurement > self.threshold:
             self.threshold = (self.threshold_weight * current_measurement +
                             (1 - self.threshold_weight) * self.threshold)
+        else:
+            self.threshold *= self.threshold_decay
 
     def get_binary_measurement(self, actual_measurement):
         """Convert continuous measurement to binary (0 or 1)."""
