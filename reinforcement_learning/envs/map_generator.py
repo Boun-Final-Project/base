@@ -83,13 +83,13 @@ class MapGenerator:
             # wall from top boundary downward, gap at bottom
             grid.add_rectangular_obstacle(
                 wall_x - t / 2, wall_x + t / 2,
-                t, t + wall_len,  # start after top boundary wall
+                h - t - wall_len, h - t,
             )
         else:
             # wall from bottom boundary upward, gap at top
             grid.add_rectangular_obstacle(
                 wall_x - t / 2, wall_x + t / 2,
-                h - t - wall_len, h - t,
+                t, t + wall_len,
             )
         return grid
 
@@ -336,14 +336,26 @@ class MapGenerator:
 
         # Helper: cut a doorway in a vertical wall segment
         def _vdoor(wall_x_min, wall_x_max, seg_y_min, seg_y_max):
-            dw = self.rng.uniform(cfg.MIN_GAP_SIZE, min(2.0, seg_y_max - seg_y_min - 0.2))
-            dy = self.rng.uniform(seg_y_min + 0.1, seg_y_max - dw - 0.1)
+            max_dw = min(2.0, seg_y_max - seg_y_min - 0.2)
+            if max_dw < cfg.MIN_GAP_SIZE:
+                return  # segment too short to fit a doorway
+            dw = self.rng.uniform(cfg.MIN_GAP_SIZE, max_dw)
+            max_dy = seg_y_max - dw - 0.1
+            if max_dy < seg_y_min + 0.1:
+                return
+            dy = self.rng.uniform(seg_y_min + 0.1, max_dy)
             self._clear_rect(grid, wall_x_min, wall_x_max, dy, dy + dw)
 
         # Helper: cut a doorway in a horizontal wall segment
         def _hdoor(seg_x_min, seg_x_max, wall_y_min, wall_y_max):
-            dw = self.rng.uniform(cfg.MIN_GAP_SIZE, min(2.0, seg_x_max - seg_x_min - 0.2))
-            dx = self.rng.uniform(seg_x_min + 0.1, seg_x_max - dw - 0.1)
+            max_dw = min(2.0, seg_x_max - seg_x_min - 0.2)
+            if max_dw < cfg.MIN_GAP_SIZE:
+                return  # segment too short to fit a doorway
+            dw = self.rng.uniform(cfg.MIN_GAP_SIZE, max_dw)
+            max_dx = seg_x_max - dw - 0.1
+            if max_dx < seg_x_min + 0.1:
+                return
+            dx = self.rng.uniform(seg_x_min + 0.1, max_dx)
             self._clear_rect(grid, dx, dx + dw, wall_y_min, wall_y_max)
 
         # Bottom-left room doorways

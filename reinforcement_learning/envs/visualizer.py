@@ -50,8 +50,8 @@ class StepVisualizer:
                   current_step=None, occupancy_grid=None,
                   distance_to_true=None, d_success_thr=None,
                   sensor_reading=None, sensor_threshold=None, digital_value=None,
-                  wind_offset=None, eff_source=None):
-        """Save a 2-panel step visualization (trajectory + IGDM concentration).
+                  wind_offset=None, eff_source=None, filaments=None):
+        """Save a 2-panel step visualization.
 
         Parameters
         ----------
@@ -79,6 +79,12 @@ class StepVisualizer:
             Discretized/binary sensor reading.
         wind_offset : np.ndarray, optional
             Downwind offset passed through to IGDM.compute_concentration.
+        eff_source : tuple, optional
+            Effective source position (for IGDM model).
+        filaments : dict, optional
+            Filament data for Lagrangian rendering. Keys: ``positions`` (N,2),
+            ``sigmas`` (N,), ``masses`` (N,). When provided, the concentration
+            panel renders filaments as circles instead of an IGDM heatmap.
         """
         if occupancy_grid is not None:
             map_width = occupancy_grid.width
@@ -113,28 +119,56 @@ class StepVisualizer:
         ax1.plot(true_source[0], true_source[1], 'r*', markersize=10)
         ax1.grid(True, alpha=0.3)
 
-        # Plot 2: IGDM concentration field
+        # Plot 2: Concentration field (IGDM heatmap or filament overlay)
         ax2 = plt.subplot(1, 2, 2)
         ax2.set_xlim(0, map_width)
         ax2.set_ylim(0, map_height)
         ax2.set_aspect('equal')
 
-        if current_step is not None:
+        if filaments is not None and len(filaments["positions"]) > 0:
+            # Filament model: render filaments as circles
+            ax2.set_title(f'Filament Plume (Step {current_step})',
+                          fontsize=12, fontweight='bold')
+
+            ax2.set_xlabel('X (m)')
+            ax2.set_ylabel('Y (m)')
+            self._plot_obstacles(ax2, occupancy_grid)
+
+            positions = filaments["positions"]
+            sigmas = filaments["sigmas"]
+
+            # Color filaments by age (blue = young, red = old)
+            ages = filaments["ages"]
+            max_age = max(1, ages.max())
+            colors = plt.cm.viridis(ages / max_age)
+
+            # Draw each filament as a circle with radius = 2*sigma
+            for i in range(len(positions)):
+                circle = plt.Circle(
+                    (positions[i, 0], positions[i, 1]),
+                    radius=2.0 * sigmas[i],
+                    facecolor=colors[i],
+                    alpha=0.3,
+                    edgecolor='none',
+                )
+                ax2.add_patch(circle)
+
+            ax2.plot(true_source[0], true_source[1], 'r*', markersize=12,
+                     label='True source')
+            ax2.legend(loc='upper right', fontsize=8)
+        elif self.igdm_model is not None and current_step is not None:
             ax2.set_title(f'IGDM Concentration Field (Step {current_step})',
                           fontsize=12, fontweight='bold')
-        else:
-            ax2.set_title('IGDM Concentration Field', fontsize=12, fontweight='bold')
 
-        ax2.set_xlabel('X (m)')
-        ax2.set_ylabel('Y (m)')
+            ax2.set_xlabel('X (m)')
+            ax2.set_ylabel('Y (m)')
 
-        x_resolution = max(100, int(map_width * 10))
-        y_resolution = max(60, int(map_height * 10))
-        x_grid = np.linspace(0, map_width, x_resolution)
-        y_grid = np.linspace(0, map_height, y_resolution)
-        X, Y = np.meshgrid(x_grid, y_grid)
+            x_resolution = max(100, int(map_width * 10))
+            y_resolution = max(60, int(map_height * 10))
+            x_grid = np.linspace(0, map_width, x_resolution)
+            y_grid = np.linspace(0, map_height, y_resolution)
+            X, Y = np.meshgrid(x_grid, y_grid)
 
-        if self.igdm_model is not None and current_step is not None:
             Z = np.zeros_like(X)
             for i in range(len(y_grid)):
                 for j in range(len(x_grid)):
@@ -142,21 +176,39 @@ class StepVisualizer:
                         (X[i, j], Y[i, j]), true_source, 1.0,
                         time_step=current_step, wind_offset=wind_offset,
                     )
+
+            im = ax2.contourf(X, Y, Z, levels=25, cmap='hot_r')
+            plt.colorbar(im, ax=ax2, label='Concentration')
+
+            self._plot_obstacles(ax2, occupancy_grid)
+            ax2.plot(true_source[0], true_source[1], 'r*', markersize=12,
+                     label='True source')
+            if eff_source is not None:
+                ax2.plot(eff_source[0], eff_source[1], '^', color='magenta',
+                         markersize=10, markeredgecolor='black',
+                         label='Effective source')
+                ax2.legend(loc='upper right', fontsize=8)
         else:
+            ax2.set_title('Concentration (simple Gaussian)',
+                          fontsize=12, fontweight='bold')
+
+            ax2.set_xlabel('X (m)')
+            ax2.set_ylabel('Y (m)')
+
+            x_resolution = max(100, int(map_width * 10))
+            y_resolution = max(60, int(map_height * 10))
+            x_grid = np.linspace(0, map_width, x_resolution)
+            y_grid = np.linspace(0, map_height, y_resolution)
+            X, Y = np.meshgrid(x_grid, y_grid)
             Z = np.exp(-(np.sqrt((X - true_source[0]) ** 2 +
                                  (Y - true_source[1]) ** 2) ** 2 / 2.0))
 
-        im = ax2.contourf(X, Y, Z, levels=25, cmap='hot_r')
-        plt.colorbar(im, ax=ax2, label='Concentration')
+            im = ax2.contourf(X, Y, Z, levels=25, cmap='hot_r')
+            plt.colorbar(im, ax=ax2, label='Concentration')
 
-        self._plot_obstacles(ax2, occupancy_grid)
-        ax2.plot(true_source[0], true_source[1], 'r*', markersize=12,
-                 label='True source')
-        if eff_source is not None:
-            ax2.plot(eff_source[0], eff_source[1], '^', color='magenta',
-                     markersize=10, markeredgecolor='black',
-                     label='Effective source')
-            ax2.legend(loc='upper right', fontsize=8)
+            self._plot_obstacles(ax2, occupancy_grid)
+            ax2.plot(true_source[0], true_source[1], 'r*', markersize=12,
+                     label='True source')
 
         suptitle_parts = []
         if distance_to_true is not None and d_success_thr is not None:

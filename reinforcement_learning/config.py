@@ -15,7 +15,7 @@ ROBOT_RADIUS = 0.25             # meters, collision checking radius (matches GAD
 MIN_SOURCE_ROBOT_DIST = 3.0     # meters, minimum initial separation
 
 # LiDAR
-LIDAR_NUM_RAYS = 24
+LIDAR_NUM_RAYS = 72
 LIDAR_MAX_RANGE = 3.0           # meters
 
 # Gas sensor
@@ -23,7 +23,7 @@ GAS_HISTORY_LENGTH = 10
 GAS_FEATURES_PER_STEP = 3           # (rel_x, rel_y, binary) per timestep
 
 # State dimensions (derived)
-STATE_DIM = GAS_HISTORY_LENGTH * GAS_FEATURES_PER_STEP + LIDAR_NUM_RAYS + 2 + 2 + 1  # 59
+STATE_DIM = GAS_HISTORY_LENGTH * GAS_FEATURES_PER_STEP + LIDAR_NUM_RAYS + 2 + 2 + 1  # 107
 
 # =============================================================================
 # Rewards
@@ -59,6 +59,8 @@ FILAMENT_INITIAL_SIGMA = 0.05  # meters, initial filament size
 FILAMENT_MIN_SIGMA = 0.01       # meters, clamp to prevent div-by-zero
 FILAMENT_MASS = 1.0             # arbitrary, per-filament mass
 FILAMENT_REFLECTION_ENERGY = 0.8 # velocity retention factor on wall bounce
+FILAMENT_WARMUP_STEPS = 15      # plume steps before first obs (fresh-dispersion scenario)
+FILAMENT_WALL_OCCLUSION = True  # zero contributions from filaments behind walls
 
 # =============================================================================
 # IGDM-based gas dispersion (Gaussian + Dijkstra, legacy)
@@ -75,7 +77,7 @@ SOURCE_RELEASE_RATE = 1.0       # Q for gas source
 # Map generation
 # =============================================================================
 WALL_THICKNESS = 0.2            # meters
-MIN_GAP_SIZE = 0.8              # meters, minimum doorway/gap width
+MIN_GAP_SIZE = 1.2              # meters, minimum doorway/gap width
 ROOM_WIDTH_RANGE = (8.0, 20.0)  # meters (full range)
 ROOM_HEIGHT_RANGE = (6.0, 15.0) # meters (full range)
 
