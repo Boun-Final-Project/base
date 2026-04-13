@@ -293,15 +293,18 @@ class FilamentPlume:
         self._n = needed
 
     def _handle_obstacles(self, pre_positions):
-        """Reflect filaments that would be inside obstacles.
+        """Reflect filaments that crossed or landed inside obstacles.
 
-        For each blocked filament:
-            1. Estimate surface normal from the 4-connected free-cell
-               directions in the occupancy grid.
-            2. Reflect velocity: v' = v - 2(v·n)n.
-            3. Compute reflected position from the pre-move position so the
-               filament bounces off the wall rather than tunnelling deeper.
-            4. If the reflected position is still blocked, absorb (remove).
+        Two checks are performed for each filament:
+            A. **Tunnelling check** — a Bresenham ray from pre- to post-position
+               detects filaments that jumped completely through a thin wall
+               without their centre ever landing in a wall cell.
+            B. **Overlap check** — the post-position itself is inside a wall.
+
+        For each blocked filament the normal is estimated at the *wall cell*
+        that caused the block (not the post-position, which may be in free
+        space on the far side of the wall).  The filament is then reflected
+        from its pre-move position.
 
         Absorbed filaments are marked with ``age = max_age + 1`` so that
         the culling step removes them.
@@ -310,15 +313,52 @@ class FilamentPlume:
         if n == 0:
             return
 
-        blocked = np.zeros(n, dtype=bool)
+        res = self.grid.resolution
 
-        # Point-validity check (radius=0 — filaments are tiny blobs)
-        for i in range(n):
-            if not self.grid.is_valid(
-                position=(self.positions[i, 0], self.positions[i, 1]),
-                radius=0.0,
-            ):
+        # Vectorized world→grid for all filaments (replaces 2n scalar calls)
+        pre_gx = np.floor(pre_positions[:n, 0] / res).astype(np.int64)
+        pre_gy = np.floor(pre_positions[:n, 1] / res).astype(np.int64)
+        post_gx = np.floor(self.positions[:n, 0] / res).astype(np.int64)
+        post_gy = np.floor(self.positions[:n, 1] / res).astype(np.int64)
+
+        # Filaments that didn't change grid cell cannot have tunnelled and are
+        # unlikely to be inside a wall — skip them early.
+        cell_changed = (pre_gx != post_gx) | (pre_gy != post_gy)
+
+        # Vectorized in-wall check for post-positions.
+        clamped_gx = np.clip(post_gx, 0, self.grid.grid_width - 1)
+        clamped_gy = np.clip(post_gy, 0, self.grid.grid_height - 1)
+        out_of_bounds = (
+            (post_gx < 0) | (post_gx >= self.grid.grid_width) |
+            (post_gy < 0) | (post_gy >= self.grid.grid_height)
+        )
+        in_wall = out_of_bounds | (self.grid.grid[clamped_gy, clamped_gx] != 0)
+
+        candidates = np.where(cell_changed | in_wall)[0]
+        if candidates.size == 0:
+            return
+
+        blocked = np.zeros(n, dtype=bool)
+        # Grid coords of the wall cell that caused the block (for normal
+        # estimation).  Only meaningful when blocked[i] is True.
+        wall_gx = np.zeros(n, dtype=np.int64)
+        wall_gy = np.zeros(n, dtype=np.int64)
+
+        for i in candidates:
+            # Check A: did the filament tunnel through a wall?
+            hit = self._bresenham_first_wall(
+                pre_gx[i], pre_gy[i], post_gx[i], post_gy[i]
+            )
+            if hit is not None:
                 blocked[i] = True
+                wall_gx[i], wall_gy[i] = hit
+                continue
+
+            # Check B: did the filament land inside a wall?
+            if in_wall[i]:
+                blocked[i] = True
+                wall_gx[i] = post_gx[i]
+                wall_gy[i] = post_gy[i]
 
         if not np.any(blocked):
             return
@@ -328,8 +368,10 @@ class FilamentPlume:
             vx, vy = self.velocities[i]
             v = np.array([vx, vy], dtype=np.float64)
 
-            # Estimate surface normal at the blocked (post-move) position
-            normal = self._estimate_normal(self.positions[i, 0], self.positions[i, 1])
+            # Estimate surface normal at the wall cell (not the post-position)
+            wall_x = (wall_gx[i] + 0.5) * res
+            wall_y = (wall_gy[i] + 0.5) * res
+            normal = self._estimate_normal(wall_x, wall_y)
 
             # Reflect: v' = v - 2(v·n)n
             v_dot_n = np.dot(v, normal)
@@ -343,10 +385,18 @@ class FilamentPlume:
                 position=(reflected_pos[0], reflected_pos[1]),
                 radius=0.0,
             ):
-                self.positions[i] = reflected_pos
+                # Verify the reflected path doesn't also cross a wall
+                ref_gx, ref_gy = self.grid.world_to_grid(
+                    reflected_pos[0], reflected_pos[1]
+                )
+                if self._bresenham_first_wall(pre_gx[i], pre_gy[i], ref_gx, ref_gy) is None:
+                    self.positions[i] = reflected_pos
+                else:
+                    # Reflection also crosses a wall — snap back
+                    self.positions[i] = pre_positions[i]
             else:
-                # Absorb — mark for removal in next cull
-                self.ages[i] = self.max_age + 1
+                # Reflected position is inside a wall — snap back
+                self.positions[i] = pre_positions[i]
 
     def _estimate_normal(self, x, y):
         """Estimate the outward surface normal at a point inside an obstacle.
@@ -387,23 +437,20 @@ class FilamentPlume:
         theta = self.rng.uniform(0, 2 * np.pi)
         return np.array([np.cos(theta), np.sin(theta)], dtype=np.float64)
 
-    def _bresenham_clear(self, x0, y0, x1, y1):
-        """Return True if no obstacle lies on the Bresenham line from (x0,y0) to (x1,y1).
-
-        Walks grid cells using the standard Bresenham algorithm. Any cell
-        outside grid bounds or with a non-zero occupancy value blocks the ray.
+    def _bresenham_first_wall(self, x0, y0, x1, y1):
+        """Walk a Bresenham line and return the first wall cell hit, or None.
 
         Parameters
         ----------
         x0, y0 : int
-            Grid coordinates of the start point (filament cell).
+            Grid coordinates of the start point.
         x1, y1 : int
-            Grid coordinates of the end point (query cell).
+            Grid coordinates of the end point.
 
         Returns
         -------
-        bool
-            True if the line of sight is unobstructed.
+        tuple[int, int] or None
+            ``(gx, gy)`` of the first occupied cell, or ``None`` if clear.
         """
         dx = abs(x1 - x0)
         dy = abs(y1 - y0)
@@ -413,9 +460,9 @@ class FilamentPlume:
 
         while True:
             if not (0 <= x0 < self.grid.grid_width and 0 <= y0 < self.grid.grid_height):
-                return False
+                return (x0, y0)
             if self.grid.grid[y0, x0] != 0:
-                return False
+                return (x0, y0)
             if x0 == x1 and y0 == y1:
                 break
             e2 = 2 * err
@@ -425,7 +472,14 @@ class FilamentPlume:
             if e2 < dx:
                 err += dx
                 y0 += sy
-        return True
+        return None
+
+    def _bresenham_clear(self, x0, y0, x1, y1):
+        """Return True if no obstacle lies on the Bresenham line.
+
+        Convenience wrapper around :meth:`_bresenham_first_wall`.
+        """
+        return self._bresenham_first_wall(x0, y0, x1, y1) is None
 
     def _cull(self, alive_mask):
         """Compact the arrays to keep only alive filaments."""

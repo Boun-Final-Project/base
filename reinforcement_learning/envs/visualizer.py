@@ -50,7 +50,8 @@ class StepVisualizer:
                   current_step=None, occupancy_grid=None,
                   distance_to_true=None, d_success_thr=None,
                   sensor_reading=None, sensor_threshold=None, digital_value=None,
-                  wind_offset=None, eff_source=None, filaments=None):
+                  wind_offset=None, eff_source=None, filaments=None,
+                  wind_speed=None, wind_dir=None):
         """Save a 2-panel step visualization.
 
         Parameters
@@ -209,6 +210,36 @@ class StepVisualizer:
             self._plot_obstacles(ax2, occupancy_grid)
             ax2.plot(true_source[0], true_source[1], 'r*', markersize=12,
                      label='True source')
+
+        # Wind arrow on the concentration panel (ax2)
+        if wind_speed is not None and wind_dir is not None:
+            # Arrow drawn in axes-fraction coords so it is always in the
+            # lower-left corner regardless of map dimensions.
+            arrow_dx = 0.12 * np.cos(wind_dir)
+            arrow_dy = 0.12 * np.sin(wind_dir)
+            ax2.annotate(
+                "",
+                xy=(0.15 + arrow_dx, 0.12 + arrow_dy),
+                xytext=(0.15, 0.12),
+                xycoords="axes fraction",
+                textcoords="axes fraction",
+                arrowprops=dict(
+                    arrowstyle="-|>",
+                    color="deepskyblue",
+                    lw=2.0,
+                    mutation_scale=15,
+                ),
+            )
+            ax2.text(
+                0.15, 0.05,
+                f"Wind: {wind_speed:.2f} m/s",
+                transform=ax2.transAxes,
+                fontsize=8,
+                color="deepskyblue",
+                ha="center",
+                va="bottom",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.6, ec="none"),
+            )
 
         suptitle_parts = []
         if distance_to_true is not None and d_success_thr is not None:

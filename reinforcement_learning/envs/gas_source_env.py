@@ -341,6 +341,8 @@ class GasSourceEnv(gymnasium.Env):
             eff_source=eff_source,
             filaments=self._plume.get_all_filaments()
             if cfg.GAS_MODEL == "filament" else None,
+            wind_speed=self._wind.speed,
+            wind_dir=self._wind.direction,
         )
         return None
 
