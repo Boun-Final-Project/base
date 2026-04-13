@@ -8,6 +8,7 @@ Usage:
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -94,6 +95,89 @@ class VecEnv:
         )
 
 
+def _worker(child_conn, parent_conn, env_fn):
+    """Subprocess entry point: owns one env, serves step/reset/close commands."""
+    parent_conn.close()
+    env = env_fn()
+    try:
+        while True:
+            cmd, data = child_conn.recv()
+            if cmd == "step":
+                obs, reward, terminated, truncated, info = env.step(data)
+                done = terminated or truncated
+                if done:
+                    info["terminal_observation"] = obs
+                    info["terminated"] = terminated
+                    info["truncated"] = truncated
+                    obs, _ = env.reset()
+                child_conn.send((obs, np.float32(reward), np.float32(done), info))
+            elif cmd == "reset":
+                obs, info = env.reset()
+                child_conn.send((obs, info))
+            elif cmd == "close":
+                break
+    finally:
+        child_conn.close()
+
+
+class SubprocVecEnv:
+    """Vectorized environment that runs each env in its own subprocess.
+
+    All envs step in parallel across CPU cores.  Communication is via
+    ``multiprocessing.Pipe`` using the ``fork`` start method (Linux).
+    """
+
+    def __init__(self, env_fns):
+        self.num_envs = len(env_fns)
+        ctx = mp.get_context("fork")
+
+        # Pipe() returns (parent_conn, child_conn)
+        pairs = [ctx.Pipe(duplex=True) for _ in range(self.num_envs)]
+        self._parents  = [p for p, _ in pairs]
+        child_conns    = [c for _, c in pairs]
+
+        self._procs = []
+        for child_conn, parent_conn, fn in zip(child_conns, self._parents, env_fns):
+            p = ctx.Process(
+                target=_worker,
+                args=(child_conn, parent_conn, fn),
+                daemon=True,
+            )
+            p.start()
+            child_conn.close()   # parent doesn't use the child end
+            self._procs.append(p)
+
+    def step(self, actions):
+        for conn, action in zip(self._parents, actions):
+            conn.send(("step", action))
+        results = [conn.recv() for conn in self._parents]
+        obs, rewards, dones, infos = zip(*results)
+        return (
+            np.stack(obs),
+            np.array(rewards, dtype=np.float32),
+            np.array(dones,   dtype=np.float32),
+            list(infos),
+        )
+
+    def reset(self):
+        for conn in self._parents:
+            conn.send(("reset", None))
+        results  = [conn.recv() for conn in self._parents]
+        obs_list, info_list = zip(*results)
+        return np.stack(obs_list), list(info_list)
+
+    def close(self):
+        for conn in self._parents:
+            try:
+                conn.send(("close", None))
+            except BrokenPipeError:
+                pass
+        for p in self._procs:
+            p.join(timeout=5)
+            if p.is_alive():
+                p.terminate()
+
+
 def get_curriculum_ranges(progress):
     """Compute room size ranges based on training progress (0→1).
 
@@ -131,7 +215,12 @@ def train(args):
     # Vectorized environments
     template_id = args.template if args.template >= 0 else None
     env_fns = [make_env(args.seed, i, template_id=template_id) for i in range(args.num_envs)]
-    vec_env = VecEnv(env_fns)
+    if args.serial:
+        vec_env = VecEnv(env_fns)
+        print(f"VecEnv: serial ({args.num_envs} envs)")
+    else:
+        vec_env = SubprocVecEnv(env_fns)
+        print(f"VecEnv: subprocess ({args.num_envs} envs, {mp.cpu_count()} CPU cores)")
     obs_dim = cfg.STATE_DIM
     action_dim = 2 if args.arch == "dual" else 1
 
@@ -370,6 +459,8 @@ def train(args):
             }, path)
             print(f"  Saved checkpoint: {path}")
 
+    vec_env.close()
+
     total_time = time.time() - start_time
     print(f"\nTraining complete. {global_step:,} steps in {total_time:.0f}s "
           f"({global_step / total_time:.0f} SPS)")
@@ -438,6 +529,8 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--template", type=int, default=-1,
                         help="Map template ID (0-5). -1 = random (default)")
+    parser.add_argument("--serial", action="store_true", default=False,
+                        help="Use serial VecEnv instead of subprocess (for debugging)")
     parser.add_argument("--arch", type=str, default="mlp",
                         choices=["mlp", "modular", "dual"],
                         help="Network: 'mlp' (flat), 'modular' (GRU+Conv shared fusion), "

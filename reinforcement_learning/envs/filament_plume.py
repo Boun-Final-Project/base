@@ -129,6 +129,15 @@ class FilamentPlume:
 
         self.rng = rng if rng is not None else np.random.default_rng()
 
+        # Precompute the number of parametric samples needed per path so that
+        # no grid cell can be skipped.  Worst case: axis-aligned displacement of
+        # max_speed * dt; we need step_size < resolution.
+        # Using 3-sigma turbulence as a practical upper bound on speed.
+        _max_disp = self.wind_speed * (1.0 + 3.0 * self.turbulence_scale) * self.dt
+        self._tunnel_check_steps = max(
+            8, int(np.ceil(_max_disp / self.grid.resolution)) + 2
+        )
+
         # Filament state: parallel arrays that grow/shrink via culling
         # Pre-allocate with generous capacity to avoid frequent reallocation.
         # Typical steady state is ~240 filaments (2/step × 120 max age).
@@ -295,147 +304,186 @@ class FilamentPlume:
     def _handle_obstacles(self, pre_positions):
         """Reflect filaments that crossed or landed inside obstacles.
 
-        Two checks are performed for each filament:
-            A. **Tunnelling check** — a Bresenham ray from pre- to post-position
-               detects filaments that jumped completely through a thin wall
-               without their centre ever landing in a wall cell.
-            B. **Overlap check** — the post-position itself is inside a wall.
+        Both the tunnelling check (filament jumped through a thin wall) and the
+        overlap check (filament landed inside a wall) are performed in a single
+        vectorized pass: the path from pre- to post-position is sampled at
+        ``_tunnel_check_steps`` equally-spaced points and all sample grid lookups
+        are executed as one NumPy array operation over all candidates.
 
-        For each blocked filament the normal is estimated at the *wall cell*
-        that caused the block (not the post-position, which may be in free
-        space on the far side of the wall).  The filament is then reflected
-        from its pre-move position.
-
-        Absorbed filaments are marked with ``age = max_age + 1`` so that
-        the culling step removes them.
+        For each blocked filament the surface normal is estimated at the first
+        wall cell hit.  Reflection and reflected-path validation are also
+        vectorized.  Filaments whose reflected path is also blocked are snapped
+        back to their pre-move position.
         """
         n = self._n
         if n == 0:
             return
 
         res = self.grid.resolution
+        W = self.grid.grid_width
+        H = self.grid.grid_height
 
-        # Vectorized world→grid for all filaments (replaces 2n scalar calls)
-        pre_gx = np.floor(pre_positions[:n, 0] / res).astype(np.int64)
-        pre_gy = np.floor(pre_positions[:n, 1] / res).astype(np.int64)
+        # --- Grid coordinates (vectorized) ---
         post_gx = np.floor(self.positions[:n, 0] / res).astype(np.int64)
         post_gy = np.floor(self.positions[:n, 1] / res).astype(np.int64)
+        pre_gx  = np.floor(pre_positions[:n, 0]  / res).astype(np.int64)
+        pre_gy  = np.floor(pre_positions[:n, 1]  / res).astype(np.int64)
 
-        # Filaments that didn't change grid cell cannot have tunnelled and are
-        # unlikely to be inside a wall — skip them early.
         cell_changed = (pre_gx != post_gx) | (pre_gy != post_gy)
 
-        # Vectorized in-wall check for post-positions.
-        clamped_gx = np.clip(post_gx, 0, self.grid.grid_width - 1)
-        clamped_gy = np.clip(post_gy, 0, self.grid.grid_height - 1)
-        out_of_bounds = (
-            (post_gx < 0) | (post_gx >= self.grid.grid_width) |
-            (post_gy < 0) | (post_gy >= self.grid.grid_height)
-        )
-        in_wall = out_of_bounds | (self.grid.grid[clamped_gy, clamped_gx] != 0)
+        out_of_bounds = (post_gx < 0) | (post_gx >= W) | (post_gy < 0) | (post_gy >= H)
+        cgx = np.clip(post_gx, 0, W - 1)
+        cgy = np.clip(post_gy, 0, H - 1)
+        in_wall_post = out_of_bounds | (self.grid.grid[cgy, cgx] != 0)
 
-        candidates = np.where(cell_changed | in_wall)[0]
+        candidates = np.where(cell_changed | in_wall_post)[0]
         if candidates.size == 0:
             return
 
-        blocked = np.zeros(n, dtype=bool)
-        # Grid coords of the wall cell that caused the block (for normal
-        # estimation).  Only meaningful when blocked[i] is True.
-        wall_gx = np.zeros(n, dtype=np.int64)
-        wall_gy = np.zeros(n, dtype=np.int64)
+        # --- Vectorized path sampling ---
+        # Sample the path pre→post at n_s equally-spaced t values, excluding
+        # t=0 (start is known free) and including t=1 (catches overlap too).
+        n_s = self._tunnel_check_steps
+        t   = np.linspace(0.0, 1.0, n_s + 1)[1:]          # (n_s,)
 
-        for i in candidates:
-            # Check A: did the filament tunnel through a wall?
-            hit = self._bresenham_first_wall(
-                pre_gx[i], pre_gy[i], post_gx[i], post_gy[i]
-            )
-            if hit is not None:
-                blocked[i] = True
-                wall_gx[i], wall_gy[i] = hit
-                continue
+        px = pre_positions[candidates, 0]                   # (n_cand,)
+        py = pre_positions[candidates, 1]
+        qx = self.positions[candidates, 0]
+        qy = self.positions[candidates, 1]
 
-            # Check B: did the filament land inside a wall?
-            if in_wall[i]:
-                blocked[i] = True
-                wall_gx[i] = post_gx[i]
-                wall_gy[i] = post_gy[i]
+        # Sample world coords and convert to grid indices: (n_cand, n_s)
+        sx  = px[:, None] + t[None, :] * (qx - px)[:, None]
+        sy  = py[:, None] + t[None, :] * (qy - py)[:, None]
+        sgx = np.floor(sx / res).astype(np.int64)
+        sgy = np.floor(sy / res).astype(np.int64)
 
-        if not np.any(blocked):
+        s_oob    = (sgx < 0) | (sgx >= W) | (sgy < 0) | (sgy >= H)
+        sgx_c    = np.clip(sgx, 0, W - 1)
+        sgy_c    = np.clip(sgy, 0, H - 1)
+        s_in_wall = s_oob | (self.grid.grid[sgy_c, sgx_c] != 0)  # (n_cand, n_s)
+
+        any_blocked = s_in_wall.any(axis=1)                 # (n_cand,)
+        if not any_blocked.any():
             return
 
-        # Handle each blocked filament
-        for i in np.where(blocked)[0]:
-            vx, vy = self.velocities[i]
-            v = np.array([vx, vy], dtype=np.float64)
+        first_hit  = s_in_wall.argmax(axis=1)               # (n_cand,) index of first True
 
-            # Estimate surface normal at the wall cell (not the post-position)
-            wall_x = (wall_gx[i] + 0.5) * res
-            wall_y = (wall_gy[i] + 0.5) * res
-            normal = self._estimate_normal(wall_x, wall_y)
+        blocked_ci = np.where(any_blocked)[0]               # indices into candidates
+        blocked_fi = candidates[blocked_ci]                  # actual filament indices
+        fh         = first_hit[blocked_ci]                   # first-hit step per blocked fil
 
-            # Reflect: v' = v - 2(v·n)n
-            v_dot_n = np.dot(v, normal)
-            v_reflected = v - 2.0 * v_dot_n * normal
+        wall_gx = sgx[blocked_ci, fh]                       # (n_blocked,)
+        wall_gy = sgy[blocked_ci, fh]
 
-            # Apply reflected displacement from the pre-move position, so
-            # the filament starts outside the wall before bouncing.
-            # Scale by reflection_energy so energy loss actually shortens travel.
-            reflected_pos = pre_positions[i] + v_reflected * self.reflection_energy * self.dt
-            if self.grid.is_valid(
-                position=(reflected_pos[0], reflected_pos[1]),
-                radius=0.0,
-            ):
-                # Verify the reflected path doesn't also cross a wall
-                ref_gx, ref_gy = self.grid.world_to_grid(
-                    reflected_pos[0], reflected_pos[1]
-                )
-                if self._bresenham_first_wall(pre_gx[i], pre_gy[i], ref_gx, ref_gy) is None:
-                    self.positions[i] = reflected_pos
-                else:
-                    # Reflection also crosses a wall — snap back
-                    self.positions[i] = pre_positions[i]
-            else:
-                # Reflected position is inside a wall — snap back
-                self.positions[i] = pre_positions[i]
+        # --- Vectorized reflection ---
+        normals    = self._estimate_normals_batch(wall_gx, wall_gy)  # (n_blocked, 2)
+        v          = self.velocities[blocked_fi]                     # (n_blocked, 2)
+        v_dot_n    = (v * normals).sum(axis=1, keepdims=True)        # (n_blocked, 1)
+        v_ref      = v - 2.0 * v_dot_n * normals                    # (n_blocked, 2)
 
-    def _estimate_normal(self, x, y):
-        """Estimate the outward surface normal at a point inside an obstacle.
+        pre_b      = pre_positions[blocked_fi]                       # (n_blocked, 2)
+        ref_pos    = pre_b + v_ref * self.reflection_energy * self.dt
 
-        Checks the 4 cardinal neighbors in the occupancy grid. The normal
-        is the average direction toward free cells, normalized.
+        # --- Validate reflected positions ---
+        ref_gx = np.floor(ref_pos[:, 0] / res).astype(np.int64)
+        ref_gy = np.floor(ref_pos[:, 1] / res).astype(np.int64)
+
+        ref_oob    = (ref_gx < 0) | (ref_gx >= W) | (ref_gy < 0) | (ref_gy >= H)
+        ref_gx_c   = np.clip(ref_gx, 0, W - 1)
+        ref_gy_c   = np.clip(ref_gy, 0, H - 1)
+        ref_in_free = ~ref_oob & (self.grid.grid[ref_gy_c, ref_gx_c] == 0)
+
+        ref_path_clear = self._paths_clear(pre_b, ref_pos)          # (n_blocked,)
+
+        use_reflection = ref_in_free & ref_path_clear
+        self.positions[blocked_fi] = np.where(
+            use_reflection[:, None], ref_pos, pre_b
+        )
+
+    def _estimate_normals_batch(self, wall_gx, wall_gy):
+        """Vectorized outward surface normal estimation for N wall cells.
+
+        Checks the 4 cardinal neighbors of each cell. The normal is the mean
+        direction toward free neighbors, normalized to unit length.
 
         Parameters
         ----------
-        x, y : float
-            World coordinates of the point (inside an obstacle).
+        wall_gx, wall_gy : ndarray of int, shape (N,)
+            Grid coordinates of the wall cells.
 
         Returns
         -------
-        ndarray
-            Unit vector pointing toward free space, shape (2,).
+        ndarray, shape (N, 2)
+            Unit normals pointing toward free space.
         """
-        gx, gy = self.grid.world_to_grid(x, y)
+        W = self.grid.grid_width
+        H = self.grid.grid_height
 
-        free_dirs = []
-        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-            ng = gx + dx
-            ngy = gy + dy
-            if 0 <= ng < self.grid.grid_width and 0 <= ngy < self.grid.grid_height:
-                if self.grid.grid[ngy, ng] == 0:
-                    free_dirs.append(np.array([float(dx), float(dy)]))
+        # Cardinal offsets and matching float direction vectors
+        offsets = np.array([[1, 0], [-1, 0], [0, 1], [0, -1]], dtype=np.int64)
+        dirs    = offsets.astype(np.float64)                        # (4, 2)
 
-        if free_dirs:
-            n = np.mean(free_dirs, axis=0)
-            norm = np.linalg.norm(n)
-            if norm > 0:
-                return n / norm
-            return np.array([1.0, 0.0], dtype=np.float64)
+        # Neighbor grid coords: (N, 4)
+        ngx = wall_gx[:, None] + offsets[None, :, 0]
+        ngy = wall_gy[:, None] + offsets[None, :, 1]
 
-        # Completely surrounded — no valid reflection direction.
-        # This is rare (filament trapped in a 3×3 wall pocket).
-        # Return a random direction so the filament tries to escape.
-        theta = self.rng.uniform(0, 2 * np.pi)
-        return np.array([np.cos(theta), np.sin(theta)], dtype=np.float64)
+        valid   = (ngx >= 0) & (ngx < W) & (ngy >= 0) & (ngy < H)
+        ngx_c   = np.clip(ngx, 0, W - 1)
+        ngy_c   = np.clip(ngy, 0, H - 1)
+        is_free = valid & (self.grid.grid[ngy_c, ngx_c] == 0)       # (N, 4)
+
+        # Sum free-neighbor direction vectors: (N, 4, 1) * (1, 4, 2) → (N, 2)
+        normal = (is_free[:, :, None] * dirs[None, :, :]).sum(axis=1)
+
+        norms      = np.linalg.norm(normal, axis=1, keepdims=True)  # (N, 1)
+        has_normal = (norms > 0).ravel()
+
+        normal[has_normal] /= norms[has_normal]
+
+        # Completely surrounded (rare): assign a random escape direction
+        n_stuck = int((~has_normal).sum())
+        if n_stuck:
+            thetas               = self.rng.uniform(0.0, 2.0 * np.pi, size=n_stuck)
+            normal[~has_normal]  = np.stack([np.cos(thetas), np.sin(thetas)], axis=1)
+
+        return normal
+
+    def _paths_clear(self, starts, ends):
+        """Vectorized path-clear check for N paths using parametric sampling.
+
+        Reuses ``_tunnel_check_steps`` samples.  The start point (t=0) is
+        excluded since it is known to be free (pre-move position).
+
+        Parameters
+        ----------
+        starts, ends : ndarray, shape (N, 2)
+            World coordinates of path start and end points.
+
+        Returns
+        -------
+        ndarray of bool, shape (N,)
+            True if the path contains no wall or out-of-bounds cell.
+        """
+        n_s = self._tunnel_check_steps
+        t   = np.linspace(0.0, 1.0, n_s + 1)[1:]                   # (n_s,)
+
+        res = self.grid.resolution
+        W   = self.grid.grid_width
+        H   = self.grid.grid_height
+
+        # Sample world coords: (N, n_s)
+        sx  = starts[:, 0:1] + t * (ends[:, 0:1] - starts[:, 0:1])
+        sy  = starts[:, 1:2] + t * (ends[:, 1:2] - starts[:, 1:2])
+
+        sgx  = np.floor(sx / res).astype(np.int64)
+        sgy  = np.floor(sy / res).astype(np.int64)
+        s_oob = (sgx < 0) | (sgx >= W) | (sgy < 0) | (sgy >= H)
+
+        sgx_c = np.clip(sgx, 0, W - 1)
+        sgy_c = np.clip(sgy, 0, H - 1)
+        s_in_wall = s_oob | (self.grid.grid[sgy_c, sgx_c] != 0)
+
+        return ~s_in_wall.any(axis=1)
 
     def _bresenham_first_wall(self, x0, y0, x1, y1):
         """Walk a Bresenham line and return the first wall cell hit, or None.
