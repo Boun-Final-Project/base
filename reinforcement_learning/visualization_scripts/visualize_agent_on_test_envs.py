@@ -47,17 +47,24 @@ from reinforcement_learning.models.actor_critic import (
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-TEMPLATE_NAMES = [
-    "Empty",
-    "Single_Wall",
-    "U-Shape",
-    "Three_Walls",
-    "Complex_Maze",
-    "Multi-Room",
-]
+TEMPLATE_NAMES = {
+    0: "Empty",
+    1: "Single_Wall",
+    2: "U-Shape",
+    3: "Three_Walls",
+    4: "Complex_Maze",
+    5: "Multi-Room",
+}
 
 # One env_id per template (indices into test_envs.json)
-ENV_IDS = [3, 13, 33, 43, 51, 83]
+ENV_IDS = [
+    # 3, 
+    # 13, 
+    # 33, 
+    # 43, 
+    # 51, 
+    83
+    ]
 
 _SKIP_KEYS = {"seed", "template", "arch", "curriculum", "anneal_lr",
               "anneal_start", "target_kl", "output_dir"}
