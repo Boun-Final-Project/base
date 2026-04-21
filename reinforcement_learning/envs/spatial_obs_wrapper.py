@@ -126,7 +126,9 @@ class SpatialObsWrapper:
         free_mask = np.arange(n_steps)[None, :] < n_free[:, None]            # (R, S)
 
         free_valid = free_mask & in_map
-        self._occ_world[wr[free_valid], wc[free_valid]] = 1.0
+        fr, fc = wr[free_valid], wc[free_valid]
+        not_wall = self._occ_world[fr, fc] != -1.0
+        self._occ_world[fr[not_wall], fc[not_wall]] = 1.0
 
         # Wall: first hit step per ray (only for rays that actually hit)
         hit_mask = distances < 1.0                                            # (R,)

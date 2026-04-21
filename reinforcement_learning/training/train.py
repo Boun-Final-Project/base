@@ -439,7 +439,7 @@ def train(args):
                 lr = args.lr
             else:
                 frac = 1.0 - (progress - args.anneal_start) / (1.0 - args.anneal_start)
-                lr = frac * args.lr
+                lr = max(args.min_lr, frac * args.lr)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
@@ -669,6 +669,8 @@ def main():
     parser.add_argument("--anneal-lr", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--anneal-start", type=float, default=0.5,
                         help="Fraction of training before LR annealing begins (default: 0.5)")
+    parser.add_argument("--min-lr", type=float, default=1e-4,
+                        help="Minimum learning rate floor during annealing (default: 1e-4)")
     parser.add_argument("--target-kl", type=float, default=None,
                         help="KL early stopping threshold (e.g. 0.03). None = disabled")
     parser.add_argument("--curriculum", action="store_true", default=False,
