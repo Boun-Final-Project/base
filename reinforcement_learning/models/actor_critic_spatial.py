@@ -1,5 +1,5 @@
 """
-Dual-stream spatial CNN actor-critic with FiLM wind conditioning.
+Dual-stream spatial CNN actor-critic with wind conditioning.
 
 Input:
     spatial : (B, 4, 98, 98) — channels: [occupancy, gas, recency, det_count]
@@ -9,7 +9,12 @@ CNN output geometry (98×98 input, 0.5 m/cell):
     stride-2 conv ×3 → 49 → 25 → 13 per spatial dim
     Static stream  (1 ch)  → 13×13×32
     Dynamic stream (3 ch)  → 13×13×64
-    1×1 fusion             → 13×13×128  → flatten → 21632
+    1×1 fusion             → 13×13×96  → flatten → 16224
+
+Feature fusion:
+    CNN proj     → (B, 512)
+    Wind encoder → (B, 64)
+    Concatenated → (B, 576) → shared MLP
 """
 
 import torch
@@ -26,8 +31,9 @@ class ActorCriticSpatial(nn.Module):
 
     def __init__(
         self,
-        film_hidden=cfg.SPATIAL_FILM_HIDDEN,
         cnn_out_channels=cfg.SPATIAL_CNN_OUT_CH,
+        wind_hidden=cfg.SPATIAL_WIND_HIDDEN,
+        proj_dim=cfg.SPATIAL_PROJ_DIM,
         shared_hidden=cfg.SPATIAL_SHARED_HIDDEN,
         actor_head_dim=cfg.SPATIAL_ACTOR_DIM,
         critic_head_dim=cfg.SPATIAL_CRITIC_DIM,
@@ -38,7 +44,7 @@ class ActorCriticSpatial(nn.Module):
         def _conv_out(s, k, stride, pad):
             return (s + 2 * pad - k) // stride + 1
         _h = _conv_out(_conv_out(_conv_out(cfg.SPATIAL_GRID_SIZE, 5, 2, 2), 3, 2, 1), 3, 2, 1)
-        cnn_flat = _h * _h * cnn_out_channels  # 13×13×128 = 21632 with default config
+        cnn_flat = _h * _h * cnn_out_channels  # 13×13×96 = 16224 with default config
 
         # Static stream: occupancy (channel 0)
         self.static_cnn = nn.Sequential(
@@ -59,16 +65,22 @@ class ActorCriticSpatial(nn.Module):
             layer_init(nn.Conv2d(96, cnn_out_channels, 1)), nn.ReLU(),
         )
 
-        # FiLM conditioning: wind → (γ, β) for cnn_flat-dim features
-        self.film_net = nn.Sequential(
-            layer_init(nn.Linear(2, film_hidden)),
+        # CNN flat projection
+        self.cnn_proj = nn.Sequential(
+            layer_init(nn.Linear(cnn_flat, proj_dim)),
+            nn.Tanh(),
+        )
+
+        # Wind encoder
+        self.wind_encoder = nn.Sequential(
+            layer_init(nn.Linear(2, 32)),
             nn.ReLU(),
-            layer_init(nn.Linear(film_hidden, 2 * cnn_flat)),
+            layer_init(nn.Linear(32, wind_hidden)),
         )
 
         # Shared MLP
         layers = []
-        in_dim = cnn_flat
+        in_dim = proj_dim + wind_hidden
         for out_dim in shared_hidden:
             layers += [layer_init(nn.Linear(in_dim, out_dim)), nn.Tanh()]
             in_dim = out_dim
@@ -101,14 +113,13 @@ class ActorCriticSpatial(nn.Module):
     def _encode(self, spatial, wind):
         static  = self.static_cnn(spatial[:, 0:1])                        # (B, 32, 13, 13)
         dynamic = self.dynamic_cnn(spatial[:, 1:4])                        # (B, 64, 13, 13)
-        flat    = self.fusion_conv(torch.cat([static, dynamic], dim=1))    # (B, C, 13, 13)
-        flat    = flat.flatten(1)                                           # (B, cnn_flat)
+        flat    = self.fusion_conv(torch.cat([static, dynamic], dim=1))    # (B, 96, 13, 13)
+        flat    = self.cnn_proj(flat.flatten(1))                           # (B, proj_dim)
 
-        gamma_beta      = self.film_net(wind)
-        gamma, beta     = gamma_beta.chunk(2, dim=-1)
-        flat            = gamma * flat + beta
+        wind_emb = self.wind_encoder(wind)                                 # (B, wind_hidden)
+        fused    = torch.cat([flat, wind_emb], dim=-1)                     # (B, proj_dim + wind_hidden)
 
-        return self.shared_mlp(flat)                                        # (B, shared_out[-1])
+        return self.shared_mlp(fused)                                      # (B, shared_out[-1])
 
     def _critic_value(self, shared):
         return self.critic_out(self.critic_res(self.critic_proj(shared)))
