@@ -1,12 +1,13 @@
 """
 Ego-centric spatial observation wrapper for GasSourceEnv.
 
-Maintains four world-space grids sized to the actual map (at most 40×30 cells
-for the maximum 20×15m room at 0.5m/cell). Each step the world grids are
-embedded into a fixed 98×98 ego grid centred on the robot.
+Maintains three world-space grids sized to the actual map (at most 100×75 cells
+for the maximum 20×15m room at 0.2m/cell). Each step the world grids are
+embedded into a fixed 221×221 ego grid centred on the robot.
 
-Since the ego radius is 49m and no map exceeds 20×15m, the entire map always
-fits inside the ego window — no large buffer or padding tricks needed.
+The ego half-width is 110 cells = 22m, larger than the worst-case map dimension
+(20m), so the entire map always fits inside the ego window regardless of where
+the robot is — no large buffer or padding tricks needed.
 
 Coordinate convention (verified against OccupancyGrid.world_to_grid):
     world_col = floor(world_x / CELL_RES)
@@ -14,10 +15,12 @@ Coordinate convention (verified against OccupancyGrid.world_to_grid):
 Row and y are co-directional — no axis flip.
 
 Channel encoding (consistent negative-signal convention):
-    occupancy : 0=unknown,     1=free,        -1=wall
-    gas        : 0=unvisited,   1=detection,   -1=no detection
-    recency    : 0=unvisited/stale … 1=just visited
-    det_count  : 0=unvisited, normalised by max count across all cells ∈ [0,1]
+    occupancy     : 0=unknown,     1=free,        -1=wall
+    gas           : 0=unvisited,   1=detection,   -1=no detection
+    recency       : 0=unvisited/stale … 1=just visited
+    wind_gradient : dot product of cell offset from robot with wind direction,
+                    scaled by wind speed and normalised to [-1, 1]
+                    positive = upwind, negative = downwind
 """
 
 import numpy as np
@@ -26,8 +29,8 @@ from .. import config as cfg
 
 
 class SpatialObsWrapper:
-    GRID_SIZE = cfg.SPATIAL_GRID_SIZE        # 98 cells — ego window half-width = 49
-    CELL_RES  = cfg.VISITED_CELL_RESOLUTION  # 0.5 m per cell
+    GRID_SIZE = cfg.SPATIAL_GRID_SIZE        # 221 cells — ego window half-width = 110
+    CELL_RES  = cfg.SPATIAL_CELL_RES         # 0.2 m per cell (decoupled from reward tracking)
 
     def __init__(self, env):
         self._env = env
@@ -37,8 +40,9 @@ class SpatialObsWrapper:
         self._occ_world = None   # 0=unknown, 1=free, -1=wall
         self._gas_world = None   # 0=unvisited, 1=detection, -1=no detection
         self._rec_world = None   # recency ∈ [0, 1]
-        self._det_world = None   # raw detection counts (unnormalised)
-        self._max_det   = 0
+
+        # Ego-space wind gradient — precomputed at reset, constant per episode
+        self._wind_grad = None   # (GRID_SIZE, GRID_SIZE), ∈ [-1, 1]
 
         # Map cell dimensions — set on reset
         self._map_h_cells = 0
@@ -59,8 +63,20 @@ class SpatialObsWrapper:
         self._occ_world = np.zeros((h, w), dtype=np.float32)
         self._gas_world = np.zeros((h, w), dtype=np.float32)   # 0 = unvisited
         self._rec_world = np.zeros((h, w), dtype=np.float32)
-        self._det_world = np.zeros((h, w), dtype=np.float32)
-        self._max_det   = 0
+
+        # Precompute wind gradient for this episode (wind is constant per episode)
+        center = self.GRID_SIZE // 2  # 110 for GRID_SIZE=221
+        dc, dr = np.meshgrid(
+            np.arange(self.GRID_SIZE, dtype=np.float32) - center,
+            np.arange(self.GRID_SIZE, dtype=np.float32) - center,
+        )
+        wind_obs   = self._env._wind.get_observation()  # (speed/max, dir/2π)
+        speed_norm = wind_obs[0]
+        wind_angle = wind_obs[1] * 2.0 * np.pi
+        max_dist   = center * np.sqrt(2.0)
+        self._wind_grad = (
+            speed_norm * (dc * np.cos(wind_angle) + dr * np.sin(wind_angle)) / max_dist
+        ).astype(np.float32)
 
         robot_pos = self._env._robot_pos
         distances = self._env._lidar.scan(tuple(robot_pos))
@@ -155,22 +171,16 @@ class SpatialObsWrapper:
         # Recency
         self._rec_world[row, col] = 1.0
 
-        # Detection count
-        if binary:
-            self._det_world[row, col] += 1.0
-            val = int(self._det_world[row, col])
-            if val > self._max_det:
-                self._max_det = val
-
     def _get_obs(self):
-        """Embed world grids into 98×98 ego window centred on the robot."""
+        """Embed world grids into the ego window centred on the robot."""
         rx, ry     = self._env._robot_pos
         robot_col  = int(np.floor(rx / self.CELL_RES))
         robot_row  = int(np.floor(ry / self.CELL_RES))
 
         # Top-left corner of the world grid in ego coordinates
-        ego_r0 = 49 - robot_row
-        ego_c0 = 49 - robot_col
+        center = self.GRID_SIZE // 2
+        ego_r0 = center - robot_row
+        ego_c0 = center - robot_col
 
         def _embed(world_buf, fill=0.0):
             out  = np.full((self.GRID_SIZE, self.GRID_SIZE), fill, dtype=np.float32)
@@ -189,9 +199,6 @@ class SpatialObsWrapper:
         occ = _embed(self._occ_world, fill=0.0)
         gas = _embed(self._gas_world, fill=0.0)   # out-of-map = unvisited
         rec = _embed(self._rec_world, fill=0.0)
-        det = _embed(self._det_world / self._max_det if self._max_det > 0
-                     else self._det_world,           fill=0.0)
 
-        spatial = np.stack([occ, gas, rec, det], axis=0)  # (4, 98, 98)
-        wind    = np.array(self._env._wind.get_observation(), dtype=np.float32)  # (2,)
-        return spatial, wind
+        spatial = np.stack([occ, gas, rec, self._wind_grad], axis=0)  # (4, GRID_SIZE, GRID_SIZE)
+        return spatial

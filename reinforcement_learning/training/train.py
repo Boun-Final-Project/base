@@ -212,12 +212,11 @@ class SubprocVecEnv:
 
 
 def _stack_spatial(obs_list):
-    return (np.stack([o[0] for o in obs_list]),   # (N, 4, 98, 98)
-            np.stack([o[1] for o in obs_list]))    # (N, 2)
+    return np.stack(obs_list)  # (N, 4, GRID_SIZE, GRID_SIZE)
 
 
 class SpatialVecEnv(VecEnv):
-    """Serial VecEnv for environments returning (spatial, wind) tuple observations."""
+    """Serial VecEnv for environments returning spatial (4, G, G) observations."""
 
     def reset(self):
         obs_list, info_list = [], []
@@ -250,7 +249,7 @@ class SpatialVecEnv(VecEnv):
 
 
 class SpatialSubprocVecEnv(SubprocVecEnv):
-    """Subprocess VecEnv for environments returning (spatial, wind) tuple observations."""
+    """Subprocess VecEnv for environments returning spatial (4, G, G) observations."""
 
     def reset(self):
         for conn in self._parents:
@@ -431,6 +430,12 @@ def train(args):
     obs, _ = vec_env.reset()
     start_time = time.time()
 
+    # Recurrent hidden state for the spatial architecture (carried across the
+    # rollout; reset to zero on episode boundaries).
+    gru_h = None
+    if is_spatial:
+        gru_h = agent.initial_hidden(args.num_envs, device)
+
     for update in range(start_update + 1, num_updates + 1):
         # Learning rate annealing (only after anneal_start fraction of training)
         if args.anneal_lr:
@@ -457,9 +462,11 @@ def train(args):
 
             with torch.no_grad():
                 if is_spatial:
-                    spatial_t = torch.tensor(obs[0], dtype=torch.float32, device=device)
-                    wind_t    = torch.tensor(obs[1], dtype=torch.float32, device=device)
-                    action, log_prob, _, value = agent.get_action_and_value(spatial_t, wind_t)
+                    spatial_t = torch.tensor(obs, dtype=torch.float32, device=device)
+                    h_in = gru_h
+                    action, log_prob, _, value, gru_h = agent.get_action_and_value(
+                        spatial_t, h_in
+                    )
                 else:
                     obs_t = torch.tensor(obs, dtype=torch.float32, device=device)
                     action, log_prob, _, value = agent.get_action_and_value(obs_t)
@@ -471,12 +478,16 @@ def train(args):
             normalized_rewards = rewards / reward_rms.std
 
             if is_spatial:
+                done_t = torch.tensor(dones, device=device)
                 buffer.insert(
-                    spatial_t, wind_t, action, log_prob,
+                    spatial_t, action, log_prob,
                     torch.tensor(normalized_rewards, device=device),
-                    torch.tensor(dones, device=device),
+                    done_t,
                     value.squeeze(-1),
+                    h_in,                       # h_t at the *start* of this step
                 )
+                # Reset hidden state for envs whose episode ended at this step
+                gru_h = gru_h * (1.0 - done_t).view(1, -1, 1)
             else:
                 buffer.insert(
                     obs_t, action, log_prob,
@@ -501,9 +512,9 @@ def train(args):
         # Bootstrap value for GAE
         with torch.no_grad():
             if is_spatial:
-                spatial_t = torch.tensor(obs[0], dtype=torch.float32, device=device)
-                wind_t    = torch.tensor(obs[1], dtype=torch.float32, device=device)
-                next_value = agent.get_value(spatial_t, wind_t).squeeze(-1)
+                spatial_t  = torch.tensor(obs, dtype=torch.float32, device=device)
+                v_t, _     = agent.get_value(spatial_t, gru_h)
+                next_value = v_t.squeeze(-1)
             else:
                 next_obs_t = torch.tensor(obs, dtype=torch.float32, device=device)
                 next_value = agent.get_value(next_obs_t).squeeze(-1)
@@ -652,7 +663,7 @@ def main():
                         choices=["mlp", "modular", "dual", "spatial"],
                         help="Network: 'mlp' (flat), 'modular' (GRU+Conv shared fusion), "
                              "'dual' (GRU+Conv separate actor/critic), "
-                             "'spatial' (dual-stream CNN + FiLM, ego-centric map obs)")
+                             "'spatial' (dual-stream CNN + GRU, ego-centric map obs)")
 
     # PPO
     parser.add_argument("--total-timesteps", type=int, default=cfg.TOTAL_TIMESTEPS)

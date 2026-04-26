@@ -127,12 +127,14 @@ LIDAR_CONV_KERNEL = 5
 # =============================================================================
 # Spatial CNN architecture
 # =============================================================================
-SPATIAL_GRID_SIZE     = 98           # cells (49m / 0.5m)
+SPATIAL_CELL_RES      = 0.2          # m/cell — decoupled from VISITED_CELL_RESOLUTION
+SPATIAL_GRID_SIZE     = 221          # cells (110-cell half-width × 0.2m = 22m radius)
 SPATIAL_LAMBDA        = 0.015        # recency decay rate (half-life ~46 steps)
-SPATIAL_CNN_OUT_CH    = 96           # channels after 1×1 fusion conv
-SPATIAL_WIND_HIDDEN   = 64           # wind encoder output dim
+SPATIAL_CNN_OUT_CH    = 48           # channels after 1×1 fusion conv
 SPATIAL_PROJ_DIM      = 512          # CNN flat projection dim
 SPATIAL_SHARED_HIDDEN = (512, 256)
 SPATIAL_ACTOR_DIM     = 128
 SPATIAL_CRITIC_DIM    = 256
 SPATIAL_RES_BLOCKS    = 3
+SPATIAL_GRU_HIDDEN    = 256          # GRU hidden state size for temporal reasoning
+SPATIAL_SEQ_LEN       = 16           # truncated BPTT sequence length
