@@ -17,6 +17,7 @@ MIN_SOURCE_ROBOT_DIST = 3.0     # meters, minimum initial separation
 # LiDAR
 LIDAR_NUM_RAYS = 72
 LIDAR_MAX_RANGE = 3.0           # meters
+LIDAR_NOISE_STD = 0.005         # metres, matches BasicSim test.yaml (5 mm)
 
 # Gas sensor
 GAS_HISTORY_LENGTH = 10
