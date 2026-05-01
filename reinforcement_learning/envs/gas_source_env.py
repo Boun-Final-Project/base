@@ -92,19 +92,30 @@ class GasSourceEnv(gymnasium.Env):
             self._rng = np.random.default_rng(seed)
             self._map_gen = MapGenerator(rng=self._rng)
 
-        # Generate map (curriculum may cap template selection)
-        tid = self._template_id
-        if tid is None and self._max_template_id is not None:
-            tid = int(self._rng.integers(0, self._max_template_id + 1))
-        map_data = self._map_gen.generate(template_id=tid)
+        # Map: either injected by caller (GADEN eval) or generated procedurally.
+        if options is not None and "map_data" in options:
+            map_data   = options["map_data"]
+            wind_field = options.get("wind_field")        # may be None
+        else:
+            tid = self._template_id
+            if tid is None and self._max_template_id is not None:
+                tid = int(self._rng.integers(0, self._max_template_id + 1))
+            map_data   = self._map_gen.generate(template_id=tid)
+            wind_field = None
+
         self._grid = map_data["grid"]
         self._source_pos = np.array(map_data["source_pos"], dtype=np.float64)
         self._robot_pos = np.array(map_data["robot_pos"], dtype=np.float64)
         self._map_width = map_data["width"]
         self._map_height = map_data["height"]
 
-        # Wind
-        self._wind.randomize(self._rng)
+        # Wind: spatial mean of the field for the policy ctx vector when a
+        # wind_field is provided; otherwise random per-episode uniform wind.
+        if wind_field is not None:
+            speed, direction = wind_field.spatial_mean()
+            self._wind.set_uniform(speed, direction)
+        else:
+            self._wind.randomize(self._rng)
 
         # Gas model selection
         if cfg.GAS_MODEL == "filament":
@@ -123,6 +134,7 @@ class GasSourceEnv(gymnasium.Env):
                 min_sigma=cfg.FILAMENT_MIN_SIGMA,
                 reflection_energy=cfg.FILAMENT_REFLECTION_ENERGY,
                 rng=self._rng,
+                wind_field=wind_field,
             )
             # Warm up the plume so step 0 has some initial filaments
             for _ in range(cfg.FILAMENT_WARMUP_STEPS):
