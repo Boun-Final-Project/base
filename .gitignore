@@ -10,7 +10,10 @@ gsl_hit_map
 runs/
 results/
 eval_results/
+eval_results_gaden/
 obs_viz/
+gaden_viz/
+gaden_trajectories/
 slurm-*.out
 
 # Container images
