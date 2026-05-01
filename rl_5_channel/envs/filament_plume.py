@@ -56,6 +56,7 @@ class FilamentPlume:
         min_sigma=None,
         reflection_energy=None,
         rng=None,
+        wind_field=None,
     ):
         """
         Parameters
@@ -101,6 +102,11 @@ class FilamentPlume:
         )
         self.wind_speed = wind_speed
         self.grid = occupancy_grid
+        # Optional spatially-varying wind field. When set, advection queries
+        # this field per-filament instead of using the uniform wind_velocity.
+        # The (wind_speed, wind_angle) args still drive the policy ctx vector
+        # via the env's WindModel — they're set to the field's spatial mean.
+        self._wind_field = wind_field
 
         # Physics parameters
         self.dt = dt if dt is not None else cfg.FILAMENT_DT
@@ -133,7 +139,8 @@ class FilamentPlume:
         # no grid cell can be skipped.  Worst case: axis-aligned displacement of
         # max_speed * dt; we need step_size < resolution.
         # Using 3-sigma turbulence as a practical upper bound on speed.
-        _max_disp = self.wind_speed * (1.0 + 3.0 * self.turbulence_scale) * self.dt
+        _max_speed = self._wind_field.max_speed() if self._wind_field is not None else self.wind_speed
+        _max_disp  = _max_speed * (1.0 + 3.0 * self.turbulence_scale) * self.dt
         self._tunnel_check_steps = max(
             8, int(np.ceil(_max_disp / self.grid.resolution)) + 2
         )
@@ -166,9 +173,14 @@ class FilamentPlume:
             return
 
         # 2. Advection + meandering
-        wind = self.wind_velocity
-        turb_sigma = self.turbulence_scale * self.wind_speed
-        turbulence = self.rng.normal(0.0, turb_sigma, size=(self._n, 2))
+        if self._wind_field is not None:
+            wind = self._wind_field.query(self.positions[:self._n])    # (n, 2)
+            speed_per = np.linalg.norm(wind, axis=1)                   # (n,)
+            turb_sigma = self.turbulence_scale * speed_per[:, None]    # (n, 1)
+        else:
+            wind = self.wind_velocity                                  # (2,)
+            turb_sigma = self.turbulence_scale * self.wind_speed       # scalar
+        turbulence = self.rng.normal(0.0, 1.0, size=(self._n, 2)) * turb_sigma
         displacement = (wind + turbulence) * self.dt
         pre_positions = self.positions[:self._n].copy()
         self.positions[:self._n, 0] += displacement[:, 0]

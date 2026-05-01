@@ -36,6 +36,14 @@ class WindModel:
         self.speed = rng.uniform(*self.speed_range)
         self.direction = rng.uniform(0, 2 * np.pi)
 
+    def set_uniform(self, speed, direction):
+        """Pin wind to a deterministic (speed, direction). Used by GADEN eval
+        to drive the policy ctx vector from the spatial mean of a real wind
+        field while the plume itself uses the spatial field for advection.
+        """
+        self.speed = float(speed)
+        self.direction = float(direction)
+
     def get_observation(self):
         """Return normalized (speed, direction) for the legacy state vector."""
         return (self.speed / self.max_speed, self.direction / (2 * np.pi))
