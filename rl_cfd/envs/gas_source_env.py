@@ -96,19 +96,33 @@ class GasSourceEnv(gymnasium.Env):
             self._rng = np.random.default_rng(seed)
             self._map_gen = MapGenerator(rng=self._rng)
 
-        # Generate map (curriculum may cap template selection)
-        tid = self._template_id
-        if tid is None and self._max_template_id is not None:
-            tid = int(self._rng.integers(0, self._max_template_id + 1))
-        map_data = self._map_gen.generate(template_id=tid)
+        # Map: either injected by caller (GADEN eval) or generated procedurally.
+        if options is not None and "map_data" in options:
+            map_data    = options["map_data"]
+            gaden_wind  = options.get("wind_field")
+        else:
+            tid = self._template_id
+            if tid is None and self._max_template_id is not None:
+                tid = int(self._rng.integers(0, self._max_template_id + 1))
+            map_data    = self._map_gen.generate(template_id=tid)
+            gaden_wind  = None
+
         self._grid = map_data["grid"]
         self._source_pos = np.array(map_data["source_pos"], dtype=np.float64)
         self._robot_pos = np.array(map_data["robot_pos"], dtype=np.float64)
         self._map_width = map_data["width"]
         self._map_height = map_data["height"]
 
-        # Wind: build the field from the occupancy grid (potential-flow solve)
-        self._wind.randomize(self._grid, self._rng)
+        # Wind: GADEN field swaps in self._wind for this episode; the procedural
+        # WindField is restored on subsequent procedural resets.
+        if gaden_wind is not None:
+            if not hasattr(self, "_procedural_wind"):
+                self._procedural_wind = self._wind
+            self._wind = gaden_wind
+        else:
+            if hasattr(self, "_procedural_wind"):
+                self._wind = self._procedural_wind
+            self._wind.randomize(self._grid, self._rng)
 
         # Gas model selection
         if cfg.GAS_MODEL == "filament":
