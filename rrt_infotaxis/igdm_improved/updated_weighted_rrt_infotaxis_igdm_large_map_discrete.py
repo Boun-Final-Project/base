@@ -55,6 +55,7 @@ from pathlib import Path
 import logging
 import sys
 import argparse
+from datetime import datetime
 
 # Suppress matplotlib font warnings
 import warnings
@@ -100,7 +101,7 @@ def setup_logging(log_file):
 class RRTInfotaxisIGDMDiscreteWeightedLargeMap:
     """Standalone RRT-Infotaxis with IGDM, discrete sensor, and weighted movement on large map."""
 
-    def __init__(self, sigma_m=1.0, logger=None, threshold_mode='default'):
+    def __init__(self, sigma_m=1.0, logger=None, threshold_mode='default', run_id=None):
         """
         Parameters:
         -----------
@@ -112,6 +113,7 @@ class RRTInfotaxisIGDMDiscreteWeightedLargeMap:
             Threshold adaptation mode: 'default' (monotonic increase) or 'decay' (0.97 decay)
         """
         self.logger = logger or logging.getLogger()
+        self.run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.room_width = 25.0
         self.room_height = 25.0
         self.resolution = 0.25
@@ -169,7 +171,7 @@ class RRTInfotaxisIGDMDiscreteWeightedLargeMap:
         self.current_step = 0  # Track current time step for time-dependent gas model
 
         # Visualization - use specified directory for visualization steps
-        viz_dir = Path(__file__).parent / "results" / "updated_rrt_igdm_improved_large_map_discrete_weighted_steps"
+        viz_dir = Path(__file__).parent / "results" / f"updated_rrt_igdm_improved_large_map_discrete_weighted_steps_{self.run_id}"
         viz_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
@@ -781,11 +783,12 @@ if __name__ == "__main__":
     # Setup logging - use results directory relative to script
     log_dir = Path(__file__).parent / "results"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "updated_weighted_rrt_infotaxis_igdm_large_map_discrete.log"
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"updated_weighted_rrt_infotaxis_igdm_large_map_discrete_{run_id}.log"
     logger = setup_logging(str(log_file))
 
     # Run with sigma_m=1.0 and specified threshold mode
-    infotaxis = RRTInfotaxisIGDMDiscreteWeightedLargeMap(sigma_m=1.0, logger=logger, threshold_mode=args.threshold_mode)
+    infotaxis = RRTInfotaxisIGDMDiscreteWeightedLargeMap(sigma_m=1.0, logger=logger, threshold_mode=args.threshold_mode, run_id=run_id)
     infotaxis.run()
-    final_result_path = log_dir / "updated_weighted_rrt_infotaxis_igdm_large_map_discrete_result.png"
+    final_result_path = log_dir / f"updated_weighted_rrt_infotaxis_igdm_large_map_discrete_result_{run_id}.png"
     infotaxis.visualize_final(str(final_result_path))
