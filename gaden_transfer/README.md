@@ -35,7 +35,7 @@ gaden_transfer_lidar/
 
 | Folder | Trained from | Obs | Action | Wall map | Status |
 |---|---|---|---|---|---|
-| `gaden_transfer_lidar/`     | `rl_old/` | 39-dim flat (gas history + lidar + pos + wind + time) | Beta over heading θ ∈ [0, 2π), fixed 0.5 m step | n/a | working |
+| `gaden_transfer_lidar/`     | `rl_old/` | 107-dim flat (gas history + lidar + pos + wind + time) for `arch ∈ {mlp, modular, dual}`, or 4-channel image (`[occupancy, gas, recency, det]`) + 2-d wind for `arch:=spatial` | Beta over heading θ (mlp/modular) or Gaussian (cos θ, sin θ) (dual/spatial); fixed 0.5 m step | n/a | working |
 | `gaden_transfer_image_5ch/` | `rl_new/` | 5-channel ego-centric grid (98×98) + 4-dim ctx | Gaussian (Δx, Δy) | 0.5 m wrapper cells, center-only wall lookup (sparse — misses thin walls) | deprecated |
 | `gaden_transfer_image_6ch/` | `rl_osl/` | 5-channel ego-centric grid (98×98) + 4-dim ctx | Gaussian (Δx, Δy) | 0.2 m wrapper cells, dense any-subcell wall lookup | current |
 
