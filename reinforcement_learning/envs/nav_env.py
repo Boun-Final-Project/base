@@ -19,6 +19,8 @@ WALL_NEAR_MAX = 1.5
 # Wall-following reward: Gaussian centered at this distance from nearest wall
 WALL_TARGET_DIST = 0.5   # meters
 WALL_SIGMA = 0.3         # meters  ->  denominator = 2 * 0.3^2 = 0.18
+WALL_FAR_THRESHOLD = 1.0 # meters — penalty kicks in beyond this distance
+WALL_FAR_PENALTY = 2.0   # reward units per meter beyond threshold
 
 # Navigation constants
 MIN_NAV_DIST = 3.0       # minimum start-to-goal Euclidean distance (meters)
@@ -163,6 +165,7 @@ class NavigationEnv(gymnasium.Env):
         reward += 1.0 * float(np.exp(
             -((min_wall_dist - WALL_TARGET_DIST) ** 2) / (2.0 * WALL_SIGMA ** 2)
         ))
+        reward -= WALL_FAR_PENALTY * max(0.0, min_wall_dist - WALL_FAR_THRESHOLD)
 
         reward += cfg.R_STEP
 
