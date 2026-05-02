@@ -168,6 +168,24 @@ class WindField:
         s, d = self._ctx_speed_dir()
         return (s / self.max_speed, float(np.cos(d)), float(np.sin(d)))
 
+    def get_observation_spatial_at(self, position):
+        """Local-cell ctx: return (speed/max, cos, sin) at a world position.
+
+        Used by the spatial obs wrapper so the policy ctx reflects the wind
+        the agent actually experiences at its current cell, not a global
+        summary. This couples ctx semantics between training (local) and
+        deployment (also local, queried from the GADEN field), eliminating
+        the ctx-vs-local mismatch we observed on real CFD wind fields.
+        """
+        local = self.local_batch(np.asarray([position], dtype=np.float64))[0]
+        spd = float(np.hypot(local[0], local[1]))
+        if spd > 1e-8:
+            return (spd / self.max_speed,
+                    float(local[0]) / spd,
+                    float(local[1]) / spd)
+        # Degenerate cell (wall or zero wind): return zero-magnitude ctx.
+        return (0.0, 1.0, 0.0)
+
     def get_dispersion_offset(self, dispersion_factor: float):
         s, d = self._ctx_speed_dir()
         dx = s * dispersion_factor * np.cos(d)

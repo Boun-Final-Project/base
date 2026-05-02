@@ -294,7 +294,7 @@ def _thin_worker(child_conn, parent_conn, env_fn):
     def _state_snapshot(reward, done, info):
         snap = {
             "robot_pos": np.asarray(env._robot_pos, dtype=np.float32),
-            "wind_raw":  np.asarray(env._wind.get_observation_spatial(), dtype=np.float32),
+            "wind_raw":  np.asarray(env._wind.get_observation_spatial_at(env._robot_pos), dtype=np.float32),
             "step":      int(env._current_step),
             "gas":       bool(info.get("gas_reading", 0)) if info else False,
             "reward":    float(reward),
@@ -461,6 +461,18 @@ def get_template_curriculum(progress):
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+
+    # Reward overrides — must be set BEFORE any env/worker is constructed,
+    # so forked workers inherit the patched cfg values.
+    cfg.R_SUCCESS    = float(args.r_success)
+    cfg.R_STEP       = float(args.r_step)
+    cfg.R_NEW_CELL   = float(args.r_new_cell)
+    cfg.R_COLLISION  = float(args.r_collision)
+    cfg.R_MAX_STEPS  = float(args.r_max_steps)
+    cfg.R_DETECTION  = float(args.r_detection)
+    print(f"Rewards: success={cfg.R_SUCCESS}  step={cfg.R_STEP}  "
+          f"new_cell={cfg.R_NEW_CELL}  collision={cfg.R_COLLISION}  "
+          f"max_steps={cfg.R_MAX_STEPS}  detection={cfg.R_DETECTION}")
 
     # Seeding
     np.random.seed(args.seed)
@@ -864,6 +876,14 @@ def main():
                         help="KL early stopping threshold (e.g. 0.03). None = disabled")
     parser.add_argument("--curriculum", action="store_true", default=False,
                         help="Enable room size curriculum (small → large)")
+
+    # Reward shaping (override cfg defaults — used for A/B-ing reward profiles)
+    parser.add_argument("--r-success",   type=float, default=cfg.R_SUCCESS)
+    parser.add_argument("--r-step",      type=float, default=cfg.R_STEP)
+    parser.add_argument("--r-new-cell",  type=float, default=cfg.R_NEW_CELL)
+    parser.add_argument("--r-collision", type=float, default=cfg.R_COLLISION)
+    parser.add_argument("--r-max-steps", type=float, default=cfg.R_MAX_STEPS)
+    parser.add_argument("--r-detection", type=float, default=cfg.R_DETECTION)
 
     # Resume
     parser.add_argument("--resume", type=str, default=None,

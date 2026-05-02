@@ -326,6 +326,16 @@ class GadenWindField:
                 float(np.cos(self.direction)),
                 float(np.sin(self.direction)))
 
+    def get_observation_spatial_at(self, position):
+        """Local-cell ctx at a world position. Mirrors WindField.get_observation_spatial_at."""
+        local = self.query(np.asarray([position], dtype=np.float64))[0]
+        spd = float(np.hypot(local[0], local[1]))
+        if spd > 1e-8:
+            return (spd / self.max_speed,
+                    float(local[0]) / spd,
+                    float(local[1]) / spd)
+        return (0.0, 1.0, 0.0)
+
     def get_dispersion_offset(self, dispersion_factor: float):
         s, d = self.speed, self.direction
         return np.array([s * dispersion_factor * np.cos(d),
