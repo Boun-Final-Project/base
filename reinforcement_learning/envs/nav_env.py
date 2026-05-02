@@ -160,7 +160,7 @@ class NavigationEnv(gymnasium.Env):
 
         # Wall-following: Gaussian reward centered at WALL_TARGET_DIST
         min_wall_dist = float(np.min(lidar)) * cfg.LIDAR_MAX_RANGE
-        reward += 0.3 * float(np.exp(
+        reward += 1.0 * float(np.exp(
             -((min_wall_dist - WALL_TARGET_DIST) ** 2) / (2.0 * WALL_SIGMA ** 2)
         ))
 
@@ -169,7 +169,7 @@ class NavigationEnv(gymnasium.Env):
         # entry_dist handles the case where the robot starts a step already at the goal
         terminated = curr_dist < cfg.D_SUCCESS or entry_dist < cfg.D_SUCCESS
         if terminated:
-            reward += 100.0
+            reward += 20.0
 
         truncated = self._step_count >= NAV_MAX_STEPS
         if truncated:

@@ -28,14 +28,21 @@ WALL_TARGET_DIST = 0.50   # metres — the reward peak distance
 
 
 def load_agent(checkpoint_path, device):
-    """Load NavActorCritic from a checkpoint file."""
+    """Load NavActorCritic from a checkpoint file.
+
+    Accepts both final.pt (plain state_dict) and checkpoint_*.pt (wrapped dict).
+    """
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     agent = NavActorCritic()
-    agent.load_state_dict(ckpt["model_state_dict"])
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        agent.load_state_dict(ckpt["model_state_dict"])
+        print(f"Loaded NavActorCritic from {checkpoint_path}")
+        print(f"  global_step={ckpt.get('global_step', '?')}, "
+              f"update={ckpt.get('update', '?')}")
+    else:
+        agent.load_state_dict(ckpt)
+        print(f"Loaded NavActorCritic from {checkpoint_path}  (final.pt)")
     agent.to(device).eval()
-    print(f"Loaded NavActorCritic from {checkpoint_path}")
-    print(f"  global_step={ckpt.get('global_step', '?')}, "
-          f"update={ckpt.get('update', '?')}")
     return agent
 
 
