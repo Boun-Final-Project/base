@@ -13,11 +13,11 @@ Usage
         --episodes 3 --epsilon 0.0 --viz-dir runs/ppo_dual-010/eval
 
 The checkpoint's sibling ``config.json`` (one level up from ``checkpoints/``)
-is read to determine the architecture (``flat`` / ``modular`` / ``dual``).
+is read to determine the architecture (``flat`` / ``modular`` / ``dual`` / ``spatial``).
 
 Greedy action = distribution mean:
-  - Beta(alpha, beta)        ->  alpha / (alpha + beta)        (flat, modular)
-  - Normal(mean, std) on R^2 ->  mean                          (dual)
+  - Beta(alpha, beta)        ->  alpha / (alpha + beta)        (mlp, modular)
+  - Normal(mean, std) on R^2 ->  mean                          (dual, spatial)
 
 With probability epsilon a uniformly random action is chosen instead.
 """
@@ -35,11 +35,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from reinforcement_learning import config as cfg
 from reinforcement_learning.envs.gas_source_env import GasSourceEnv
+from reinforcement_learning.envs.spatial_obs_wrapper import SpatialObsWrapper
 from reinforcement_learning.models.actor_critic import (
     ActorCritic,
     ActorCriticDualBackbone,
     ActorCriticModular,
 )
+from reinforcement_learning.models.actor_critic_spatial import ActorCriticSpatial
 
 
 def load_agent(checkpoint_path, device):
@@ -60,7 +62,9 @@ def load_agent(checkpoint_path, device):
     else:
         print(f"[warn] no config.json at {config_path}, defaulting arch=flat")
 
-    if arch == "dual":
+    if arch == "spatial":
+        agent = ActorCriticSpatial()
+    elif arch == "dual":
         agent = ActorCriticDualBackbone(obs_dim=cfg.STATE_DIM)
     elif arch == "modular":
         agent = ActorCriticModular(obs_dim=cfg.STATE_DIM)
@@ -77,32 +81,40 @@ def load_agent(checkpoint_path, device):
     return agent, arch
 
 
-def greedy_action(agent, arch, obs_t):
-    """Return the deterministic (mean) action for a given observation."""
+def greedy_action(agent, arch, obs_t, h=None):
+    """Return the deterministic (mean) action for a given observation.
+
+    For spatial arch, returns (action, new_h). For other archs returns action only.
+    obs_t is a spatial tensor for spatial arch, a flat tensor otherwise.
+    """
     with torch.no_grad():
-        if arch == "dual":
-            encoded = agent._encode_shared(obs_t)
-            dist = agent._actor_dist(encoded)
-            return dist.mean  # (1, 2) -> (cos, sin)
+        if arch == "spatial":
+            shared, h_new = agent._encode(obs_t, h)
+            dist = agent._actor_dist(shared)
+            return dist.mean.cpu().numpy(), h_new   # (1, 2): (cos θ, sin θ)
+        elif arch == "dual":
+            dist = agent._actor_dist(agent._encode_shared(obs_t))
+            return dist.mean.cpu().numpy()   # (1, 2): (cos θ, sin θ)
         else:
-            # Beta scalar in [0, 1]
-            if arch == "modular":
-                features = agent.fusion(agent._encode(obs_t))
-            else:
-                features = agent.backbone(obs_t)
-            ab = agent.actor(features)
+            features = (agent._encode(obs_t) if arch == "modular"
+                        else agent.backbone(obs_t))
+            ab    = agent.actor(features)
             alpha = ab[:, 0:1] + 1.0
-            beta = ab[:, 1:2] + 1.0
-            return alpha / (alpha + beta)  # Beta mean, shape (1, 1)
+            beta  = ab[:, 1:2] + 1.0
+            return (alpha / (alpha + beta)).cpu().numpy()  # Beta mean (1, 1)
 
 
 def random_action(arch, rng):
     """Uniform random action matching the agent's action shape."""
-    if arch == "dual":
-        # Random unit vector (cos θ, sin θ)
+    if arch in ("dual", "spatial"):
         theta = rng.uniform(0.0, 2.0 * np.pi)
         return np.array([[np.cos(theta), np.sin(theta)]], dtype=np.float32)
     return np.array([[rng.uniform(0.0, 1.0)]], dtype=np.float32)
+
+
+def _obs_to_tensors(obs, arch, device):
+    """Convert environment observation to tensor(s) for the given arch."""
+    return torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
 
 
 def run_episode(agent, arch, env, epsilon, rng, device, render=False):
@@ -116,12 +128,21 @@ def run_episode(agent, arch, env, epsilon, rng, device, render=False):
     steps = 0
     success = False
 
+    # GRU hidden state for the spatial architecture (reset per-episode)
+    h = agent.initial_hidden(1, device) if arch == "spatial" else None
+
     while True:
         if rng.random() < epsilon:
             action = random_action(arch, rng)
+            if arch == "spatial":
+                # Still advance the GRU on the current observation so the hidden
+                # state stays consistent with what the env has actually seen.
+                _, h = greedy_action(agent, arch, _obs_to_tensors(obs, arch, device), h)
         else:
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-            action = greedy_action(agent, arch, obs_t).cpu().numpy()
+            if arch == "spatial":
+                action, h = greedy_action(agent, arch, _obs_to_tensors(obs, arch, device), h)
+            else:
+                action = greedy_action(agent, arch, _obs_to_tensors(obs, arch, device))
 
         obs, reward, terminated, truncated, info = env.step(action[0])
         total_reward += reward
@@ -178,11 +199,12 @@ def main():
         if args.viz_dir is not None:
             viz_dir = os.path.join(args.viz_dir, f"episode_{ep:03d}")
 
-        env = GasSourceEnv(
+        base_env = GasSourceEnv(
             seed=args.seed + ep,
             template_id=template_id,
             viz_output_dir=viz_dir,
         )
+        env = SpatialObsWrapper(base_env) if arch == "spatial" else base_env
         out = run_episode(
             agent, arch, env, args.epsilon, rng, device,
             render=(viz_dir is not None),

@@ -44,7 +44,7 @@ class NavigationEnv(gymnasium.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, width_range=None, height_range=None):
+    def __init__(self, width_range=None, height_range=None, viz_output_dir=None):
         super().__init__()
         _obs_low  = np.concatenate([
             np.zeros(cfg.LIDAR_NUM_RAYS, dtype=np.float32),   # lidar [0, 1]
@@ -62,6 +62,8 @@ class NavigationEnv(gymnasium.Env):
         )
         self._width_range = width_range
         self._height_range = height_range
+        self._viz_output_dir = viz_output_dir
+        self._visualizer = None
         self._rng = np.random.default_rng()
         self._map_gen = MapGenerator(rng=self._rng,
                                      width_range=width_range,
@@ -76,6 +78,11 @@ class NavigationEnv(gymnasium.Env):
         self._prev_dist = 0.0
         self._room_width = 0.0
         self._room_height = 0.0
+        self._trajectory = []
+        self._cum_reward = 0.0
+        self._last_reward = 0.0
+        self._last_heading = 0.0
+        self._last_lidar = None
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -106,7 +113,19 @@ class NavigationEnv(gymnasium.Env):
             np.array(self.robot_pos) - np.array(self.goal_pos)
         ))
 
-        obs = self._build_obs(heading=0.0)
+        self._trajectory = [self.robot_pos]
+        self._cum_reward = 0.0
+        self._last_reward = 0.0
+        self._last_heading = 0.0
+        self._last_lidar = self.lidar.scan(self.robot_pos, heading=0.0)
+
+        if self._viz_output_dir is not None:
+            from .nav_visualizer import NavStepVisualizer
+            self._visualizer = NavStepVisualizer(self._viz_output_dir)
+        else:
+            self._visualizer = None
+
+        obs = self._build_obs(heading=0.0, lidar=self._last_lidar)
         return obs, {}
 
     def step(self, action):
@@ -123,11 +142,13 @@ class NavigationEnv(gymnasium.Env):
             reward = cfg.R_COLLISION
         else:
             self.robot_pos = new_pos
+            self._trajectory.append(self.robot_pos)
             reward = 0.0
 
         self._step_count += 1
 
         lidar = self.lidar.scan(self.robot_pos, heading=heading)
+        self._last_lidar = lidar
 
         # Potential-based progress shaping
         curr_dist = float(np.linalg.norm(
@@ -154,8 +175,39 @@ class NavigationEnv(gymnasium.Env):
         if truncated:
             reward += cfg.R_MAX_STEPS
 
+        self._cum_reward += reward
+        self._last_reward = float(reward)
+        self._last_heading = heading
+
         obs = self._build_obs(heading=heading, lidar=lidar)
         return obs, float(reward), terminated, truncated, {"terminated": terminated}
+
+    def render(self):
+        if self._visualizer is None:
+            raise RuntimeError(
+                "render() requires viz_output_dir to be set at construction time"
+            )
+        lidar_angles = (
+            np.linspace(0, 2 * np.pi, cfg.LIDAR_NUM_RAYS, endpoint=False)
+            + self._last_heading
+        ) % (2 * np.pi)
+        wall_dist = float(np.min(self._last_lidar)) * cfg.LIDAR_MAX_RANGE
+
+        self._visualizer.save_step(
+            occupancy_grid = self.grid,
+            robot_pos      = self.robot_pos,
+            heading        = self._last_heading,
+            goal_pos       = self.goal_pos,
+            lidar_rays     = self._last_lidar,
+            lidar_angles   = lidar_angles,
+            trajectory     = list(self._trajectory),
+            wall_dist      = wall_dist,
+            step_reward    = self._last_reward,
+            cum_reward     = self._cum_reward,
+            step_num       = self._step_count,
+            room_width     = self._room_width,
+            room_height    = self._room_height,
+        )
 
     # ------------------------------------------------------------------
     # Internals
