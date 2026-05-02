@@ -44,7 +44,7 @@ class NavigationEnv(gymnasium.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self):
+    def __init__(self, width_range=None, height_range=None):
         super().__init__()
         _obs_low  = np.concatenate([
             np.zeros(cfg.LIDAR_NUM_RAYS, dtype=np.float32),   # lidar [0, 1]
@@ -60,8 +60,12 @@ class NavigationEnv(gymnasium.Env):
         self.action_space = gymnasium.spaces.Box(
             low=-1.0, high=1.0, shape=(NAV_ACTION_DIM,), dtype=np.float32
         )
+        self._width_range = width_range
+        self._height_range = height_range
         self._rng = np.random.default_rng()
-        self._map_gen = MapGenerator(rng=self._rng)
+        self._map_gen = MapGenerator(rng=self._rng,
+                                     width_range=width_range,
+                                     height_range=height_range)
 
         # Set during reset()
         self.grid = None
@@ -80,7 +84,9 @@ class NavigationEnv(gymnasium.Env):
     def reset(self, seed=None, options=None):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
-            self._map_gen = MapGenerator(rng=self._rng)
+            self._map_gen = MapGenerator(rng=self._rng,
+                                         width_range=self._width_range,
+                                         height_range=self._height_range)
 
         result = self._map_gen.generate(template_id=0)
         self.grid = result["grid"]
