@@ -73,7 +73,6 @@ COARSE_RESOLUTION = 0.5         # coarse grid for Dijkstra
 SENSOR_ALPHA = 0.1              # proportional noise coefficient
 SENSOR_SIGMA_ENV = 0.1          # environmental noise std
 SENSOR_THRESHOLD_WEIGHT = 0.5   # adaptive threshold weight
-SENSOR_THRESHOLD_DECAY = 0.97   # per-step threshold decay when measurement < threshold
 SOURCE_RELEASE_RATE = 1.0       # Q for gas source
 
 # =============================================================================
