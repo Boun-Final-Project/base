@@ -69,6 +69,7 @@ class GasSourceEnv(gymnasium.Env):
         self._sensor = None
         self._source_pos = None
         self._robot_pos = None
+        self._robot_heading = None
         self._map_width = 0.0
         self._map_height = 0.0
         self._current_step = 0
@@ -106,6 +107,7 @@ class GasSourceEnv(gymnasium.Env):
         self._grid = map_data["grid"]
         self._source_pos = np.array(map_data["source_pos"], dtype=np.float64)
         self._robot_pos = np.array(map_data["robot_pos"], dtype=np.float64)
+        self._robot_heading = 0.0
         self._map_width = map_data["width"]
         self._map_height = map_data["height"]
 
@@ -181,6 +183,7 @@ class GasSourceEnv(gymnasium.Env):
             num_rays=cfg.LIDAR_NUM_RAYS,
             max_range=cfg.LIDAR_MAX_RANGE,
             occupancy_grid=self._grid,
+            noise_std=cfg.LIDAR_NOISE_STD,
         )
 
         # Sensor
@@ -227,6 +230,7 @@ class GasSourceEnv(gymnasium.Env):
         else:
             self._visualizer = None
 
+        # _robot_heading must be set before this call (scan() needs it)
         obs = self._build_observation()
         info = self._build_info(0.0, False, 0)
         return obs, info
@@ -239,6 +243,8 @@ class GasSourceEnv(gymnasium.Env):
         else:
             # Gaussian-style: (cos θ, sin θ) -> angle
             theta = float(np.arctan2(action[1], action[0]))
+
+        self._robot_heading = theta
 
         # Compute target position
         dx = cfg.STEP_SIZE * np.cos(theta)
@@ -397,7 +403,7 @@ class GasSourceEnv(gymnasium.Env):
                     float(b),
                 ])
         gas = np.array(gas_entries, dtype=np.float32)
-        lidar = self._lidar.scan(tuple(self._robot_pos)).astype(np.float32)
+        lidar = self._lidar.scan(tuple(self._robot_pos), self._robot_heading).astype(np.float32)
         pos = np.array([
             self._robot_pos[0] / self._map_width,
             self._robot_pos[1] / self._map_height,

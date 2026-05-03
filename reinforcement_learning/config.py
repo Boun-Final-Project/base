@@ -17,6 +17,7 @@ MIN_SOURCE_ROBOT_DIST = 3.0     # meters, minimum initial separation
 # LiDAR
 LIDAR_NUM_RAYS = 72
 LIDAR_MAX_RANGE = 3.0           # meters
+LIDAR_NOISE_STD = 0.005         # metres, matches BasicSim test.yaml (5 mm)
 
 # Gas sensor
 GAS_HISTORY_LENGTH = 10
@@ -127,11 +128,14 @@ LIDAR_CONV_KERNEL = 5
 # =============================================================================
 # Spatial CNN architecture
 # =============================================================================
-SPATIAL_GRID_SIZE     = 98           # cells (49m / 0.5m)
+SPATIAL_CELL_RES      = 0.2          # m/cell — decoupled from VISITED_CELL_RESOLUTION
+SPATIAL_GRID_SIZE     = 221          # cells (110-cell half-width × 0.2m = 22m radius)
 SPATIAL_LAMBDA        = 0.015        # recency decay rate (half-life ~46 steps)
-SPATIAL_FILM_HIDDEN   = 64
-SPATIAL_CNN_OUT_CH    = 128          # channels after 1×1 fusion conv
+SPATIAL_CNN_OUT_CH    = 48           # channels after 1×1 fusion conv
+SPATIAL_PROJ_DIM      = 512          # CNN flat projection dim
 SPATIAL_SHARED_HIDDEN = (512, 256)
 SPATIAL_ACTOR_DIM     = 128
 SPATIAL_CRITIC_DIM    = 256
 SPATIAL_RES_BLOCKS    = 3
+SPATIAL_GRU_HIDDEN    = 256          # GRU hidden state size for temporal reasoning
+SPATIAL_SEQ_LEN       = 16           # truncated BPTT sequence length

@@ -24,11 +24,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(_SCRIPT_DIR)))
 
 from reinforcement_learning import config as cfg
 from reinforcement_learning.envs.gas_source_env import GasSourceEnv
+from reinforcement_learning.envs.spatial_obs_wrapper import SpatialObsWrapper
 from reinforcement_learning.models.actor_critic import (
     ActorCritic,
     ActorCriticModular,
     ActorCriticDualBackbone,
 )
+from reinforcement_learning.models.actor_critic_spatial import ActorCriticSpatial
 
 _DEFAULT_TEST_ENVS  = os.path.join(_SCRIPT_DIR, "test_envs.json")
 _DEFAULT_OUTPUT_DIR = os.path.join(_SCRIPT_DIR, "eval_results")
@@ -56,7 +58,9 @@ def load_agent(checkpoint_path, run_cfg, device):
 
     kwargs = dict(obs_dim=obs_dim, gas_len=gas_len, lidar_len=lidar_len)
 
-    if arch == "dual":
+    if arch == "spatial":
+        agent = ActorCriticSpatial()
+    elif arch == "dual":
         agent = ActorCriticDualBackbone(**kwargs)
     elif arch == "modular":
         agent = ActorCriticModular(**kwargs)
@@ -69,12 +73,20 @@ def load_agent(checkpoint_path, run_cfg, device):
     return agent, arch
 
 
-def greedy_action(agent, arch, obs_t):
-    """Deterministic action: distribution mean for all architectures."""
+def greedy_action(agent, arch, obs_t, h=None):
+    """Deterministic action: distribution mean for all architectures.
+
+    For spatial arch returns (action, new_h); other archs return action only.
+    obs_t is a spatial tensor for spatial arch, a flat tensor otherwise.
+    """
     with torch.no_grad():
-        if arch == "dual":
+        if arch == "spatial":
+            shared, h_new = agent._encode(obs_t, h)
+            dist = agent._actor_dist(shared)
+            return dist.mean.cpu().numpy(), h_new   # (1, 2): (cos θ, sin θ)
+        elif arch == "dual":
             dist = agent._actor_dist(agent._encode_shared(obs_t))
-            return dist.mean.cpu().numpy()          # (1, 2)
+            return dist.mean.cpu().numpy()          # (1, 2): (cos θ, sin θ)
         else:
             features = (agent._encode(obs_t) if arch == "modular"
                         else agent.backbone(obs_t))
@@ -84,18 +96,25 @@ def greedy_action(agent, arch, obs_t):
             return (alpha / (alpha + beta)).cpu().numpy()  # (1, 1)
 
 
-def run_episode(agent, arch, env_spec, device):
-    """Run one greedy episode on a fixed environment spec.
+def _obs_to_tensors(obs, arch, device):
+    """Convert environment observation to tensor(s) for the given arch."""
+    return torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
 
-    cfg must already be patched to match the run before calling this.
-    """
-    env = GasSourceEnv(template_id=env_spec["template_id"])
-    obs, _ = env.reset(seed=env_spec["seed"])
+
+def run_episode(agent, arch, env_spec, device):
+    """Run one greedy episode on a fixed environment spec."""
+    base_env = GasSourceEnv(template_id=env_spec["template_id"])
+    env      = SpatialObsWrapper(base_env) if arch == "spatial" else base_env
+    obs, _   = env.reset(seed=env_spec["seed"])
     total_return = 0.0
     success = False
+    h = agent.initial_hidden(1, device) if arch == "spatial" else None
     while True:
-        obs_t  = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-        action = greedy_action(agent, arch, obs_t)[0]
+        if arch == "spatial":
+            action, h = greedy_action(agent, arch, _obs_to_tensors(obs, arch, device), h)
+            action = action[0]
+        else:
+            action = greedy_action(agent, arch, _obs_to_tensors(obs, arch, device))[0]
         obs, reward, terminated, truncated, _ = env.step(action)
         total_return += reward
         if terminated:

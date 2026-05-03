@@ -35,30 +35,14 @@ TEMPLATE_NAMES = [
     "Empty", "Single Wall", "U-Shape",
     "Three Walls", "Complex Maze", "Multi-Room",
 ]
-SMOOTH_WINDOW = 3  # rolling-mean window applied to all curves
-
-
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
 
-def _smooth(y, w):
-    if w <= 1 or len(y) < w:
-        return y, np.arange(len(y))
-    kernel  = np.ones(w) / w
-    smoothed = np.convolve(y, kernel, mode="valid")
-    indices  = np.arange(w - 1, len(y))
-    return smoothed, indices
-
-
 def _plot_metric(ax, steps, mean, std, label, color):
-    """Thin raw line + smoothed line with ± std shading."""
-    ax.plot(steps, mean, color=color, alpha=0.2, linewidth=0.7)
-    sm, idx = _smooth(mean, SMOOTH_WINDOW)
-    ss, _   = _smooth(std,  SMOOTH_WINDOW)
-    s_steps = steps[idx]
-    ax.plot(s_steps, sm, color=color, linewidth=1.8, label=label)
-    ax.fill_between(s_steps, sm - ss, sm + ss, color=color, alpha=0.15)
+    """Line with ± std shading."""
+    ax.plot(steps, mean, color=color, linewidth=1.8, label=label)
+    ax.fill_between(steps, mean - std, mean + std, color=color, alpha=0.15)
 
 
 def _finalise(ax, ylabel, ylim=None):
@@ -222,16 +206,18 @@ def main():
     runs = load_results(result_files, labels)
     print(f"Loaded {len(runs)} run(s): {[r['label'] for r in runs]}")
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    print(f"\nGenerating plots → {args.output_dir}/")
+    subdir = "+".join(labels)
+    output_dir = os.path.join(args.output_dir, subdir)
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"\nGenerating plots → {output_dir}/")
 
-    plot_overall(runs, args.output_dir)
+    plot_overall(runs, output_dir)
     for metric in ("return", "success"):
-        plot_per_template_grid(runs, metric, args.output_dir)
-        plot_individual_templates(runs, metric, args.output_dir)
+        plot_per_template_grid(runs, metric, output_dir)
+        plot_individual_templates(runs, metric, output_dir)
 
     # 1 overall + 2 grids + 12 individual = 15 files
-    print(f"\nDone. 15 figures saved to {args.output_dir}/")
+    print(f"\nDone. 15 figures saved to {output_dir}/")
 
 
 if __name__ == "__main__":
