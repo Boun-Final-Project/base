@@ -1,0 +1,29 @@
+/**:
+  ros__parameters:
+    # --- Checkpoint ---
+    # Set this to the absolute path of the .pt file you want to evaluate.
+    # Override on the command line:
+    #   ros2 launch ... checkpoint:=/abs/path/to/agent_10000000.pt
+    checkpoint: ""
+
+    # Architecture must match the flag used during training:
+    #   mlp      → ActorCritic             (flat MLP, Beta action)
+    #   modular  → ActorCriticModular      (GRU+Conv, Beta action)
+    #   dual     → ActorCriticDualBackbone (GRU+Conv, Gaussian (cos,sin) action)
+    #   spatial  → ActorCriticSpatial      (dual-stream CNN + FiLM wind,
+    #                                        Gaussian (cos,sin) action)
+    arch: "mlp"
+
+    # PyTorch device: "cpu" or "cuda"
+    device: "cpu"
+
+    # Nav2 position tolerance (metres)
+    xy_goal_tolerance: 0.3
+
+    # GADEN occupancy service
+    occupancy_service: "/gaden_environment/occupancyMap3D"
+    occupancy_z_level: 5
+
+    # Episode length cap (steps).  Use 600 for maps similar to training size,
+    # 800-1000 for larger maps (many_rooms, ultimate).
+    max_steps: 600

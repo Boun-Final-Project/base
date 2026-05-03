@@ -36,23 +36,21 @@ class WindModel:
         self.speed = rng.uniform(*self.speed_range)
         self.direction = rng.uniform(0, 2 * np.pi)
 
-    def set_uniform(self, speed, direction):
-        """Pin wind to a deterministic (speed, direction). Used by GADEN eval
-        to drive the policy ctx vector from the spatial mean of a real wind
-        field while the plume itself uses the spatial field for advection.
-        """
-        self.speed = float(speed)
-        self.direction = float(direction)
-
     def get_observation(self):
-        """Return normalized (speed, direction) for the state vector.
-
-        Returns
-        -------
-        obs : tuple
-            (speed / max_speed, direction / 2pi), both in [0, 1].
-        """
+        """Return normalized (speed, direction) for the legacy state vector."""
         return (self.speed / self.max_speed, self.direction / (2 * np.pi))
+
+    def get_observation_spatial(self):
+        """Direction-continuous form for the spatial arch.
+
+        Returns (speed/max_speed, cos(direction), sin(direction)) — avoids
+        the wrap-around discontinuity of raw angle / 2pi.
+        """
+        return (
+            self.speed / self.max_speed,
+            float(np.cos(self.direction)),
+            float(np.sin(self.direction)),
+        )
 
     def get_dispersion_offset(self, dispersion_factor):
         """Compute the downwind offset applied to the IGDM source position.

@@ -102,10 +102,10 @@ class FilamentPlume:
         )
         self.wind_speed = wind_speed
         self.grid = occupancy_grid
-        # Optional spatially-varying wind field (used by GADEN eval). When
-        # set, advection queries this field per-filament instead of using
-        # the uniform wind_velocity. The (wind_speed, wind_angle) args still
-        # drive the policy ctx vector via the env's WindModel.
+        # Optional spatially-varying wind field. When set, advection queries
+        # this field per-filament instead of using the uniform wind_velocity.
+        # The (wind_speed, wind_angle) args still drive the policy ctx vector
+        # via the env's WindModel — they're set to the field's spatial mean.
         self._wind_field = wind_field
 
         # Physics parameters

@@ -16,7 +16,7 @@ from .occupancy_grid import OccupancyGrid
 from .igdm_model import IGDMModel
 from .filament_plume import FilamentPlume
 from .lidar_sim import LidarSim
-from .wind_model import WindModel
+from .wind_field import WindField
 from .sensor_model import BinarySensorModel
 from .visualizer import StepVisualizer
 
@@ -56,9 +56,13 @@ class GasSourceEnv(gymnasium.Env):
 
         self._rng = np.random.default_rng(seed)
         self._map_gen = MapGenerator(rng=self._rng)
-        self._wind = WindModel(
+        # Spatially-varying wind field (potential flow + curl-noise turbulence).
+        # Falls back to uniform if `cfg.WIND_FIELD_CURL_AMPLITUDE` is 0.
+        self._wind = WindField(
             speed_range=cfg.WIND_SPEED_RANGE,
             max_speed=cfg.WIND_MAX_SPEED,
+            curl_noise_amplitude=getattr(cfg, 'WIND_FIELD_CURL_AMPLITUDE', 0.3),
+            curl_noise_scale=getattr(cfg, 'WIND_FIELD_CURL_SCALE', 4.0),
         )
 
         # Populated on reset
@@ -69,7 +73,6 @@ class GasSourceEnv(gymnasium.Env):
         self._sensor = None
         self._source_pos = None
         self._robot_pos = None
-        self._robot_heading = None
         self._map_width = 0.0
         self._map_height = 0.0
         self._current_step = 0
@@ -95,36 +98,37 @@ class GasSourceEnv(gymnasium.Env):
 
         # Map: either injected by caller (GADEN eval) or generated procedurally.
         if options is not None and "map_data" in options:
-            map_data   = options["map_data"]
-            wind_field = options.get("wind_field")        # may be None
+            map_data    = options["map_data"]
+            gaden_wind  = options.get("wind_field")
         else:
             tid = self._template_id
             if tid is None and self._max_template_id is not None:
                 tid = int(self._rng.integers(0, self._max_template_id + 1))
-            map_data   = self._map_gen.generate(template_id=tid)
-            wind_field = None
+            map_data    = self._map_gen.generate(template_id=tid)
+            gaden_wind  = None
 
         self._grid = map_data["grid"]
         self._source_pos = np.array(map_data["source_pos"], dtype=np.float64)
         self._robot_pos = np.array(map_data["robot_pos"], dtype=np.float64)
-        self._robot_heading = 0.0
         self._map_width = map_data["width"]
         self._map_height = map_data["height"]
 
-        # Wind: spatial mean of the field for the policy ctx vector when a
-        # wind_field is provided; otherwise random per-episode uniform wind.
-        if wind_field is not None:
-            speed, direction = wind_field.spatial_mean()
-            self._wind.set_uniform(speed, direction)
+        # Wind: GADEN field swaps in self._wind for this episode; the procedural
+        # WindField is restored on subsequent procedural resets.
+        if gaden_wind is not None:
+            if not hasattr(self, "_procedural_wind"):
+                self._procedural_wind = self._wind
+            self._wind = gaden_wind
         else:
-            self._wind.randomize(self._rng)
+            if hasattr(self, "_procedural_wind"):
+                self._wind = self._procedural_wind
+            self._wind.randomize(self._grid, self._rng)
 
         # Gas model selection
         if cfg.GAS_MODEL == "filament":
             self._plume = FilamentPlume(
                 source_pos=self._source_pos,
-                wind_speed=self._wind.speed,
-                wind_angle=self._wind.direction,
+                wind_field=self._wind,
                 occupancy_grid=self._grid,
                 dt=cfg.FILAMENT_DT,
                 K=cfg.FILAMENT_K,
@@ -135,8 +139,8 @@ class GasSourceEnv(gymnasium.Env):
                 mass=cfg.FILAMENT_MASS,
                 min_sigma=cfg.FILAMENT_MIN_SIGMA,
                 reflection_energy=cfg.FILAMENT_REFLECTION_ENERGY,
+                poisson_emission=getattr(cfg, 'FILAMENT_POISSON_EMISSION', True),
                 rng=self._rng,
-                wind_field=wind_field,
             )
             # Warm up the plume so step 0 has some initial filaments
             for _ in range(cfg.FILAMENT_WARMUP_STEPS):
@@ -183,7 +187,6 @@ class GasSourceEnv(gymnasium.Env):
             num_rays=cfg.LIDAR_NUM_RAYS,
             max_range=cfg.LIDAR_MAX_RANGE,
             occupancy_grid=self._grid,
-            noise_std=cfg.LIDAR_NOISE_STD,
         )
 
         # Sensor
@@ -230,7 +233,6 @@ class GasSourceEnv(gymnasium.Env):
         else:
             self._visualizer = None
 
-        # _robot_heading must be set before this call (scan() needs it)
         obs = self._build_observation()
         info = self._build_info(0.0, False, 0)
         return obs, info
@@ -243,8 +245,6 @@ class GasSourceEnv(gymnasium.Env):
         else:
             # Gaussian-style: (cos θ, sin θ) -> angle
             theta = float(np.arctan2(action[1], action[0]))
-
-        self._robot_heading = theta
 
         # Compute target position
         dx = cfg.STEP_SIZE * np.cos(theta)
@@ -403,7 +403,7 @@ class GasSourceEnv(gymnasium.Env):
                     float(b),
                 ])
         gas = np.array(gas_entries, dtype=np.float32)
-        lidar = self._lidar.scan(tuple(self._robot_pos), self._robot_heading).astype(np.float32)
+        lidar = self._lidar.scan(tuple(self._robot_pos)).astype(np.float32)
         pos = np.array([
             self._robot_pos[0] / self._map_width,
             self._robot_pos[1] / self._map_height,
