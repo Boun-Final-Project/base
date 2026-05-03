@@ -1,0 +1,42 @@
+/**:
+  ros__parameters:
+    # Absolute path to checkpoint .pt file (required)
+    checkpoint: ""
+
+    # PyTorch device
+    device: "cpu"
+
+    # Navigation goal position (metres)
+    goal_x: 5.0
+    goal_y: 5.0
+
+    # Goal reached threshold (metres)
+    goal_tolerance: 0.5
+
+    # Episode length cap (steps)
+    max_steps: 600
+
+    # Drive mode: false = teleport via /PioneerP3DX/initialpose, true = Nav2 PoseStamped to /goal_pose
+    use_nav2: false
+
+    # Step size in metres (must match training: cfg.STEP_SIZE = 0.5)
+    step_size: 0.5
+
+    # Number of episodes to run before shutdown (batch eval)
+    num_episodes: 1
+
+    # Delay between teleport steps (seconds)
+    step_delay: 0.5
+
+    # Optional start position (-999 = use GADEN default spawn)
+    start_x: -999.0
+    start_y: -999.0
+
+    # GADEN occupancy service
+    occupancy_service: "/gaden_environment/occupancyMap3D"
+    occupancy_z_level: 5
+    occupancy_timeout: 60.0
+
+    # Logging
+    step_log_every: 1
+    publish_markers: true
