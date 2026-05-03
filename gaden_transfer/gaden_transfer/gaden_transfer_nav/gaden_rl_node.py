@@ -31,7 +31,7 @@ from visualization_msgs.msg import Marker
 
 # RL package imports: add src/base/ to sys.path so both the installed entry
 # point and direct execution can find the reinforcement_learning package.
-_SRC_BASE = '/home/hdd/ros2_ws/src/base'
+_SRC_BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', '..'))
 if _SRC_BASE not in sys.path:
     sys.path.insert(0, _SRC_BASE)
 

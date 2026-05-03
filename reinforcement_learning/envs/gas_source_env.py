@@ -289,6 +289,8 @@ class GasSourceEnv(gymnasium.Env):
         if cell_key not in self._visited_cells:
             reward += cfg.R_NEW_CELL
             self._visited_cells.add(cell_key)
+        else:
+            reward += cfg.R_REVISIT
 
         dist = np.linalg.norm(self._robot_pos - self._source_pos)
         terminated = False
