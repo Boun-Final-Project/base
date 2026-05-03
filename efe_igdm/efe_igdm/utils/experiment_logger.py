@@ -61,18 +61,20 @@ class ExperimentLogger:
         self.csv_writer.writerow(row)
         self.log_file.flush()
 
-    def save_summary(self, step_count, total_dist, elapsed_time, avg_comp_time, 
-                     est_x, est_y, est_error):
+    def save_summary(self, step_count, total_dist, elapsed_time, avg_comp_time,
+                     est_x, est_y, est_error, first_close_time=None):
         """
         Saves the final summary text file.
         """
+        close_str = f"{first_close_time:.2f} s" if first_close_time is not None else "never"
         summary = (
             f"ST: {step_count} steps\n"
             f"TD: {total_dist:.2f} m\n"
             f"Time: {elapsed_time:.2f} s\n"
             f"Avg Comp: {avg_comp_time:.4f} s\n"
             f"Error: {est_error:.3f} m\n"
-            f"Est Source: ({est_x:.3f}, {est_y:.3f})"
+            f"Est Source: ({est_x:.3f}, {est_y:.3f})\n"
+            f"First within 0.5m: {close_str}"
         )
         
         summary_filename = self.log_filename.replace('.csv', '_summary.txt')

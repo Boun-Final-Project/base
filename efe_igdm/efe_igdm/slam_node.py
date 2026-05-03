@@ -11,12 +11,14 @@ of implementing their own SLAM.
 import numpy as np
 import math
 import rclpy
+from collections import deque
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid
+from std_msgs.msg import Empty
 
 
 def euler_from_quaternion_manual(x, y, z, w):
@@ -64,10 +66,15 @@ class SlamNode(Node):
         publish_rate = self.get_parameter('publish_rate').value
 
         # State
-        self.current_position = None  # (x, y)
+        self.current_position = None  # (x, y), latest-only (back-compat)
         self.current_theta = None
         self.laser_scan_count = 0
         self.total_obstacles_marked = 0
+        # Timestamp-indexed pose history. Each scan looks up the pose whose
+        # header.stamp is closest to its own stamp — fixes the "teleport
+        # splatters the SLAM map" race where a scan from pose A is processed
+        # with a just-updated `current_position = B`.
+        self._pose_buffer = deque(maxlen=500)  # (stamp_ns, x, y, theta)
 
         # Load map from GADEN occupancy service
         self.get_logger().info('Loading occupancy grid from GADEN service...')
@@ -110,6 +117,13 @@ class SlamNode(Node):
         )
         self.slam_map_pub = self.create_publisher(OccupancyGrid, slam_map_topic, map_qos)
 
+        # Reset subscription: any message on this topic wipes the current
+        # SLAM grid and pose buffer. Intended for clients that teleport the
+        # robot into a fresh episode and want to discard pre-teleport scans.
+        self.reset_sub = self.create_subscription(
+            Empty, '/slam_node/reset_map', self._reset_callback, 1
+        )
+
         # Publish timer
         period = 1.0 / publish_rate
         self.slam_map_timer = self.create_timer(period, self.publish_slam_map)
@@ -127,21 +141,61 @@ class SlamNode(Node):
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
         _, _, yaw = euler_from_quaternion_manual(q.x, q.y, q.z, q.w)
+        # Buffer the pose with its header stamp so scans can look it up by
+        # timestamp later.
+        stamp_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+        self._pose_buffer.append((stamp_ns, p.x, p.y, yaw))
+        # Keep the latest-pose attributes populated for callers (the rest of
+        # efe_igdm uses them as a convenient snapshot).
         self.current_position = (p.x, p.y)
         self.current_theta = yaw
 
+    def _closest_pose_to(self, target_stamp_ns: int):
+        """Return (x, y, theta) for the pose whose stamp is closest to target.
+
+        O(n) linear scan over the buffer (small n, and the buffer is bounded
+        by maxlen). Returns None if the buffer is empty.
+        """
+        if not self._pose_buffer:
+            return None
+        best = None
+        best_dt = None
+        for (stamp_ns, x, y, theta) in self._pose_buffer:
+            dt = abs(stamp_ns - target_stamp_ns)
+            if best_dt is None or dt < best_dt:
+                best_dt = dt
+                best = (x, y, theta)
+        return best
+
     def laser_callback(self, msg: LaserScan):
-        if self.current_position is None or self.current_theta is None:
+        # Need at least one pose buffered to resolve scan → pose.
+        if not self._pose_buffer:
             return
 
-        obstacles_found = self.lidar_mapper.update_from_scan(
-            msg,
-            self.current_position[0],
-            self.current_position[1],
-            self.current_theta,
-        )
+        scan_stamp_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+        pose = self._closest_pose_to(scan_stamp_ns)
+        if pose is None:
+            return
+        x, y, theta = pose
+
+        obstacles_found = self.lidar_mapper.update_from_scan(msg, x, y, theta)
         self.laser_scan_count += 1
         self.total_obstacles_marked += obstacles_found
+
+    def _reset_callback(self, _msg: Empty):
+        """Clear the SLAM grid + pose buffer.
+
+        Invoked by clients (e.g. gaden_rl_node_image) right after an episode
+        teleport so the grid doesn't accumulate pre-teleport scans.
+        """
+        self.slam_map = create_empty_occupancy_map(self.occupancy_map)
+        # Rebuild the mapper against the fresh grid; LidarMapper holds a
+        # reference to the grid, so we must construct a new one.
+        self.lidar_mapper = LidarMapper(self.slam_map, outlet_mask=self.outlet_mask)
+        self._pose_buffer.clear()
+        self.laser_scan_count = 0
+        self.total_obstacles_marked = 0
+        self.get_logger().info('SLAM map reset (grid + pose buffer cleared).')
 
     # ------------------------------------------------------------------
     # Map publishing (same encoding as efe_igdm)
