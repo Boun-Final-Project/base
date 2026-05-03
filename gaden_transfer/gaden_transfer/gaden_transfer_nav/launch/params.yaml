@@ -16,21 +16,18 @@
     # Episode length cap (steps)
     max_steps: 600
 
-    # Drive mode: false = teleport via /PioneerP3DX/initialpose, true = Nav2 PoseStamped to /goal_pose
-    use_nav2: false
-
     # Step size in metres (must match training: cfg.STEP_SIZE = 0.5)
     step_size: 0.5
 
+    # cmd_vel P-controller
+    linear_speed: 0.3
+    angular_speed_gain: 2.0
+    arrival_tolerance: 0.15
+    cmd_vel_rate: 10.0
+    waypoint_timeout: 10.0
+
     # Number of episodes to run before shutdown (batch eval)
     num_episodes: 1
-
-    # Delay between teleport steps (seconds)
-    step_delay: 0.5
-
-    # Optional start position (-999 = use GADEN default spawn)
-    start_x: -999.0
-    start_y: -999.0
 
     # GADEN occupancy service
     occupancy_service: "/gaden_environment/occupancyMap3D"

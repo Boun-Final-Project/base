@@ -3,7 +3,7 @@ NavRLNode — deploy a pretrained NavActorCritic PPO agent inside GADEN.
 
 Subscribes to ground-truth pose, LiDAR, and an optional dynamic goal topic,
 builds the 77-dim observation vector via NavObsBuilder, runs the policy, and
-moves the robot by either direct teleport or Nav2 PoseStamped goal.
+moves the robot with a Twist cmd_vel P-controller (IDLE/MOVING state machine).
 
 Usage
 -----
@@ -25,7 +25,7 @@ import torch
 import rclpy
 from rclpy.node import Node
 
-from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Point
+from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist, Point
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker
 
@@ -81,8 +81,7 @@ class NavRLNode(Node):
             f'Goal: ({self._goal_x:.2f}, {self._goal_y:.2f}) ± {self._goal_tolerance:.2f} m'
         )
         self.get_logger().info(
-            f'Map: {self._map_width:.2f}x{self._map_height:.2f} m | '
-            f'use_nav2={self._use_nav2}'
+            f'Map: {self._map_width:.2f}x{self._map_height:.2f} m'
         )
 
     # ------------------------------------------------------------------
@@ -96,12 +95,13 @@ class NavRLNode(Node):
         self.declare_parameter('goal_y', 5.0)
         self.declare_parameter('goal_tolerance', 0.5)
         self.declare_parameter('max_steps', 600)
-        self.declare_parameter('use_nav2', False)
         self.declare_parameter('step_size', 0.5)
         self.declare_parameter('num_episodes', 1)
-        self.declare_parameter('step_delay', 0.5)
-        self.declare_parameter('start_x', -999.0)
-        self.declare_parameter('start_y', -999.0)
+        self.declare_parameter('linear_speed', 0.3)
+        self.declare_parameter('angular_speed_gain', 2.0)
+        self.declare_parameter('arrival_tolerance', 0.15)
+        self.declare_parameter('cmd_vel_rate', 10.0)
+        self.declare_parameter('waypoint_timeout', 10.0)
         self.declare_parameter('occupancy_service', '/gaden_environment/occupancyMap3D')
         self.declare_parameter('occupancy_z_level', 5)
         self.declare_parameter('occupancy_timeout', 60.0)
@@ -118,16 +118,18 @@ class NavRLNode(Node):
         self._goal_y: float = float(self.get_parameter('goal_y').value)
         self._goal_tolerance: float = float(self.get_parameter('goal_tolerance').value)
         self._max_steps: int = int(self.get_parameter('max_steps').value)
-        self._use_nav2: bool = bool(self.get_parameter('use_nav2').value)
         self._step_size: float = float(self.get_parameter('step_size').value)
         self._num_episodes: int = int(self.get_parameter('num_episodes').value)
-        self._step_delay: float = float(self.get_parameter('step_delay').value)
-        self._start_x: float = float(self.get_parameter('start_x').value)
-        self._start_y: float = float(self.get_parameter('start_y').value)
+        self._linear_speed: float = float(self.get_parameter('linear_speed').value)
+        self._angular_speed_gain: float = float(self.get_parameter('angular_speed_gain').value)
+        self._arrival_tolerance: float = float(self.get_parameter('arrival_tolerance').value)
+        self._cmd_vel_rate: float = float(self.get_parameter('cmd_vel_rate').value)
+        self._waypoint_timeout: float = float(self.get_parameter('waypoint_timeout').value)
         self._occ_service: str = self.get_parameter('occupancy_service').value
         self._occ_z: int = int(self.get_parameter('occupancy_z_level').value)
         self._occ_timeout: float = float(self.get_parameter('occupancy_timeout').value)
         self._step_log_every: int = int(self.get_parameter('step_log_every').value)
+        self._step_log_every = max(1, self._step_log_every)
         self._publish_markers: bool = bool(self.get_parameter('publish_markers').value)
 
     def _init_state(self):
@@ -138,14 +140,12 @@ class NavRLNode(Node):
         self._step_in_episode: int = 0
 
         self._search_complete: bool = False
-        self._start_teleport_done: bool = False
-        self._last_step_time_ns: int = 0
 
-        # Fresh-scan gate: make _take_step wait for a laser scan whose stamp
-        # post-dates the most recent teleport, so the obs builder never
-        # sees pre-teleport lidar data from the wrong position.
-        self._latest_scan_stamp_ns: int = 0
-        self._teleport_wait_stamp_ns: Optional[int] = None
+        self._moving: bool = False           # True while tracking a waypoint
+        self._waypoint_x: Optional[float] = None
+        self._waypoint_y: Optional[float] = None
+        self._waypoint_start_ns: int = 0
+        self._robot_theta: Optional[float] = None   # yaw extracted from ground_truth
 
         self._latest_lidar_min: Optional[float] = None
 
@@ -219,8 +219,7 @@ class NavRLNode(Node):
             '/nav_goal',
             self._nav_goal_callback, 10)
 
-        self._teleport_pub = self.create_publisher(
-            PoseWithCovarianceStamped, '/PioneerP3DX/initialpose', 10)
+        self._cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
 
         self._goal_marker_pub = self.create_publisher(
             Marker, '/gaden_nav_rl/goal_marker', 1)
@@ -228,9 +227,9 @@ class NavRLNode(Node):
         self._action_marker_pub = self.create_publisher(
             Marker, '/gaden_nav_rl/action_marker', 1)
 
-        if self._use_nav2:
-            self._nav2_goal_pub = self.create_publisher(
-                PoseStamped, '/goal_pose', 10)
+        self._cmd_vel_timer = self.create_timer(
+            1.0 / self._cmd_vel_rate, self._cmd_vel_tick
+        )
 
     # ------------------------------------------------------------------
     # ROS2 callbacks
@@ -239,50 +238,21 @@ class NavRLNode(Node):
     def _pose_callback(self, msg: PoseWithCovarianceStamped):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
-
+        q = msg.pose.pose.orientation
         self._robot_x = x
         self._robot_y = y
-
+        self._robot_theta = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        )
         if self._obs_builder is None:
             return
-
-        # Update obs builder pose
         self._obs_builder.update_pose(x, y)
-
-        if not self._obs_builder.ready:
-            return
-
-        # Initial: teleport to start position once
-        if not self._start_teleport_done:
-            self._start_teleport_done = True
-            if self._start_x > -998.0 and self._start_y > -998.0:
-                self.get_logger().info(
-                    f'Teleporting to start position '
-                    f'({self._start_x:.2f}, {self._start_y:.2f})'
-                )
-                self._teleport_to(self._start_x, self._start_y)
-                self._last_step_time_ns = self.get_clock().now().nanoseconds
-                return
-
-        # Fresh-scan gate: wait for a scan whose stamp is strictly newer than
-        # the last teleport.
-        if self._teleport_wait_stamp_ns is not None and \
-                self._latest_scan_stamp_ns <= self._teleport_wait_stamp_ns:
-            return
-
-        # Step-rate gate
-        now_ns = self.get_clock().now().nanoseconds
-        delay_ns = int(self._step_delay * 1e9)
-        if now_ns - self._last_step_time_ns < delay_ns:
-            return
-        self._last_step_time_ns = now_ns
-        self._take_step()
+        # Trigger inference only when IDLE and obs ready
+        if not self._moving and not self._search_complete and self._obs_builder.ready:
+            self._take_step()
 
     def _lidar_callback(self, msg: LaserScan):
-        # Record scan stamp for the fresh-scan gate
-        st = msg.header.stamp
-        self._latest_scan_stamp_ns = int(st.sec) * 1_000_000_000 + int(st.nanosec)
-
         if self._obs_builder is None:
             return
 
@@ -293,8 +263,10 @@ class NavRLNode(Node):
         self._obs_builder.update_lidar(msg)
 
     def _nav_goal_callback(self, msg: PoseStamped):
+        if self._obs_builder is None:
+            return
         # Goal is swapped in place — the episode continues from the current step count.
-        # Step counter and start-teleport are NOT reset; only the obs_builder goal changes.
+        # Only the obs_builder goal changes; step counter is not reset.
         self._goal_x = msg.pose.position.x
         self._goal_y = msg.pose.position.y
         self._obs_builder.reset(goal_x=self._goal_x, goal_y=self._goal_y)
@@ -354,16 +326,6 @@ class NavRLNode(Node):
         target_x = self._robot_x + self._step_size * math.cos(theta)
         target_y = self._robot_y + self._step_size * math.sin(theta)
 
-        # --- Collision clamp ---
-        target_x, target_y, collided = self._clamp_to_free(
-            self._robot_x, self._robot_y, target_x, target_y, theta
-        )
-        if collided:
-            self.get_logger().info(
-                f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
-                f'COLLISION — clamped to ({target_x:.2f},{target_y:.2f})'
-            )
-
         # --- Step logging ---
         if self._step_log_every <= 1 or (self._step_in_episode % self._step_log_every == 0):
             lidar_text = (
@@ -383,50 +345,52 @@ class NavRLNode(Node):
             self._publish_goal_marker()
             self._publish_action_marker(target_x, target_y)
 
-        # --- Execute motion ---
-        if self._use_nav2:
-            nav2_msg = PoseStamped()
-            nav2_msg.header.stamp = self.get_clock().now().to_msg()
-            nav2_msg.header.frame_id = 'map'
-            nav2_msg.pose.position.x = float(target_x)
-            nav2_msg.pose.position.y = float(target_y)
-            nav2_msg.pose.orientation.w = 1.0
-            self._nav2_goal_pub.publish(nav2_msg)
-        else:
-            self._teleport_to(target_x, target_y)
-
-        self._step_in_episode += 1
+        # Set waypoint and enter MOVING state
+        self._waypoint_x = target_x
+        self._waypoint_y = target_y
+        self._waypoint_start_ns = self.get_clock().now().nanoseconds
+        self._moving = True
 
     # ------------------------------------------------------------------
-    # Helpers
+    # cmd_vel control loop
     # ------------------------------------------------------------------
 
-    def _clamp_to_free(self, rx: float, ry: float,
-                       tx: float, ty: float, theta: float) -> tuple:
-        """Validate target; if blocked, walk back along the ray until free.
+    def _cmd_vel_tick(self):
+        # Single-executor assumed: _moving and _waypoint_x/y are written only in
+        # _take_step (pose callback) and read/cleared here — no lock needed.
+        if not self._moving:
+            return
+        if self._robot_x is None or self._robot_theta is None:
+            return
 
-        Returns
-        -------
-        (clamped_x, clamped_y, collided) where ``collided`` is True iff the
-        original target was not free.
-        """
-        if not hasattr(self, '_occ_map'):
-            return tx, ty, False
+        dx = self._waypoint_x - self._robot_x
+        dy = self._waypoint_y - self._robot_y
+        dist = math.hypot(dx, dy)
 
-        if self._occ_map.is_valid((tx, ty), radius=cfg.ROBOT_RADIUS):
-            return tx, ty, False
+        elapsed_ns = self.get_clock().now().nanoseconds - self._waypoint_start_ns
+        timed_out = elapsed_ns > self._waypoint_timeout * 1e9
 
-        # Original target blocked — walk back along the ray
-        step = self._step_size - 0.05
-        while step >= 0.1:
-            cx = rx + step * math.cos(theta)
-            cy = ry + step * math.sin(theta)
-            if self._occ_map.is_valid((cx, cy), radius=cfg.ROBOT_RADIUS):
-                return cx, cy, True
-            step -= 0.05
+        if dist < self._arrival_tolerance or timed_out:
+            # Stop robot
+            self._cmd_vel_pub.publish(Twist())
+            self._step_in_episode += 1
+            self._moving = False
+            if timed_out and dist >= self._arrival_tolerance:
+                self.get_logger().warn(
+                    f'[Ep {self._episode} Step {self._step_in_episode}] '
+                    f'Waypoint timeout (dist={dist:.2f}m)'
+                )
+            return
 
-        # Nowhere to go — stay in place
-        return rx, ry, True
+        desired_heading = math.atan2(dy, dx)
+        heading_error = desired_heading - self._robot_theta
+        # Wrap to [-pi, pi]
+        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
+
+        twist = Twist()
+        twist.linear.x = self._linear_speed
+        twist.angular.z = self._angular_speed_gain * heading_error
+        self._cmd_vel_pub.publish(twist)
 
     # ------------------------------------------------------------------
     # Episode management
@@ -446,37 +410,12 @@ class NavRLNode(Node):
                 f'Completed {self._num_episodes} episode(s). Shutting down.'
             )
             self._search_complete = True
-            os._exit(0)
+            rclpy.shutdown()
+            return
 
         # Prepare next episode
         self._step_in_episode = 0
         self._obs_builder.reset(goal_x=self._goal_x, goal_y=self._goal_y)
-
-        if self._start_x > -998.0 and self._start_y > -998.0:
-            self.get_logger().info(
-                f'Starting episode {self._episode} — teleporting to '
-                f'({self._start_x:.2f}, {self._start_y:.2f})'
-            )
-            self._start_teleport_done = False
-
-        self._last_step_time_ns = self.get_clock().now().nanoseconds
-
-    # ------------------------------------------------------------------
-    # Teleport
-    # ------------------------------------------------------------------
-
-    def _teleport_to(self, x: float, y: float):
-        """Publish a PoseWithCovarianceStamped to teleport the robot."""
-        msg = PoseWithCovarianceStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'map'
-        msg.pose.pose.position.x = float(x)
-        msg.pose.pose.position.y = float(y)
-        msg.pose.pose.orientation.w = 1.0
-        msg.pose.covariance = [0.0] * 36
-        self._teleport_pub.publish(msg)
-        # Re-arm fresh-scan gate
-        self._teleport_wait_stamp_ns = self._latest_scan_stamp_ns
 
     # ------------------------------------------------------------------
     # Markers
