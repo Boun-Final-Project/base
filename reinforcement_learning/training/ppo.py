@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from .. import config as cfg
+
 
 class RunningMeanStd:
     """Tracks running mean and variance using Welford's algorithm."""
@@ -140,6 +142,144 @@ class RolloutBuffer:
                 "returns": b_returns[mb_idx],
                 "values": b_values[mb_idx],
             }
+
+
+class SpatialRolloutBuffer:
+    """Rollout buffer for spatial (4, 98, 98) + wind (2,) observations.
+
+    Spatial and wind tensors are kept on CPU to avoid ~2.4 GB GPU allocation
+    (2048 steps × 8 envs × 4 × 98 × 98 × float32). Minibatches are moved to
+    device on demand inside get_batches().
+    """
+
+    def __init__(self, num_steps, num_envs, action_dim, device):
+        self.num_steps = num_steps
+        self.num_envs  = num_envs
+        self.device    = device
+        self.pos       = 0
+
+        G = cfg.SPATIAL_GRID_SIZE
+        self._G = G
+        self.spatial_obs = torch.zeros((num_steps, num_envs, 4, G, G), dtype=torch.float32)
+        self.wind_obs    = torch.zeros((num_steps, num_envs, 2),        dtype=torch.float32)
+
+        self.actions   = torch.zeros((num_steps, num_envs, action_dim), device=device)
+        self.log_probs = torch.zeros((num_steps, num_envs),             device=device)
+        self.rewards   = torch.zeros((num_steps, num_envs),             device=device)
+        self.dones     = torch.zeros((num_steps, num_envs),             device=device)
+        self.values    = torch.zeros((num_steps, num_envs),             device=device)
+
+    def insert(self, spatial, wind, action, log_prob, reward, done, value):
+        self.spatial_obs[self.pos] = spatial.cpu()
+        self.wind_obs[self.pos]    = wind.cpu()
+        self.actions[self.pos]     = action
+        self.log_probs[self.pos]   = log_prob
+        self.rewards[self.pos]     = reward
+        self.dones[self.pos]       = done
+        self.values[self.pos]      = value
+        self.pos += 1
+
+    def reset(self):
+        self.pos = 0
+
+    def get_batches(self, advantages, returns, num_minibatches):
+        batch_size = self.num_steps * self.num_envs
+        mb_size    = batch_size // num_minibatches
+        assert mb_size > 0
+
+        b_spatial    = self.spatial_obs.reshape(batch_size, 4, self._G, self._G)
+        b_wind       = self.wind_obs.reshape(batch_size, 2)
+        b_actions    = self.actions.reshape(batch_size, -1)
+        b_log_probs  = self.log_probs.reshape(batch_size)
+        b_advantages = advantages.reshape(batch_size)
+        b_returns    = returns.reshape(batch_size)
+        b_values     = self.values.reshape(batch_size)
+
+        indices = torch.randperm(batch_size, device=self.device)
+        for start in range(0, batch_size, mb_size):
+            mb_idx  = indices[start:start + mb_size]
+            cpu_idx = mb_idx.cpu()
+            yield {
+                "spatial":    b_spatial[cpu_idx].to(self.device),
+                "wind":       b_wind[cpu_idx].to(self.device),
+                "actions":    b_actions[mb_idx],
+                "log_probs":  b_log_probs[mb_idx],
+                "advantages": b_advantages[mb_idx],
+                "returns":    b_returns[mb_idx],
+                "values":     b_values[mb_idx],
+            }
+
+
+def spatial_ppo_update(agent, optimizer, buffer, advantages, returns,
+                       clip_epsilon, entropy_coeff, value_loss_coeff,
+                       max_grad_norm, update_epochs, num_minibatches,
+                       target_kl=None):
+    """PPO update for the spatial architecture (obs = spatial + wind)."""
+    adv_flat   = advantages.reshape(-1)
+    advantages = (advantages - adv_flat.mean()) / (adv_flat.std() + 1e-8)
+
+    total_pg_loss = total_v_loss = total_entropy = 0.0
+    total_clipfrac = total_approx_kl = 0.0
+    n_updates = 0
+
+    for epoch in range(update_epochs):
+        epoch_kl      = 0.0
+        epoch_batches = 0
+        for mb in buffer.get_batches(advantages, returns, num_minibatches):
+            mb_actions = mb["actions"]  # (cos θ, sin θ) — no clamping needed
+
+            _, new_log_prob, entropy, new_value = agent.get_action_and_value(
+                mb["spatial"], mb["wind"], action=mb_actions
+            )
+
+            log_ratio = new_log_prob - mb["log_probs"]
+            ratio     = log_ratio.exp()
+
+            with torch.no_grad():
+                approx_kl = ((ratio - 1) - log_ratio).mean()
+                clipfrac  = ((ratio - 1.0).abs() > clip_epsilon).float().mean()
+
+            mb_adv  = mb["advantages"]
+            pg_loss = torch.max(
+                -mb_adv * ratio,
+                -mb_adv * torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon),
+            ).mean()
+
+            new_value        = new_value.squeeze(-1)
+            v_loss_unclipped = (new_value - mb["returns"]) ** 2
+            v_clipped        = mb["values"] + torch.clamp(
+                new_value - mb["values"], -clip_epsilon, clip_epsilon
+            )
+            v_loss = 0.5 * torch.max(
+                v_loss_unclipped, (v_clipped - mb["returns"]) ** 2
+            ).mean()
+
+            loss = pg_loss - entropy_coeff * entropy.mean() + value_loss_coeff * v_loss
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+            optimizer.step()
+
+            total_pg_loss   += pg_loss.item()
+            total_v_loss    += v_loss.item()
+            total_entropy   += entropy.mean().item()
+            total_clipfrac  += clipfrac.item()
+            total_approx_kl += approx_kl.item()
+            n_updates       += 1
+            epoch_kl        += approx_kl.item()
+            epoch_batches   += 1
+
+        if target_kl is not None and epoch_batches > 0:
+            if epoch_kl / epoch_batches > target_kl:
+                break
+
+    return {
+        "policy_loss": total_pg_loss   / n_updates,
+        "value_loss":  total_v_loss    / n_updates,
+        "entropy":     total_entropy   / n_updates,
+        "clipfrac":    total_clipfrac  / n_updates,
+        "approx_kl":   total_approx_kl / n_updates,
+    }
 
 
 def ppo_update(agent, optimizer, buffer, advantages, returns,

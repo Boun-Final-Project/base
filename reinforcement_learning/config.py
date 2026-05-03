@@ -106,7 +106,7 @@ ENTROPY_COEFF = 0.02
 VALUE_LOSS_COEFF = 0.5
 MAX_GRAD_NORM = 0.5
 NUM_ENVS = 8
-ROLLOUT_LENGTH = 2048
+ROLLOUT_LENGTH = 1024
 NUM_MINIBATCHES = 32
 UPDATE_EPOCHS = 10
 TOTAL_TIMESTEPS = 100_000_000
@@ -123,3 +123,15 @@ CRITIC_HEAD_DIM = 128
 GAS_GRU_HIDDEN = 64
 LIDAR_CONV_CHANNELS = 2
 LIDAR_CONV_KERNEL = 5
+
+# =============================================================================
+# Spatial CNN architecture
+# =============================================================================
+SPATIAL_GRID_SIZE     = 98           # cells (49m / 0.5m)
+SPATIAL_LAMBDA        = 0.015        # recency decay rate (half-life ~46 steps)
+SPATIAL_FILM_HIDDEN   = 64
+SPATIAL_CNN_OUT_CH    = 128          # channels after 1×1 fusion conv
+SPATIAL_SHARED_HIDDEN = (512, 256)
+SPATIAL_ACTOR_DIM     = 128
+SPATIAL_CRITIC_DIM    = 256
+SPATIAL_RES_BLOCKS    = 3

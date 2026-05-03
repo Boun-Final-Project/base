@@ -2,3 +2,19 @@ __pycache__
 log
 .vscode
 gsl_hit_map
+
+# Python
+*.pyc
+
+# Training / experiment outputs
+runs/
+results/
+eval_results/
+eval_results_gaden/
+obs_viz/
+gaden_viz/
+gaden_trajectories/
+slurm-*.out
+
+# Container images
+*.sqsh
