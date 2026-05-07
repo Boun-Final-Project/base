@@ -40,6 +40,7 @@ ${VENV_PY} -u -m rl_5_channel.training.train \
     --rollout-length 1024 \
     --total-timesteps 300000000 \
     --curriculum \
+    --seed 42 \
     --resume "${RESUME_CKPT}" \
     --reset-lr \
     --output-dir "${OUT_DIR}"
