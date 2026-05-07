@@ -74,10 +74,10 @@ class VecEnv:
             info_list.append(info)
         return np.stack(obs_list), info_list
 
-    def set_curriculum(self, w_range, h_range, max_template):
+    def set_curriculum(self, w_range, h_range, max_template, weights=None):
         for env in self.envs:
             env.set_room_size_range(w_range, h_range)
-            env.set_max_template(max_template)
+            env.set_max_template(max_template, weights)
 
     def close(self):
         pass  # serial VecEnv has no processes to join
@@ -142,9 +142,9 @@ def _worker(child_conn, parent_conn, env_fn):
                 obs, info = env.reset()
                 child_conn.send((obs, info))
             elif cmd == "set_curriculum":
-                w_range, h_range, max_template = data
+                w_range, h_range, max_template, weights = data
                 env.set_room_size_range(w_range, h_range)
-                env.set_max_template(max_template)
+                env.set_max_template(max_template, weights)
                 child_conn.send(None)
             elif cmd == "close":
                 break
@@ -198,9 +198,10 @@ class SubprocVecEnv:
         obs_list, info_list = zip(*results)
         return np.stack(obs_list), list(info_list)
 
-    def set_curriculum(self, w_range, h_range, max_template):
+    def set_curriculum(self, w_range, h_range, max_template, weights=None):
         for conn in self._parents:
-            conn.send(("set_curriculum", (w_range, h_range, max_template)))
+            conn.send(("set_curriculum",
+                       (w_range, h_range, max_template, weights)))
         for conn in self._parents:
             conn.recv()
 
@@ -335,9 +336,9 @@ def _thin_worker(child_conn, parent_conn, env_fn):
                 _attach_reset_state(snap)
                 child_conn.send(snap)
             elif cmd == "set_curriculum":
-                w_range, h_range, max_template = data
+                w_range, h_range, max_template, weights = data
                 env.set_room_size_range(w_range, h_range)
-                env.set_max_template(max_template)
+                env.set_max_template(max_template, weights)
                 child_conn.send(None)
             elif cmd == "close":
                 break
@@ -417,9 +418,10 @@ class BatchedSpatialVecEnv:
         snaps = [conn.recv() for conn in self._parents]
         return self._apply_snapshots(snaps)
 
-    def set_curriculum(self, w_range, h_range, max_template):
+    def set_curriculum(self, w_range, h_range, max_template, weights=None):
         for conn in self._parents:
-            conn.send(("set_curriculum", (w_range, h_range, max_template)))
+            conn.send(("set_curriculum",
+                       (w_range, h_range, max_template, weights)))
         for conn in self._parents:
             conn.recv()
 
@@ -447,20 +449,39 @@ def get_curriculum_ranges(progress):
 
 
 def get_template_curriculum(progress):
-    """Return max template index based on training progress (0→1).
+    """Return (max_template_id, sampling_weights) for the current progress.
 
-    Uses TEMPLATE_CURRICULUM_STAGES from config: list of (threshold, max_id).
+    Uses TEMPLATE_CURRICULUM_STAGES (list of (threshold, max_id)) and
+    TEMPLATE_SAMPLING_WEIGHTS (per-template weights, len ≥ max possible
+    max_id + 1). Weights are clipped to the currently-unlocked templates.
+    Returns (max_id, weights or None).
     """
     max_id = cfg.TEMPLATE_CURRICULUM_STAGES[0][1]
     for threshold, tid in cfg.TEMPLATE_CURRICULUM_STAGES:
         if progress >= threshold:
             max_id = tid
-    return max_id
+    weights = getattr(cfg, "TEMPLATE_SAMPLING_WEIGHTS", None)
+    return max_id, weights
 
 
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+
+    # Reward overrides — must be set BEFORE any env/worker is constructed,
+    # so forked workers inherit the patched cfg values.
+    cfg.R_SUCCESS     = float(args.r_success)
+    cfg.R_STEP        = float(args.r_step)
+    cfg.R_NEW_CELL    = float(args.r_new_cell)
+    cfg.R_COLLISION   = float(args.r_collision)
+    cfg.R_MAX_STEPS   = float(args.r_max_steps)
+    cfg.R_DETECTION   = float(args.r_detection)
+    cfg.R_BBOX_GROWTH = float(args.r_bbox_growth)
+    cfg.R_REVEAL      = float(args.r_reveal)
+    print(f"Rewards: success={cfg.R_SUCCESS}  step={cfg.R_STEP}  "
+          f"new_cell={cfg.R_NEW_CELL}  collision={cfg.R_COLLISION}  "
+          f"max_steps={cfg.R_MAX_STEPS}  detection={cfg.R_DETECTION}  "
+          f"bbox_growth={cfg.R_BBOX_GROWTH}  reveal={cfg.R_REVEAL}")
 
     # Seeding
     np.random.seed(args.seed)
@@ -615,8 +636,9 @@ def train(args):
         if args.curriculum:
             progress = global_step / args.total_timesteps
             w_range, h_range = get_curriculum_ranges(progress)
-            max_template = get_template_curriculum(progress)
-            vec_env.set_curriculum(w_range, h_range, max_template)
+            max_template, tmpl_weights = get_template_curriculum(progress)
+            vec_env.set_curriculum(w_range, h_range, max_template,
+                                   tmpl_weights)
 
         # === Rollout ===
         buffer.reset()
@@ -854,6 +876,18 @@ def main():
                         help="KL early stopping threshold (e.g. 0.03). None = disabled")
     parser.add_argument("--curriculum", action="store_true", default=False,
                         help="Enable room size curriculum (small → large)")
+
+    # Reward shaping (override cfg defaults — used for A/B-ing reward profiles)
+    parser.add_argument("--r-success",      type=float, default=cfg.R_SUCCESS)
+    parser.add_argument("--r-step",         type=float, default=cfg.R_STEP)
+    parser.add_argument("--r-new-cell",     type=float, default=cfg.R_NEW_CELL)
+    parser.add_argument("--r-collision",    type=float, default=cfg.R_COLLISION)
+    parser.add_argument("--r-max-steps",    type=float, default=cfg.R_MAX_STEPS)
+    parser.add_argument("--r-detection",    type=float, default=cfg.R_DETECTION)
+    parser.add_argument("--r-bbox-growth",  type=float, default=cfg.R_BBOX_GROWTH,
+                        help="Bonus per m of new visited-position bbox half-perimeter; 0 disables.")
+    parser.add_argument("--r-reveal",       type=float, default=cfg.R_REVEAL,
+                        help="Bonus × (cells newly observed via LiDAR / total free cells) per step. 0 disables.")
 
     # Resume
     parser.add_argument("--resume", type=str, default=None,

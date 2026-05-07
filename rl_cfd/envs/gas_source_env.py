@@ -42,8 +42,9 @@ class GasSourceEnv(gymnasium.Env):
                  viz_output_dir=None):
         super().__init__()
         self.render_mode = render_mode
-        self._template_id = template_id  # None = random, 0-5 = fixed template
+        self._template_id = template_id  # None = random, int = fixed template
         self._max_template_id = None     # None = all templates, set by curriculum
+        self._template_weights = None    # None = uniform; else list/array len >= max_id+1
         self._viz_output_dir = viz_output_dir
         self._visualizer = None
 
@@ -87,9 +88,18 @@ class GasSourceEnv(gymnasium.Env):
         self._map_gen.width_range = width_range
         self._map_gen.height_range = height_range
 
-    def set_max_template(self, max_template_id):
-        """Set maximum template index for curriculum (0-5). None = use all."""
+    def set_max_template(self, max_template_id, weights=None):
+        """Set maximum template index for curriculum and optional sampling weights.
+
+        max_template_id : int or None
+            None = use all templates uniformly. Otherwise sample uniformly
+            (or per `weights`) from indices [0, max_template_id].
+        weights : sequence of float, optional
+            Per-template sampling weights. Only the first (max_template_id+1)
+            entries are used. None = uniform sampling.
+        """
         self._max_template_id = max_template_id
+        self._template_weights = weights
 
     def reset(self, seed=None, options=None):
         if seed is not None:
@@ -103,7 +113,15 @@ class GasSourceEnv(gymnasium.Env):
         else:
             tid = self._template_id
             if tid is None and self._max_template_id is not None:
-                tid = int(self._rng.integers(0, self._max_template_id + 1))
+                if self._template_weights is not None:
+                    w = np.asarray(
+                        self._template_weights[: self._max_template_id + 1],
+                        dtype=float,
+                    )
+                    w = w / w.sum()
+                    tid = int(self._rng.choice(self._max_template_id + 1, p=w))
+                else:
+                    tid = int(self._rng.integers(0, self._max_template_id + 1))
             map_data    = self._map_gen.generate(template_id=tid)
             gaden_wind  = None
 
@@ -205,6 +223,14 @@ class GasSourceEnv(gymnasium.Env):
         )
         self._visited_cells = set()
         self._trajectory = [self._robot_pos.copy()]
+        # Bounding-box exploration tracking: reward step()s that grow the
+        # bbox of all visited positions. Half-perimeter (= dx + dy) is used
+        # rather than area so 1D moves (e.g. straight through a doorway)
+        # also count as progress. Resists local-oscillation cheating because
+        # only positions outside the current bbox can extend it.
+        self._bbox_min = self._robot_pos.copy()
+        self._bbox_max = self._robot_pos.copy()
+        self._bbox_extent = 0.0
 
         # Mark starting cell as visited
         cell_key = self._cell_key(self._robot_pos)
@@ -289,6 +315,16 @@ class GasSourceEnv(gymnasium.Env):
         if cell_key not in self._visited_cells:
             reward += cfg.R_NEW_CELL
             self._visited_cells.add(cell_key)
+
+        # Bounding-box exploration bonus (half-perimeter growth)
+        if cfg.R_BBOX_GROWTH > 0.0:
+            self._bbox_min = np.minimum(self._bbox_min, self._robot_pos)
+            self._bbox_max = np.maximum(self._bbox_max, self._robot_pos)
+            d = self._bbox_max - self._bbox_min
+            new_extent = float(d[0] + d[1])
+            if new_extent > self._bbox_extent:
+                reward += cfg.R_BBOX_GROWTH * (new_extent - self._bbox_extent)
+                self._bbox_extent = new_extent
 
         dist = np.linalg.norm(self._robot_pos - self._source_pos)
         terminated = False

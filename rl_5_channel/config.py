@@ -34,6 +34,15 @@ R_NEW_CELL = 0.2
 R_STEP = -0.1
 R_COLLISION = -10.0
 R_MAX_STEPS = -20.0
+R_REVEAL = 0.0           # bonus × (cells newly observed via LiDAR / total free cells)
+                          # per step. e.g. 0.5 means "+0.5 across one episode that
+                          # fully reveals every free cell." Normalized so room size
+                          # doesn't bias the reward magnitude.
+R_BBOX_GROWTH = 0.0      # bonus per metre of new visited-position bbox
+                          # half-perimeter (dx + dy). 0 disables. Use ~0.1
+                          # to incentivise spatial expansion. Half-perim
+                          # rather than area so 1D moves (e.g. straight
+                          # through a doorway) also count as progress.
 
 # =============================================================================
 # Wind
@@ -88,12 +97,24 @@ CURRICULUM_HEIGHT_START = (6.0, 8.0)
 CURRICULUM_FRACTION = 0.3               # fraction of training to reach full size
 
 # Curriculum: template unlock schedule (progress → max template index)
-# Templates: 0=empty, 1=single_wall, 2=u_shape, 3=three_walls, 4=complex_maze, 5=multi_room
+# Templates: 0=empty, 1=single_wall, 2=u_shape, 3=three_walls, 4=complex_maze,
+#            5=multi_room, 6=dead_end_corridor, 7=serpentine, 8=dense_multi_room,
+#            9=hybrid
+# T6-T9 are GADEN-OOD-mimics added 2026-05-07 to close the labyrinth/ultimate
+# generalization gap (jobs 4809/4810 sweep showed 0% on those maps).
 TEMPLATE_CURRICULUM_STAGES = [
-    (0.00, 1),   # 0-20%:  templates 0-1 (open rooms, learn gas-following)
-    (0.20, 3),   # 20-40%: templates 0-3 (obstacles, learn wall navigation)
-    (0.40, 5),   # 40%+:   templates 0-5 (full set, corridors and multi-room)
+    (0.00, 1),    # 0-10%:  templates 0-1 (gas-following only)
+    (0.10, 3),    # 10-25%: + obstacles (T2, T3)
+    (0.25, 5),    # 25-40%: + corridors / 4-room (T4, T5)  -- old "full set"
+    (0.40, 8),    # 40-60%: + dead-ends, serpentine, dense multi-room (T6-T8)
+    (0.60, 9),    # 60%+:   + hybrids (T9)
 ]
+
+# Per-template sampling weights (used after curriculum unlocks them).
+# Higher weight = more episodes drawn from that template. T6/T7 get 3x
+# because they directly mirror the highest-impact OOD failures
+# (uleft/uright dead-ends, labyrinth corridors).
+TEMPLATE_SAMPLING_WEIGHTS = [1, 1, 1, 1, 1, 2, 3, 3, 2, 2]
 
 # =============================================================================
 # PPO

@@ -25,8 +25,11 @@ from reinforcement_learning.envs.gas_source_env import GasSourceEnv
 
 OUTPUT_PATH = os.path.join(_SCRIPT_DIR, "test_envs.json")
 
-TEMPLATE_COUNTS = [(0, 10), (1, 10), (2, 15), (3, 15), (4, 25), (5, 25)]
-TEMPLATE_NAMES  = ["empty", "single_wall", "u_shape", "three_walls", "complex_maze", "multi_room"]
+TEMPLATE_COUNTS = [(0, 10), (1, 10), (2, 15), (3, 15), (4, 25), (5, 25),
+                   (6, 15), (7, 15), (8, 15), (9, 10)]
+TEMPLATE_NAMES  = ["empty", "single_wall", "u_shape", "three_walls",
+                   "complex_maze", "multi_room", "dead_end_corridor",
+                   "serpentine", "dense_multi_room", "hybrid"]
 MASTER_SEED = 2 ** 17 - 1
 
 

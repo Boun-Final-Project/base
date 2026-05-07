@@ -42,8 +42,9 @@ class GasSourceEnv(gymnasium.Env):
                  viz_output_dir=None):
         super().__init__()
         self.render_mode = render_mode
-        self._template_id = template_id  # None = random, 0-5 = fixed template
+        self._template_id = template_id  # None = random, int = fixed template
         self._max_template_id = None     # None = all templates, set by curriculum
+        self._template_weights = None    # None = uniform; else list/array len >= max_id+1
         self._viz_output_dir = viz_output_dir
         self._visualizer = None
 
@@ -83,9 +84,18 @@ class GasSourceEnv(gymnasium.Env):
         self._map_gen.width_range = width_range
         self._map_gen.height_range = height_range
 
-    def set_max_template(self, max_template_id):
-        """Set maximum template index for curriculum (0-5). None = use all."""
+    def set_max_template(self, max_template_id, weights=None):
+        """Set maximum template index for curriculum and optional sampling weights.
+
+        max_template_id : int or None
+            None = use all templates uniformly. Otherwise sample uniformly
+            (or per `weights`) from indices [0, max_template_id].
+        weights : sequence of float, optional
+            Per-template sampling weights. Only the first (max_template_id+1)
+            entries are used. None = uniform sampling.
+        """
         self._max_template_id = max_template_id
+        self._template_weights = weights
 
     def reset(self, seed=None, options=None):
         if seed is not None:
@@ -99,7 +109,15 @@ class GasSourceEnv(gymnasium.Env):
         else:
             tid = self._template_id
             if tid is None and self._max_template_id is not None:
-                tid = int(self._rng.integers(0, self._max_template_id + 1))
+                if self._template_weights is not None:
+                    w = np.asarray(
+                        self._template_weights[: self._max_template_id + 1],
+                        dtype=float,
+                    )
+                    w = w / w.sum()
+                    tid = int(self._rng.choice(self._max_template_id + 1, p=w))
+                else:
+                    tid = int(self._rng.integers(0, self._max_template_id + 1))
             map_data   = self._map_gen.generate(template_id=tid)
             wind_field = None
 
@@ -199,6 +217,36 @@ class GasSourceEnv(gymnasium.Env):
         )
         self._visited_cells = set()
         self._trajectory = [self._robot_pos.copy()]
+        # Bounding-box exploration tracking: reward step()s that grow the
+        # bbox of all visited positions. Half-perimeter (= dx + dy) is used
+        # rather than area so 1D moves (e.g. straight through a doorway)
+        # also count as progress. Resists local-oscillation cheating because
+        # only positions outside the current bbox can extend it.
+        self._bbox_min = self._robot_pos.copy()
+        self._bbox_max = self._robot_pos.copy()
+        self._bbox_extent = 0.0
+
+        # Reveal-based exploration: track which 0.2 m cells the agent has
+        # observed via LiDAR, and the total number of free cells in the map
+        # (used to normalize the per-step reveal reward across map sizes).
+        res_v = cfg.VISITED_CELL_RESOLUTION
+        self._obs_map_h = int(np.ceil(self._map_height / res_v))
+        self._obs_map_w = int(np.ceil(self._map_width  / res_v))
+        self._observed_cells = np.zeros((self._obs_map_h, self._obs_map_w), dtype=bool)
+        # Free-cell count at wrapper resolution: a wrapper cell counts as wall
+        # if any sub-cell is wall (matches SpatialObsWrapper's _dense_wall logic).
+        sub = int(round(res_v / self._grid.resolution))
+        gt = self._grid.grid
+        gh, gw = gt.shape
+        gh_pad = ((gh + sub - 1) // sub) * sub
+        gw_pad = ((gw + sub - 1) // sub) * sub
+        padded = np.zeros((gh_pad, gw_pad), dtype=gt.dtype)
+        padded[:gh, :gw] = gt
+        pooled = padded.reshape(gh_pad // sub, sub, gw_pad // sub, sub).max(axis=(1, 3))
+        walls_v = (pooled[:self._obs_map_h, :self._obs_map_w] != 0)
+        self._total_free_cells = max(int((~walls_v).sum()), 1)
+        # Seed observed cells with reveal from start position
+        self._update_revealed(self._robot_pos)
 
         # Mark starting cell as visited
         cell_key = self._cell_key(self._robot_pos)
@@ -283,6 +331,24 @@ class GasSourceEnv(gymnasium.Env):
         if cell_key not in self._visited_cells:
             reward += cfg.R_NEW_CELL
             self._visited_cells.add(cell_key)
+
+        # Reveal-based exploration bonus: cells newly observed via LiDAR this
+        # step, normalized by total free area so the magnitude is map-size
+        # invariant. Always update the observed mask (cheap), only add the
+        # reward term if R_REVEAL is enabled.
+        n_newly_revealed = self._update_revealed(self._robot_pos)
+        if cfg.R_REVEAL > 0.0:
+            reward += cfg.R_REVEAL * n_newly_revealed / self._total_free_cells
+
+        # Bounding-box exploration bonus (half-perimeter growth)
+        if cfg.R_BBOX_GROWTH > 0.0:
+            self._bbox_min = np.minimum(self._bbox_min, self._robot_pos)
+            self._bbox_max = np.maximum(self._bbox_max, self._robot_pos)
+            d = self._bbox_max - self._bbox_min
+            new_extent = float(d[0] + d[1])
+            if new_extent > self._bbox_extent:
+                reward += cfg.R_BBOX_GROWTH * (new_extent - self._bbox_extent)
+                self._bbox_extent = new_extent
 
         dist = np.linalg.norm(self._robot_pos - self._source_pos)
         terminated = False
@@ -381,6 +447,49 @@ class GasSourceEnv(gymnasium.Env):
     def _cell_key(self, pos):
         return (int(pos[0] / cfg.VISITED_CELL_RESOLUTION),
                 int(pos[1] / cfg.VISITED_CELL_RESOLUTION))
+
+    def _update_revealed(self, position):
+        """Mark cells visible from `position` (LiDAR-based) in self._observed_cells.
+
+        Returns the count of cells newly transitioned unknown→known on this call.
+        Visibility = sample steps along each LiDAR ray up to the first hit (or
+        max range). Reuses the LidarSim's cached (R, S) sample offsets.
+        """
+        ox, oy = position
+        wx = ox + self._lidar._dx                            # (R, S)
+        wy = oy + self._lidar._dy
+        res = self._grid.resolution
+        gw, gh = self._grid.grid_width, self._grid.grid_height
+        gx = np.floor(wx / res).astype(np.int32)
+        gy = np.floor(wy / res).astype(np.int32)
+        oob = (gx < 0) | (gx >= gw) | (gy < 0) | (gy >= gh)
+        gx_safe = np.clip(gx, 0, gw - 1)
+        gy_safe = np.clip(gy, 0, gh - 1)
+        occupied = self._grid.grid[gy_safe, gx_safe] != 0
+        hit = occupied | oob                                 # (R, S)
+
+        S = hit.shape[1]
+        any_hit = hit.any(axis=1)                            # (R,)
+        first_hit_idx = np.argmax(hit, axis=1)               # (R,)
+        cutoff = np.where(any_hit, first_hit_idx, S)         # (R,)
+        before_hit = np.arange(S)[None, :] < cutoff[:, None] # (R, S)
+
+        res_v = cfg.VISITED_CELL_RESOLUTION
+        cw = np.floor(wx / res_v).astype(np.int32)
+        cr = np.floor(wy / res_v).astype(np.int32)
+        in_obs = (cw >= 0) & (cw < self._obs_map_w) & \
+                 (cr >= 0) & (cr < self._obs_map_h)
+        valid = before_hit & in_obs
+
+        visible_now = np.zeros_like(self._observed_cells)
+        rr = cr[valid]
+        cc = cw[valid]
+        visible_now[rr, cc] = True
+
+        newly = visible_now & ~self._observed_cells
+        n_new = int(newly.sum())
+        self._observed_cells |= visible_now
+        return n_new
 
     def _build_observation(self):
         """Build the 59-dim normalized observation vector."""

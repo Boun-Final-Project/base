@@ -33,10 +33,13 @@ _DEFAULT_OUTPUT_DIR = os.path.join(_SCRIPT_DIR, "test_env_inspection")
 TEMPLATE_NAMES = [
     "Empty", "Single Wall", "U-Shape",
     "Three Walls", "Complex Maze", "Multi-Room",
+    "Dead-End Corridor", "Serpentine", "Dense Multi-Room",
+    "Hybrid",
 ]
 
 # Grid layout: (rows, cols) per template matching the env counts
-GRID_LAYOUT = {0: (2, 5), 1: (2, 5), 2: (3, 5), 3: (3, 5), 4: (5, 5), 5: (5, 5)}
+GRID_LAYOUT = {0: (2, 5), 1: (2, 5), 2: (3, 5), 3: (3, 5), 4: (5, 5), 5: (5, 5),
+               6: (3, 5), 7: (3, 5), 8: (3, 5), 9: (2, 5)}
 
 
 def render_template(envs_for_template, template_id, output_dir):

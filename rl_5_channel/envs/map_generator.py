@@ -1,7 +1,7 @@
 """
 Map generator for RL gas source localization.
 
-6 map templates with per-episode randomization of dimensions, wall positions,
+10 map templates with per-episode randomization of dimensions, wall positions,
 gap widths, source/robot placement, and connectivity validation.
 """
 
@@ -13,7 +13,7 @@ from .. import config as cfg
 
 
 class MapGenerator:
-    """Generates randomized maps from 6 templates."""
+    """Generates randomized maps from 10 templates."""
 
     TEMPLATES = [
         "_generate_empty",
@@ -22,6 +22,10 @@ class MapGenerator:
         "_generate_three_walls",
         "_generate_complex_maze",
         "_generate_multi_room",
+        "_generate_dead_end_corridor",
+        "_generate_serpentine_corridor",
+        "_generate_dense_multi_room",
+        "_generate_hybrid",
     ]
 
     def __init__(self, rng=None, width_range=None, height_range=None):
@@ -181,16 +185,22 @@ class MapGenerator:
         t = cfg.WALL_THICKNESS
         gap = cfg.MIN_GAP_SIZE
 
-        # Two vertical walls from top, gaps at bottom
+        # Two vertical walls — each independently anchored at top OR bottom
         wall1_x = self.rng.uniform(0.2 * w, 0.4 * w)
         wall2_x = self.rng.uniform(0.6 * w, 0.8 * w)
         wall1_len = self.rng.uniform(0.5 * h, 0.8 * h)
         wall2_len = self.rng.uniform(0.5 * h, 0.8 * h)
+        wall1_from_top = self.rng.integers(0, 2) == 0
+        wall2_from_top = self.rng.integers(0, 2) == 0
 
-        wall1_top = h - t
-        wall1_bot = wall1_top - wall1_len
-        wall2_top = h - t
-        wall2_bot = wall2_top - wall2_len
+        if wall1_from_top:
+            wall1_top, wall1_bot = h - t, h - t - wall1_len
+        else:
+            wall1_bot, wall1_top = t, t + wall1_len
+        if wall2_from_top:
+            wall2_top, wall2_bot = h - t, h - t - wall2_len
+        else:
+            wall2_bot, wall2_top = t, t + wall2_len
 
         grid.add_rectangular_obstacle(
             wall1_x - t / 2, wall1_x + t / 2,
@@ -201,13 +211,19 @@ class MapGenerator:
             wall2_bot, wall2_top,
         )
 
-        # Central block between the two vertical walls, below their bottoms
-        # so it doesn't merge with them
+        # Central block between the two vertical walls, in the open band
+        # between them. Vertical extent of the block depends on which side
+        # each wall is anchored to.
         block_half = self.rng.uniform(0.5, 1.0)
         block_x_lo = wall1_x + t / 2 + gap + block_half
         block_x_hi = wall2_x - t / 2 - gap - block_half
-        block_y_lo = t + gap + block_half
-        block_y_hi = min(wall1_bot, wall2_bot) - gap - block_half
+        # Open vertical band = intersection of the open sides of both walls
+        open1_lo = wall1_top if not wall1_from_top else t
+        open1_hi = wall1_bot if wall1_from_top else h - t
+        open2_lo = wall2_top if not wall2_from_top else t
+        open2_hi = wall2_bot if wall2_from_top else h - t
+        block_y_lo = max(open1_lo, open2_lo) + gap + block_half
+        block_y_hi = min(open1_hi, open2_hi) - gap - block_half
 
         if block_x_hi > block_x_lo and block_y_hi > block_y_lo:
             block_cx = self.rng.uniform(block_x_lo, block_x_hi)
@@ -226,17 +242,22 @@ class MapGenerator:
         t = cfg.WALL_THICKNESS
         gap = cfg.MIN_GAP_SIZE
 
-        # Two vertical walls from top, gaps at bottom
+        # Two vertical walls — each independently anchored at top OR bottom
         wall1_x = self.rng.uniform(0.2 * w, 0.4 * w)
         wall2_x = self.rng.uniform(0.6 * w, 0.8 * w)
         wall1_len = self.rng.uniform(0.5 * h, 0.75 * h)
         wall2_len = self.rng.uniform(0.5 * h, 0.75 * h)
+        wall1_from_top = self.rng.integers(0, 2) == 0
+        wall2_from_top = self.rng.integers(0, 2) == 0
 
-        # Vertical wall tops (they start from the top boundary)
-        wall1_top = h - t
-        wall1_bot = wall1_top - wall1_len
-        wall2_top = h - t
-        wall2_bot = wall2_top - wall2_len
+        if wall1_from_top:
+            wall1_top, wall1_bot = h - t, h - t - wall1_len
+        else:
+            wall1_bot, wall1_top = t, t + wall1_len
+        if wall2_from_top:
+            wall2_top, wall2_bot = h - t, h - t - wall2_len
+        else:
+            wall2_bot, wall2_top = t, t + wall2_len
 
         grid.add_rectangular_obstacle(
             wall1_x - t / 2, wall1_x + t / 2,
@@ -247,16 +268,14 @@ class MapGenerator:
             wall2_bot, wall2_top,
         )
 
-        # 1-2 horizontal walls in the lower half
-        # Each horizontal wall runs from a side boundary but stops before
-        # reaching any vertical wall, leaving a gap for passage
+        # 1-2 horizontal walls running from a side boundary partway across.
+        # Each stops before reaching any vertical wall.
         n_horiz = self.rng.integers(1, 3)
         for _ in range(n_horiz):
             from_left = self.rng.integers(0, 2) == 0
-            hw_y = self.rng.uniform(0.5 * h, 0.85 * h)
+            hw_y = self.rng.uniform(0.15 * h, 0.85 * h)
 
             if from_left:
-                # Runs from left boundary, stops before wall1 (the first obstacle)
                 max_len = wall1_x - t / 2 - t - gap
                 if max_len < 1.0:
                     continue
@@ -266,7 +285,6 @@ class MapGenerator:
                     hw_y - t / 2, hw_y + t / 2,
                 )
             else:
-                # Runs from right boundary, stops before wall2
                 max_len = w - t - (wall2_x + t / 2) - gap
                 if max_len < 1.0:
                     continue
@@ -276,13 +294,17 @@ class MapGenerator:
                     hw_y - t / 2, hw_y + t / 2,
                 )
 
-        # Central block between the two vertical walls, below the wall bottoms
-        # so it doesn't merge with them
+        # Central block between the two vertical walls, in the open band
+        # determined by which side each wall is anchored to.
         block_half = self.rng.uniform(0.5, 1.0)
         block_x_lo = wall1_x + t / 2 + gap + block_half
         block_x_hi = wall2_x - t / 2 - gap - block_half
-        block_y_lo = t + gap + block_half
-        block_y_hi = min(wall1_bot, wall2_bot) - gap - block_half
+        open1_lo = wall1_top if not wall1_from_top else t
+        open1_hi = wall1_bot if wall1_from_top else h - t
+        open2_lo = wall2_top if not wall2_from_top else t
+        open2_hi = wall2_bot if wall2_from_top else h - t
+        block_y_lo = max(open1_lo, open2_lo) + gap + block_half
+        block_y_hi = min(open1_hi, open2_hi) - gap - block_half
 
         if block_x_hi > block_x_lo and block_y_hi > block_y_lo:
             block_cx = self.rng.uniform(block_x_lo, block_x_hi)
@@ -375,6 +397,334 @@ class MapGenerator:
         _hdoor(vr, w - t, ht, ht + t)        # into horizontal corridor
 
         return grid
+
+    def _generate_dead_end_corridor(self):
+        """Open room with 2-3 dead-end corridor branches.
+
+        Each branch is drawn as a "C" — three walls forming a closed-end
+        corridor with one open mouth. Source and robot are placed by
+        BFS-connected sampling, so sometimes the source is inside a
+        cul-de-sac and sometimes the agent must reject empty cul-de-sacs.
+        Targets uleft/uright "dead-end re-entry" failure mode.
+        """
+        w = self.rng.uniform(max(14.0, self.width_range[0]),
+                             max(14.0, self.width_range[1]))
+        h = self.rng.uniform(max(8.0, self.height_range[0]),
+                             max(8.0, self.height_range[1]))
+        grid = self._make_grid_with_walls(w, h)
+
+        t = cfg.WALL_THICKNESS
+        n_branches = int(self.rng.integers(2, 4))
+        placed = []  # list of outer-bbox tuples
+
+        for _ in range(n_branches):
+            for _attempt in range(15):
+                cl = self.rng.uniform(2.5, 5.0)        # corridor length (interior)
+                cw = self.rng.uniform(1.4, 2.2)        # corridor width (interior)
+                opening = self.rng.choice(["up", "down", "left", "right"])
+
+                # Outer bbox dimensions (incl. wall thickness on closed sides)
+                if opening in ("up", "down"):
+                    ow, oh = cw + 2 * t, cl + t
+                else:
+                    ow, oh = cl + t, cw + 2 * t
+
+                margin = 0.4
+                if w - 2 * t - 2 * margin < ow + 0.1 or h - 2 * t - 2 * margin < oh + 0.1:
+                    continue
+                x_min = self.rng.uniform(t + margin, w - t - ow - margin)
+                y_min = self.rng.uniform(t + margin, h - t - oh - margin)
+                x_max = x_min + ow
+                y_max = y_min + oh
+
+                # Reject overlap with previously placed branches (with clearance)
+                clearance = cfg.MIN_GAP_SIZE
+                bbox = (x_min - clearance, x_max + clearance,
+                        y_min - clearance, y_max + clearance)
+                if any(not (bbox[1] < b[0] or bbox[0] > b[1]
+                            or bbox[3] < b[2] or bbox[2] > b[3])
+                       for b in placed):
+                    continue
+                placed.append((x_min, x_max, y_min, y_max))
+
+                # Draw 3-wall "C" with opening on side `opening`.
+                if opening == "up":
+                    # mouth at top → cap at bottom, sides on left/right
+                    grid.add_rectangular_obstacle(x_min, x_max, y_min, y_min + t)        # cap
+                    grid.add_rectangular_obstacle(x_min, x_min + t, y_min, y_max)        # left
+                    grid.add_rectangular_obstacle(x_max - t, x_max, y_min, y_max)        # right
+                elif opening == "down":
+                    grid.add_rectangular_obstacle(x_min, x_max, y_max - t, y_max)        # cap
+                    grid.add_rectangular_obstacle(x_min, x_min + t, y_min, y_max)
+                    grid.add_rectangular_obstacle(x_max - t, x_max, y_min, y_max)
+                elif opening == "left":
+                    grid.add_rectangular_obstacle(x_max - t, x_max, y_min, y_max)        # cap
+                    grid.add_rectangular_obstacle(x_min, x_max, y_min, y_min + t)        # bottom
+                    grid.add_rectangular_obstacle(x_min, x_max, y_max - t, y_max)        # top
+                else:  # right
+                    grid.add_rectangular_obstacle(x_min, x_min + t, y_min, y_max)        # cap
+                    grid.add_rectangular_obstacle(x_min, x_max, y_min, y_min + t)
+                    grid.add_rectangular_obstacle(x_min, x_max, y_max - t, y_max)
+                break  # next branch
+        return grid
+
+    def _generate_serpentine_corridor(self):
+        """S-shaped corridor carved through a wall-filled room.
+
+        Builds 3-5 horizontal corridors at evenly spaced y-levels,
+        connected by vertical jogs at alternating left/right ends.
+        Carving (via _clear_rect) into a fully-walled interior, rather
+        than wall-painting, mirrors the labyrinth_left/right topology.
+        """
+        w = self.rng.uniform(max(16.0, self.width_range[0]),
+                             max(16.0, self.width_range[1]))
+        h = self.rng.uniform(max(10.0, self.height_range[0]),
+                             max(10.0, self.height_range[1]))
+        grid = self._make_grid_with_walls(w, h)
+
+        t = cfg.WALL_THICKNESS
+
+        # Fill interior with walls (will be carved)
+        grid.add_rectangular_obstacle(t, w - t, t, h - t)
+
+        cw = self.rng.uniform(1.3, 1.8)
+        n_h = int(self.rng.integers(3, 6))         # 3-5 horizontal corridors
+
+        # Randomize start corner: top vs bottom AND left vs right.
+        # Without this, the path always starts bottom-left and the largest
+        # wall block ends up at the top — biasing the agent's training.
+        start_bottom = self.rng.integers(0, 2) == 0
+        start_left = self.rng.integers(0, 2) == 0
+
+        # y-positions of horizontal corridors (centerlines), traversed in
+        # the path order
+        y_lo = t + cw / 2 + 0.3
+        y_hi = h - t - cw / 2 - 0.3
+        y_levels = np.linspace(y_lo, y_hi, n_h)
+        if not start_bottom:
+            y_levels = y_levels[::-1]
+
+        # x-extent of horizontal corridors (centers at left/right ends)
+        x_left = t + cw / 2 + 0.3
+        x_right = w - t - cw / 2 - 0.3
+
+        # Build path waypoints: alternate ends at successive y-levels.
+        # First corridor's traversal direction depends on `start_left`.
+        waypoints = []
+        for i, y in enumerate(y_levels):
+            forward = (i % 2 == 0) == start_left
+            if forward:
+                waypoints.append((x_left, y))
+                waypoints.append((x_right, y))
+            else:
+                waypoints.append((x_right, y))
+                waypoints.append((x_left, y))
+
+        # Carve straight segments between consecutive waypoints
+        for i in range(len(waypoints) - 1):
+            x1, y1 = waypoints[i]
+            x2, y2 = waypoints[i + 1]
+            if abs(x1 - x2) < 1e-6:                 # vertical segment
+                self._clear_rect(grid,
+                                 x1 - cw / 2, x1 + cw / 2,
+                                 min(y1, y2) - cw / 2, max(y1, y2) + cw / 2)
+            else:                                   # horizontal segment
+                self._clear_rect(grid,
+                                 min(x1, x2) - cw / 2, max(x1, x2) + cw / 2,
+                                 y1 - cw / 2, y1 + cw / 2)
+
+        # Add 1-2 short dead-end stubs branching off the serpentine
+        n_stubs = int(self.rng.integers(1, 3))
+        for _ in range(n_stubs):
+            i = int(self.rng.integers(0, n_h))
+            y = y_levels[i]
+            stub_x = self.rng.uniform(x_left + 1.5, x_right - 1.5)
+            stub_len = self.rng.uniform(1.0, 2.0)
+            # Decide direction: up or down (opposite of next-corridor direction
+            # to make it a real dead end, not a shortcut)
+            go_up = self.rng.integers(0, 2) == 0
+            if go_up:
+                self._clear_rect(grid,
+                                 stub_x - cw / 2, stub_x + cw / 2,
+                                 y, min(y + stub_len, h - t - 0.3))
+            else:
+                self._clear_rect(grid,
+                                 stub_x - cw / 2, stub_x + cw / 2,
+                                 max(y - stub_len, t + 0.3), y)
+        return grid
+
+    def _generate_dense_multi_room(self):
+        """3×3 or 3×4 grid of small sub-rooms with random doorways.
+
+        Targets the many_rooms GADEN map: many small rectangular rooms
+        connected via narrow doorways. Sub-room sizes are jittered ±20%
+        so the grid is irregular (avoids overfitting to a regular lattice).
+        Each interior wall segment has a 70% chance of containing a doorway.
+        """
+        w = self.rng.uniform(max(16.0, self.width_range[0]),
+                             max(16.0, self.width_range[1]))
+        h = self.rng.uniform(max(12.0, self.height_range[0]),
+                             max(12.0, self.height_range[1]))
+        grid = self._make_grid_with_walls(w, h)
+
+        t = cfg.WALL_THICKNESS
+        n_cols = int(self.rng.choice([3, 4]))
+        n_rows = 3
+
+        # Grid lines with ±20% jitter on interior lines
+        x_lines = np.linspace(t, w - t, n_cols + 1)
+        y_lines = np.linspace(t, h - t, n_rows + 1)
+        jitter_x = ((w - 2 * t) / n_cols) * 0.2
+        jitter_y = ((h - 2 * t) / n_rows) * 0.2
+        for i in range(1, n_cols):
+            x_lines[i] += self.rng.uniform(-jitter_x, jitter_x)
+        for j in range(1, n_rows):
+            y_lines[j] += self.rng.uniform(-jitter_y, jitter_y)
+
+        # Horizontal interior walls (between rows j and j+1) at y = y_lines[j]
+        for j in range(1, n_rows):
+            y = y_lines[j]
+            for i in range(n_cols):
+                seg_x_min = x_lines[i]
+                seg_x_max = x_lines[i + 1]
+                if seg_x_max - seg_x_min < cfg.MIN_GAP_SIZE + 0.4:
+                    continue
+                grid.add_rectangular_obstacle(seg_x_min, seg_x_max,
+                                              y - t / 2, y + t / 2)
+                if self.rng.random() < 0.7:
+                    dw = self.rng.uniform(cfg.MIN_GAP_SIZE,
+                                          min(2.0, seg_x_max - seg_x_min - 0.3))
+                    dx = self.rng.uniform(seg_x_min + 0.15,
+                                          seg_x_max - dw - 0.15)
+                    self._clear_rect(grid, dx, dx + dw,
+                                     y - t / 2, y + t / 2)
+
+        # Vertical interior walls (between cols i and i+1) at x = x_lines[i]
+        for i in range(1, n_cols):
+            x = x_lines[i]
+            for j in range(n_rows):
+                seg_y_min = y_lines[j]
+                seg_y_max = y_lines[j + 1]
+                if seg_y_max - seg_y_min < cfg.MIN_GAP_SIZE + 0.4:
+                    continue
+                grid.add_rectangular_obstacle(x - t / 2, x + t / 2,
+                                              seg_y_min, seg_y_max)
+                if self.rng.random() < 0.7:
+                    dw = self.rng.uniform(cfg.MIN_GAP_SIZE,
+                                          min(2.0, seg_y_max - seg_y_min - 0.3))
+                    dy = self.rng.uniform(seg_y_min + 0.15,
+                                          seg_y_max - dw - 0.15)
+                    self._clear_rect(grid, x - t / 2, x + t / 2,
+                                     dy, dy + dw)
+        return grid
+
+    def _generate_hybrid(self):
+        """Two halves with different obstacle types, separated by a wall + doorway.
+
+        Targets ultimate's hybrid topology: forces the agent to traverse a
+        narrow choke between two qualitatively different sub-environments.
+        """
+        w = self.rng.uniform(max(16.0, self.width_range[0]),
+                             max(16.0, self.width_range[1]))
+        h = self.rng.uniform(max(10.0, self.height_range[0]),
+                             max(10.0, self.height_range[1]))
+        grid = self._make_grid_with_walls(w, h)
+
+        t = cfg.WALL_THICKNESS
+        vertical_split = self.rng.integers(0, 2) == 0
+
+        if vertical_split:
+            split_x = self.rng.uniform(0.4 * w, 0.6 * w)
+            grid.add_rectangular_obstacle(split_x - t / 2, split_x + t / 2,
+                                          t, h - t)
+            dw = self.rng.uniform(cfg.MIN_GAP_SIZE, 2.0)
+            dy = self.rng.uniform(t + 0.5, h - t - dw - 0.5)
+            self._clear_rect(grid, split_x - t / 2, split_x + t / 2,
+                             dy, dy + dw)
+            doorway_center = (split_x, dy + dw / 2)
+            self._paint_random_obstacles(grid,
+                                         t + 0.3, split_x - t / 2 - 0.3,
+                                         t + 0.3, h - t - 0.3,
+                                         doorway_center)
+            self._paint_random_obstacles(grid,
+                                         split_x + t / 2 + 0.3, w - t - 0.3,
+                                         t + 0.3, h - t - 0.3,
+                                         doorway_center)
+        else:
+            split_y = self.rng.uniform(0.4 * h, 0.6 * h)
+            grid.add_rectangular_obstacle(t, w - t,
+                                          split_y - t / 2, split_y + t / 2)
+            dw = self.rng.uniform(cfg.MIN_GAP_SIZE, 2.0)
+            dx = self.rng.uniform(t + 0.5, w - t - dw - 0.5)
+            self._clear_rect(grid, dx, dx + dw,
+                             split_y - t / 2, split_y + t / 2)
+            doorway_center = (dx + dw / 2, split_y)
+            self._paint_random_obstacles(grid,
+                                         t + 0.3, w - t - 0.3,
+                                         t + 0.3, split_y - t / 2 - 0.3,
+                                         doorway_center)
+            self._paint_random_obstacles(grid,
+                                         t + 0.3, w - t - 0.3,
+                                         split_y + t / 2 + 0.3, h - t - 0.3,
+                                         doorway_center)
+        return grid
+
+    def _paint_random_obstacles(self, grid, x0, x1, y0, y1,
+                                doorway_center=None, clearance=1.5):
+        """Paint 1-2 random small obstacles in a sub-rectangle.
+
+        Used by _generate_hybrid. Avoids placing obstacles within
+        `clearance` metres of `doorway_center` so the doorway remains
+        passable from both halves.
+        """
+        t = cfg.WALL_THICKNESS
+        region_w = x1 - x0
+        region_h = y1 - y0
+        if region_w < 3.0 or region_h < 3.0:
+            return
+
+        n_obs = int(self.rng.integers(1, 3))
+        for _ in range(n_obs):
+            for _attempt in range(8):
+                obs_type = self.rng.choice(["block", "wall_h", "wall_v", "L"])
+                if obs_type == "block":
+                    sz = self.rng.uniform(0.6, 1.2)
+                    cx = self.rng.uniform(x0 + sz / 2 + 0.2, x1 - sz / 2 - 0.2)
+                    cy = self.rng.uniform(y0 + sz / 2 + 0.2, y1 - sz / 2 - 0.2)
+                    rect = (cx - sz / 2, cx + sz / 2, cy - sz / 2, cy + sz / 2)
+                elif obs_type == "wall_h":
+                    wl = self.rng.uniform(1.2, min(region_w * 0.6, 3.5))
+                    wx = self.rng.uniform(x0 + 0.2, x1 - wl - 0.2)
+                    wy = self.rng.uniform(y0 + 0.4, y1 - 0.4)
+                    rect = (wx, wx + wl, wy - t / 2, wy + t / 2)
+                elif obs_type == "wall_v":
+                    wl = self.rng.uniform(1.2, min(region_h * 0.6, 3.5))
+                    wx = self.rng.uniform(x0 + 0.4, x1 - 0.4)
+                    wy = self.rng.uniform(y0 + 0.2, y1 - wl - 0.2)
+                    rect = (wx - t / 2, wx + t / 2, wy, wy + wl)
+                else:  # L-shape: short horizontal arm + short vertical arm
+                    arm = self.rng.uniform(1.0, 1.8)
+                    cx = self.rng.uniform(x0 + 0.5, x1 - arm - 0.5)
+                    cy = self.rng.uniform(y0 + 0.5, y1 - arm - 0.5)
+                    rect = (cx, cx + arm, cy, cy + arm + t)
+                # Clearance check around the doorway
+                if doorway_center is not None:
+                    dx = max(0.0, max(rect[0] - doorway_center[0],
+                                       doorway_center[0] - rect[1]))
+                    dy = max(0.0, max(rect[2] - doorway_center[1],
+                                       doorway_center[1] - rect[3]))
+                    if (dx ** 2 + dy ** 2) ** 0.5 < clearance:
+                        continue
+                # Place
+                if obs_type == "L":
+                    arm = rect[1] - rect[0]
+                    grid.add_rectangular_obstacle(rect[0], rect[1],
+                                                  rect[2], rect[2] + t)
+                    grid.add_rectangular_obstacle(rect[0], rect[0] + t,
+                                                  rect[2], rect[2] + arm)
+                else:
+                    grid.add_rectangular_obstacle(*rect)
+                break
 
     # ------------------------------------------------------------------
     # Helpers

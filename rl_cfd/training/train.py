@@ -74,10 +74,10 @@ class VecEnv:
             info_list.append(info)
         return np.stack(obs_list), info_list
 
-    def set_curriculum(self, w_range, h_range, max_template):
+    def set_curriculum(self, w_range, h_range, max_template, weights=None):
         for env in self.envs:
             env.set_room_size_range(w_range, h_range)
-            env.set_max_template(max_template)
+            env.set_max_template(max_template, weights)
 
     def close(self):
         pass  # serial VecEnv has no processes to join
@@ -142,9 +142,9 @@ def _worker(child_conn, parent_conn, env_fn):
                 obs, info = env.reset()
                 child_conn.send((obs, info))
             elif cmd == "set_curriculum":
-                w_range, h_range, max_template = data
+                w_range, h_range, max_template, weights = data
                 env.set_room_size_range(w_range, h_range)
-                env.set_max_template(max_template)
+                env.set_max_template(max_template, weights)
                 child_conn.send(None)
             elif cmd == "close":
                 break
@@ -198,9 +198,10 @@ class SubprocVecEnv:
         obs_list, info_list = zip(*results)
         return np.stack(obs_list), list(info_list)
 
-    def set_curriculum(self, w_range, h_range, max_template):
+    def set_curriculum(self, w_range, h_range, max_template, weights=None):
         for conn in self._parents:
-            conn.send(("set_curriculum", (w_range, h_range, max_template)))
+            conn.send(("set_curriculum",
+                       (w_range, h_range, max_template, weights)))
         for conn in self._parents:
             conn.recv()
 
@@ -335,9 +336,9 @@ def _thin_worker(child_conn, parent_conn, env_fn):
                 _attach_reset_state(snap)
                 child_conn.send(snap)
             elif cmd == "set_curriculum":
-                w_range, h_range, max_template = data
+                w_range, h_range, max_template, weights = data
                 env.set_room_size_range(w_range, h_range)
-                env.set_max_template(max_template)
+                env.set_max_template(max_template, weights)
                 child_conn.send(None)
             elif cmd == "close":
                 break
@@ -417,9 +418,10 @@ class BatchedSpatialVecEnv:
         snaps = [conn.recv() for conn in self._parents]
         return self._apply_snapshots(snaps)
 
-    def set_curriculum(self, w_range, h_range, max_template):
+    def set_curriculum(self, w_range, h_range, max_template, weights=None):
         for conn in self._parents:
-            conn.send(("set_curriculum", (w_range, h_range, max_template)))
+            conn.send(("set_curriculum",
+                       (w_range, h_range, max_template, weights)))
         for conn in self._parents:
             conn.recv()
 
@@ -447,15 +449,17 @@ def get_curriculum_ranges(progress):
 
 
 def get_template_curriculum(progress):
-    """Return max template index based on training progress (0→1).
+    """Return (max_template_id, sampling_weights) for the current progress.
 
-    Uses TEMPLATE_CURRICULUM_STAGES from config: list of (threshold, max_id).
+    Uses TEMPLATE_CURRICULUM_STAGES (list of (threshold, max_id)) and
+    TEMPLATE_SAMPLING_WEIGHTS (per-template weights). Returns (max_id, weights or None).
     """
     max_id = cfg.TEMPLATE_CURRICULUM_STAGES[0][1]
     for threshold, tid in cfg.TEMPLATE_CURRICULUM_STAGES:
         if progress >= threshold:
             max_id = tid
-    return max_id
+    weights = getattr(cfg, "TEMPLATE_SAMPLING_WEIGHTS", None)
+    return max_id, weights
 
 
 def train(args):
@@ -622,8 +626,9 @@ def train(args):
         if args.curriculum:
             progress = global_step / args.total_timesteps
             w_range, h_range = get_curriculum_ranges(progress)
-            max_template = get_template_curriculum(progress)
-            vec_env.set_curriculum(w_range, h_range, max_template)
+            max_template, tmpl_weights = get_template_curriculum(progress)
+            vec_env.set_curriculum(w_range, h_range, max_template,
+                                   tmpl_weights)
 
         # === Rollout ===
         buffer.reset()

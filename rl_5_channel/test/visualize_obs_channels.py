@@ -31,7 +31,8 @@ from rl_5_channel.envs.spatial_obs_wrapper import SpatialObsWrapper
 _OUT_DIR = os.path.join(_SCRIPT_DIR, "obs_viz")
 
 TEMPLATE_NAMES = ["empty", "single_wall", "u_shape", "three_walls",
-                  "complex_maze", "multi_room"]
+                  "complex_maze", "multi_room", "dead_end_corridor",
+                  "serpentine", "dense_multi_room", "hybrid"]
 
 CHANNELS = ["is_known", "is_wall", "gas", "recency", "det_count"]
 
