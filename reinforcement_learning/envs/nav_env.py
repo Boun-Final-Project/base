@@ -172,7 +172,7 @@ class NavigationEnv(gymnasium.Env):
         # entry_dist handles the case where the robot starts a step already at the goal
         terminated = curr_dist < cfg.D_SUCCESS or entry_dist < cfg.D_SUCCESS
         if terminated:
-            reward += 20.0
+            reward += 100.0
 
         truncated = self._step_count >= NAV_MAX_STEPS
         if truncated:
