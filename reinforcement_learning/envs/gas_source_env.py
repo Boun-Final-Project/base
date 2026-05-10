@@ -305,7 +305,6 @@ class GasSourceEnv(gymnasium.Env):
 
         self._current_step += 1
         if self._current_step >= cfg.MAX_STEPS:
-            reward += cfg.R_MAX_STEPS
             truncated = True
 
         obs = self._build_observation()
