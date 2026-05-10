@@ -32,10 +32,9 @@ STATE_DIM = GAS_HISTORY_LENGTH * GAS_FEATURES_PER_STEP + LIDAR_NUM_RAYS + 2 + 2 
 R_SUCCESS = 200.0
 R_DETECTION = 2.0
 R_NEW_CELL = 0.5
-R_STEP = -0.3
+R_STEP = -1.0
 R_REVISIT = -0.2   # penalty each time robot enters a cell it has visited before
 R_COLLISION = -5.0
-R_MAX_STEPS = -20.0
 
 # =============================================================================
 # Wind
