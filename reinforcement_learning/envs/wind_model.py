@@ -1,15 +1,20 @@
 """
 Simple uniform wind field for the Python pretraining environment.
 Each episode samples a constant wind direction and speed.
+
+Optionally, a pre-computed spatial wind field (H x W x 2 array) can be
+provided so that WindModel also serves as the ``wind_field`` argument to
+FilamentPlume during training (bilinear-interpolated queries).
 """
 
 import numpy as np
 
 
 class WindModel:
-    """Per-episode constant uniform wind field."""
+    """Per-episode constant uniform wind field, with optional spatial support."""
 
-    def __init__(self, speed_range=(0.1, 1.5), max_speed=2.0):
+    def __init__(self, speed_range=(0.1, 1.5), max_speed=2.0,
+                 field=None, resolution=None, occupancy=None):
         """
         Parameters
         ----------
@@ -17,11 +22,29 @@ class WindModel:
             (min, max) wind speed in m/s, sampled uniformly per episode.
         max_speed : float
             Maximum possible speed, used for observation normalization.
+        field : array-like, optional
+            Spatial wind field of shape (H, W, 2) [u, v] in m/s.
+            When provided the object also exposes ``query()`` and
+            ``max_speed()`` so it can be passed as ``wind_field`` to
+            FilamentPlume.
+        resolution : float, optional
+            Cell size in metres (required when field is not None).
+        occupancy : array-like of bool, optional
+            Boolean occupancy map of shape (H, W); True = wall cell
+            (required when field is not None).
         """
         self.speed_range = speed_range
-        self.max_speed = max_speed
+        self._max_speed_uniform = max_speed
         self.speed = 0.0
         self.direction = 0.0  # radians, 0 = +x
+
+        if field is not None:
+            self._field = np.asarray(field, dtype=np.float64)
+            self._resolution = float(resolution)
+            self._occupancy = np.asarray(occupancy, dtype=bool)
+            self.H, self.W, _ = self._field.shape
+        else:
+            self._field = None
 
     def randomize(self, rng=None):
         """Sample a new wind configuration for an episode.
@@ -52,7 +75,7 @@ class WindModel:
         obs : tuple
             (speed / max_speed, direction / 2pi), both in [0, 1].
         """
-        return (self.speed / self.max_speed, self.direction / (2 * np.pi))
+        return (self.speed / self._max_speed_uniform, self.direction / (2 * np.pi))
 
     def get_dispersion_offset(self, dispersion_factor):
         """Compute the downwind offset applied to the IGDM source position.
@@ -75,3 +98,93 @@ class WindModel:
         dx = self.speed * dispersion_factor * np.cos(self.direction)
         dy = self.speed * dispersion_factor * np.sin(self.direction)
         return np.array([dx, dy])
+
+    # ------------------------------------------------------------------
+    # Spatial field interface (used by FilamentPlume when wind_field=self)
+    # ------------------------------------------------------------------
+
+    def query(self, positions: np.ndarray) -> np.ndarray:
+        """Bilinear interpolation over the spatial wind field.
+
+        Parameters
+        ----------
+        positions : (N, 2) array
+            World-frame positions [x, y] in metres.
+
+        Returns
+        -------
+        wind : (N, 2) array
+            Interpolated [u, v] wind vectors in m/s.
+        """
+        positions = np.asarray(positions, dtype=np.float64)
+        if positions.ndim == 1:
+            positions = positions[np.newaxis, :]   # (2,) → (1, 2)
+        if positions.size == 0:
+            return np.zeros((0, 2), dtype=np.float64)
+
+        x = positions[:, 0]
+        y = positions[:, 1]
+        res = self._resolution
+
+        c_frac = x / res - 0.5
+        r_frac = y / res - 0.5
+
+        c0 = np.floor(c_frac).astype(np.int64)
+        r0 = np.floor(r_frac).astype(np.int64)
+        c1 = c0 + 1
+        r1 = r0 + 1
+        tx = c_frac - c0
+        ty = r_frac - r0
+
+        # Bounds check on pre-clamp indices — clamped indices outside these
+        # ranges are meaningless.
+        valid_c0 = (c0 >= 0) & (c0 <= self.W - 1)
+        valid_c1 = (c1 >= 0) & (c1 <= self.W - 1)
+        valid_r0 = (r0 >= 0) & (r0 <= self.H - 1)
+        valid_r1 = (r1 >= 0) & (r1 <= self.H - 1)
+
+        c0c = np.clip(c0, 0, self.W - 1)
+        c1c = np.clip(c1, 0, self.W - 1)
+        r0c = np.clip(r0, 0, self.H - 1)
+        r1c = np.clip(r1, 0, self.H - 1)
+
+        # Gate wall lookup with bounds flags so out-of-bounds clamped indices
+        # are never trusted.
+        wall_00 = self._occupancy[r0c, c0c] & valid_r0 & valid_c0
+        wall_01 = self._occupancy[r0c, c1c] & valid_r0 & valid_c1
+        wall_10 = self._occupancy[r1c, c0c] & valid_r1 & valid_c0
+        wall_11 = self._occupancy[r1c, c1c] & valid_r1 & valid_c1
+
+        valid_00 = valid_r0 & valid_c0 & ~wall_00
+        valid_01 = valid_r0 & valid_c1 & ~wall_01
+        valid_10 = valid_r1 & valid_c0 & ~wall_10
+        valid_11 = valid_r1 & valid_c1 & ~wall_11
+
+        w00 = np.where(valid_00, (1 - tx) * (1 - ty), 0.0)
+        w01 = np.where(valid_01,       tx * (1 - ty), 0.0)
+        w10 = np.where(valid_10, (1 - tx) *       ty, 0.0)
+        w11 = np.where(valid_11,       tx *       ty, 0.0)
+
+        w_sum = w00 + w01 + w10 + w11
+        safe  = w_sum > 0
+        inv_sum = 1.0 / np.where(safe, w_sum, 1.0)
+
+        w00 = w00 * inv_sum
+        w01 = w01 * inv_sum
+        w10 = w10 * inv_sum
+        w11 = w11 * inv_sum
+
+        rows_corners = np.stack([r0c, r0c, r1c, r1c], axis=1)   # (N, 4)
+        cols_corners = np.stack([c0c, c1c, c0c, c1c], axis=1)   # (N, 4)
+        wind_corners = self._field[rows_corners, cols_corners]   # (N, 4, 2)
+
+        weights = np.stack([w00, w01, w10, w11], axis=1)[:, :, None]  # (N, 4, 1)
+        return (wind_corners * weights).sum(axis=1)                    # (N, 2)
+
+    def max_speed(self) -> float:
+        """Max wind speed across free cells (spatial field) or uniform max (no field)."""
+        if self._field is None:
+            return self._max_speed_uniform
+        speeds = np.linalg.norm(self._field, axis=2)
+        free = ~self._occupancy
+        return float(speeds[free].max()) if free.any() else 0.0
