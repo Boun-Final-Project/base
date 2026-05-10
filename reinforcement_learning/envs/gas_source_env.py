@@ -16,7 +16,7 @@ from .occupancy_grid import OccupancyGrid
 from .igdm_model import IGDMModel
 from .filament_plume import FilamentPlume
 from .lidar_sim import LidarSim
-from .wind_model import WindModel
+from .wind_model import WindModel, make_training_wind_field
 from .sensor_model import BinarySensorModel
 from .visualizer import StepVisualizer
 
@@ -24,8 +24,8 @@ from .visualizer import StepVisualizer
 class GasSourceEnv(gymnasium.Env):
     """Gas source localization environment.
 
-    Observation (59-dim):
-        [gas_history (30)] + [lidar (24)] + [pos_x, pos_y] + [wind_speed, wind_dir] + [time]
+    Observation (107-dim):
+        [gas_history (30)] + [lidar (24)] + [pos_x, pos_y] + [wind_local_ux, wind_local_uy] + [time]
         Gas history: 10 timesteps x 3 features (rel_x, rel_y, binary).
         Positions are relative to current robot position, normalized to [0, 1].
         All values normalized to [0, 1].
@@ -117,7 +117,9 @@ class GasSourceEnv(gymnasium.Env):
             speed, direction = wind_field.spatial_mean()
             self._wind.set_uniform(speed, direction)
         else:
-            self._wind.randomize(self._rng)
+            self._wind = make_training_wind_field(
+                self._grid, self._rng, cfg.WIND_SPEED_RANGE, cfg.WIND_MAX_SPEED
+            )
 
         # Gas model selection
         if cfg.GAS_MODEL == "filament":
@@ -136,7 +138,9 @@ class GasSourceEnv(gymnasium.Env):
                 min_sigma=cfg.FILAMENT_MIN_SIGMA,
                 reflection_energy=cfg.FILAMENT_REFLECTION_ENERGY,
                 rng=self._rng,
-                wind_field=wind_field,
+                # Training: self._wind (spatial WindModel) drives both obs and advection.
+                # Eval: GadenWindField drives advection; self._wind gives uniform obs fallback.
+                wind_field=wind_field if wind_field is not None else self._wind,
             )
             # Warm up the plume so step 0 has some initial filaments
             for _ in range(cfg.FILAMENT_WARMUP_STEPS):
@@ -390,7 +394,11 @@ class GasSourceEnv(gymnasium.Env):
                 int(pos[1] / cfg.VISITED_CELL_RESOLUTION))
 
     def _build_observation(self):
-        """Build the 59-dim normalized observation vector."""
+        """Build the 107-dim normalized observation vector.
+
+        Wind slice (dims 104-105): local wind (Ux_norm, Uy_norm) at robot
+        position, encoded as (component / max_speed_uniform + 1) / 2 in [0, 1].
+        """
         gas_entries = []
         for ax, ay, b in self._gas_history:
             if ax is None:
@@ -409,7 +417,7 @@ class GasSourceEnv(gymnasium.Env):
             self._robot_pos[0] / self._map_width,
             self._robot_pos[1] / self._map_height,
         ], dtype=np.float32)
-        wind = np.array(self._wind.get_observation(), dtype=np.float32)
+        wind = self._wind.get_local_wind(self._robot_pos)  # local wind (Ux_norm, Uy_norm)
         time_frac = np.array([self._current_step / cfg.MAX_STEPS], dtype=np.float32)
 
         obs = np.concatenate([gas, lidar, pos, wind, time_frac])

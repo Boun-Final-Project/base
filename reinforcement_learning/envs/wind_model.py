@@ -43,8 +43,12 @@ class WindModel:
             self._resolution = float(resolution)
             self._occupancy = np.asarray(occupancy, dtype=bool)
             self.H, self.W, _ = self._field.shape
+            speeds = np.linalg.norm(self._field, axis=2)
+            free = ~self._occupancy
+            self._max_speed_spatial = float(speeds[free].max()) if free.any() else 0.0
         else:
             self._field = None
+            self._max_speed_spatial = 0.0
 
     def randomize(self, rng=None):
         """Sample a new wind configuration for an episode.
@@ -182,9 +186,52 @@ class WindModel:
         return (wind_corners * weights).sum(axis=1)                    # (N, 2)
 
     def max_speed(self) -> float:
-        """Max wind speed across free cells (spatial field) or uniform max (no field)."""
+        """Max wind speed across free cells (spatial) or uniform max (no field)."""
         if self._field is None:
             return self._max_speed_uniform
-        speeds = np.linalg.norm(self._field, axis=2)
-        free = ~self._occupancy
-        return float(speeds[free].max()) if free.any() else 0.0
+        return self._max_speed_spatial
+
+    def get_local_wind(self, position: np.ndarray) -> np.ndarray:
+        """Normalized local wind (Ux, Uy) at position, mapped to [0, 1].
+
+        Encoding: (component / max_speed_uniform + 1) / 2
+        so 0.5 = no wind, 1.0 = full positive, 0.0 = full negative.
+        Uses _max_speed_uniform as the scale in both spatial and uniform modes
+        for consistent encoding across training and eval.
+        """
+        if self._field is not None:
+            uv = self.query(np.atleast_2d(position))[0]
+        else:
+            uv = np.array([self.speed * np.cos(self.direction),
+                           self.speed * np.sin(self.direction)])
+        ms = self._max_speed_uniform if self._max_speed_uniform > 0 else 1.0
+        return np.clip((uv / ms + 1.0) / 2.0, 0.0, 1.0).astype(np.float32)
+
+
+def make_training_wind_field(grid, rng, speed_range=(0.1, 1.5),
+                              max_speed=2.0) -> "WindModel":
+    """Build a wall-aware spatial WindModel for one training episode.
+
+    Fills every free cell with a constant wind vector sampled from
+    (speed, direction), zeros wall cells, and wraps the result in a
+    WindModel so it can serve as wind_field for FilamentPlume.
+    """
+    H, W = grid.grid.shape
+    res = grid.resolution
+    occupancy = (grid.grid != 0)
+
+    speed = float(rng.uniform(*speed_range))
+    direction = float(rng.uniform(0, 2 * np.pi))
+    ux = speed * np.cos(direction)
+    uy = speed * np.sin(direction)
+
+    field = np.zeros((H, W, 2), dtype=np.float64)
+    field[~occupancy, 0] = ux
+    field[~occupancy, 1] = uy
+
+    model = WindModel(field=field, resolution=res, occupancy=occupancy,
+                      max_speed=max_speed)
+    # Populate .speed / .direction so FilamentPlume's turbulence args and
+    # get_local_wind's uniform fallback have the sampled episode values.
+    model.set_uniform(speed, direction)
+    return model
