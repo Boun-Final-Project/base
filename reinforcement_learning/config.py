@@ -125,6 +125,7 @@ LIDAR_CONV_KERNEL = 5
 # Spatial CNN architecture
 # =============================================================================
 SPATIAL_CELL_RES      = 0.2          # m/cell — decoupled from VISITED_CELL_RESOLUTION
+VISITED_CELL_RESOLUTION = 0.5       # legacy alias used by installed gaden_transfer node
 SPATIAL_GRID_SIZE     = 221          # cells (110-cell half-width × 0.2m = 22m radius)
 SPATIAL_LAMBDA        = 0.015        # recency decay rate (half-life ~46 steps)
 SPATIAL_CNN_OUT_CH    = 48           # channels after 1×1 fusion conv
