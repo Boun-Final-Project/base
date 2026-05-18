@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(_SCRIPT_DIR)))
 from reinforcement_learning import config as cfg
 from reinforcement_learning.envs.gas_source_env import GasSourceEnv
 from reinforcement_learning.envs.spatial_obs_wrapper import SpatialObsWrapper
+from reinforcement_learning.models.actor_critic import ActorCriticDualBackbone
 from reinforcement_learning.models.actor_critic_spatial import ActorCriticSpatial
 from reinforcement_learning.test.gaden_loader import (
     DEFAULT_MAP_KEYS,
@@ -46,42 +47,71 @@ def load_run_config(run_dir):
     return {}
 
 
-def load_agent(checkpoint_path, device):
-    agent = ActorCriticSpatial()
+def load_agent(checkpoint_path, device, arch="spatial"):
+    if arch == "dual":
+        agent = ActorCriticDualBackbone()
+    else:
+        agent = ActorCriticSpatial()
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     agent.load_state_dict(ckpt["model_state_dict"])
     agent.to(device).eval()
     return agent
 
 
-def greedy_action(agent, spatial_t, wind_t):
+def greedy_action_spatial(agent, spatial_t, wind_t):
     with torch.no_grad():
         shared = agent._encode(spatial_t, wind_t)
         dist = agent._actor_dist(shared)
         return dist.mean.cpu().numpy()  # (1, 2)
 
 
-def run_episode(agent, full_map, episode_seed, device):
+def greedy_action_dual(agent, obs_t):
+    with torch.no_grad():
+        encoded = agent._encode_shared(obs_t)
+        dist = agent._actor_dist(encoded)
+        return dist.mean.cpu().numpy()  # (1, 2): (cos θ, sin θ)
+
+
+def run_episode(agent, full_map, episode_seed, device, arch="spatial"):
     map_data = {k: full_map[k] for k in ("grid", "source_pos", "robot_pos",
                                           "width", "height")}
-    env = SpatialObsWrapper(GasSourceEnv())
-    (spatial, wind), _ = env.reset(
-        seed=episode_seed,
-        options={"map_data": map_data, "wind_field": full_map["wind_field"]},
-    )
     total_return = 0.0
     success = False
-    while True:
-        spatial_t = torch.as_tensor(spatial, dtype=torch.float32, device=device).unsqueeze(0)
-        wind_t    = torch.as_tensor(wind,    dtype=torch.float32, device=device).unsqueeze(0)
-        action = greedy_action(agent, spatial_t, wind_t)[0]
-        (spatial, wind), reward, terminated, truncated, _ = env.step(action)
-        total_return += reward
-        if terminated:
-            success = True
-            break
-        if truncated:
-            break
+
+    if arch == "dual":
+        env = GasSourceEnv()
+        obs, _ = env.reset(
+            seed=episode_seed,
+            options={"map_data": map_data, "wind_field": full_map["wind_field"]},
+        )
+        while True:
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            action = greedy_action_dual(agent, obs_t)[0]
+            obs, reward, terminated, truncated, _ = env.step(action)
+            total_return += reward
+            if terminated:
+                success = True
+                break
+            if truncated:
+                break
+    else:
+        env = SpatialObsWrapper(GasSourceEnv())
+        (spatial, wind), _ = env.reset(
+            seed=episode_seed,
+            options={"map_data": map_data, "wind_field": full_map["wind_field"]},
+        )
+        while True:
+            spatial_t = torch.as_tensor(spatial, dtype=torch.float32, device=device).unsqueeze(0)
+            wind_t    = torch.as_tensor(wind,    dtype=torch.float32, device=device).unsqueeze(0)
+            action = greedy_action_spatial(agent, spatial_t, wind_t)[0]
+            (spatial, wind), reward, terminated, truncated, _ = env.step(action)
+            total_return += reward
+            if terminated:
+                success = True
+                break
+            if truncated:
+                break
+
     return total_return, success
 
 
@@ -125,6 +155,9 @@ def eval_run(run_dir, full_maps, map_keys, episodes_per_map, device,
     returns   = np.zeros((n_ckpts, n_maps, n_eps), dtype=np.float32)
     successes = np.zeros((n_ckpts, n_maps, n_eps), dtype=bool)
 
+    arch = run_cfg.get("arch", "spatial")
+    print(f"  arch={arch}")
+
     orig = {k: getattr(cfg, k) for k in ("LIDAR_NUM_RAYS", "STATE_DIM")}
     cfg.LIDAR_NUM_RAYS = run_cfg.get("LIDAR_NUM_RAYS", cfg.LIDAR_NUM_RAYS)
     cfg.STATE_DIM      = run_cfg.get("STATE_DIM",      cfg.STATE_DIM)
@@ -132,12 +165,12 @@ def eval_run(run_dir, full_maps, map_keys, episodes_per_map, device,
         for ci, ckpt_path in enumerate(ckpt_files):
             step      = int(ckpt_path.stem.split("_")[1])
             steps[ci] = step
-            agent = load_agent(ckpt_path, device)
+            agent = load_agent(ckpt_path, device, arch=arch)
 
             for mi, fm in enumerate(full_maps):
                 for ei in range(n_eps):
                     seed = 1000 * mi + ei
-                    ret, succ = run_episode(agent, fm, seed, device)
+                    ret, succ = run_episode(agent, fm, seed, device, arch=arch)
                     returns[ci, mi, ei]   = ret
                     successes[ci, mi, ei] = succ
 

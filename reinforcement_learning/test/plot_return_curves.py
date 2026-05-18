@@ -184,6 +184,8 @@ def main():
                        help="One or more .npz result files")
     group.add_argument("--results-dir", type=str,
                        help="Directory of .npz result files (loads all)")
+    parser.add_argument("--runs", nargs="+", default=None,
+                        help="Filter runs by stem name when using --results-dir (e.g. lidar-006 lidar-007)")
     parser.add_argument("--labels", nargs="+", default=None,
                         help="Display name for each run (default: file stem)")
     parser.add_argument("--output-dir", type=str, default=_DEFAULT_OUTPUT_DIR,
@@ -192,6 +194,8 @@ def main():
 
     if args.results_dir:
         result_files = sorted(str(p) for p in Path(args.results_dir).glob("*.npz"))
+        if args.runs:
+            result_files = [f for f in result_files if Path(f).stem in args.runs]
         if not result_files:
             print(f"No .npz files found in {args.results_dir}")
             return
