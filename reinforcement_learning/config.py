@@ -9,7 +9,6 @@ Single source of truth — all other modules import from here.
 MAX_STEPS = 600
 STEP_SIZE = 0.5                 # meters per action
 GRID_RESOLUTION = 0.1           # meters (occupancy grid cell size)
-VISITED_CELL_RESOLUTION = 1.5   # meters (for new-cell reward tracking)
 D_SUCCESS = 0.5                 # meters, source-found threshold
 ROBOT_RADIUS = 0.25             # meters, collision checking radius (matches GADEN planners)
 MIN_SOURCE_ROBOT_DIST = 3.0     # meters, minimum initial separation
@@ -30,10 +29,8 @@ STATE_DIM = GAS_HISTORY_LENGTH * GAS_FEATURES_PER_STEP + LIDAR_NUM_RAYS + 2 + 2 
 # Rewards
 # =============================================================================
 R_SUCCESS = 200.0
-R_DETECTION = 2.0
-R_NEW_CELL = 0.5
+R_DETECTION = 0.75
 R_STEP = -1.0
-R_REVISIT = -0.2   # penalty each time robot enters a cell it has visited before
 R_COLLISION = -5.0
 
 # =============================================================================

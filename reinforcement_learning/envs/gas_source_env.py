@@ -74,7 +74,6 @@ class GasSourceEnv(gymnasium.Env):
         self._map_height = 0.0
         self._current_step = 0
         self._gas_history = None
-        self._visited_cells = None
         self._trajectory = []
         self._wind_offset = None
         self._dijkstra_from_source = None
@@ -203,12 +202,7 @@ class GasSourceEnv(gymnasium.Env):
             [(None, None, 0)] * cfg.GAS_HISTORY_LENGTH,
             maxlen=cfg.GAS_HISTORY_LENGTH,
         )
-        self._visited_cells = set()
         self._trajectory = [self._robot_pos.copy()]
-
-        # Mark starting cell as visited
-        cell_key = self._cell_key(self._robot_pos)
-        self._visited_cells.add(cell_key)
 
         # Initialize sensor with first reading at start position
         if cfg.GAS_MODEL == "filament":
@@ -287,13 +281,6 @@ class GasSourceEnv(gymnasium.Env):
 
         if binary == 1:
             reward += cfg.R_DETECTION
-
-        cell_key = self._cell_key(self._robot_pos)
-        if cell_key not in self._visited_cells:
-            reward += cfg.R_NEW_CELL
-            self._visited_cells.add(cell_key)
-        else:
-            reward += cfg.R_REVISIT
 
         dist = np.linalg.norm(self._robot_pos - self._source_pos)
         terminated = False
@@ -387,10 +374,6 @@ class GasSourceEnv(gymnasium.Env):
         d = max(d, 0.1)
         sigma_m = self._igdm.get_sigma_m(self._current_step)
         return cfg.SOURCE_RELEASE_RATE * np.exp(-(d ** 2) / (2 * sigma_m ** 2))
-
-    def _cell_key(self, pos):
-        return (int(pos[0] / cfg.VISITED_CELL_RESOLUTION),
-                int(pos[1] / cfg.VISITED_CELL_RESOLUTION))
 
     def _build_observation(self):
         """Build the 107-dim normalized observation vector.

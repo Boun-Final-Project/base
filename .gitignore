@@ -1,4 +1,5 @@
 __pycache__
+.venv/
 log
 .vscode
 gsl_hit_map
