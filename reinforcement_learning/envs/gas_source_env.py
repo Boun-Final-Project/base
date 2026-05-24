@@ -42,8 +42,9 @@ class GasSourceEnv(gymnasium.Env):
                  viz_output_dir=None):
         super().__init__()
         self.render_mode = render_mode
-        self._template_id = template_id  # None = random, 0-5 = fixed template
+        self._template_id = template_id  # None = random, 0-9 = fixed template
         self._max_template_id = None     # None = all templates, set by curriculum
+        self._template_weights = None    # None = uniform; else list/array len >= max_id+1
         self._viz_output_dir = viz_output_dir
         self._visualizer = None
 
@@ -83,9 +84,15 @@ class GasSourceEnv(gymnasium.Env):
         self._map_gen.width_range = width_range
         self._map_gen.height_range = height_range
 
-    def set_max_template(self, max_template_id):
-        """Set maximum template index for curriculum (0-5). None = use all."""
+    def set_max_template(self, max_template_id, weights=None):
+        """Set maximum template index for curriculum (0-9). None = use all.
+
+        weights : sequence of float, optional
+            Per-template sampling weights. Only the first (max_template_id+1)
+            entries are used. None = uniform sampling.
+        """
         self._max_template_id = max_template_id
+        self._template_weights = weights
 
     def reset(self, seed=None, options=None):
         if seed is not None:
@@ -96,10 +103,24 @@ class GasSourceEnv(gymnasium.Env):
         if options is not None and "map_data" in options:
             map_data   = options["map_data"]
             wind_field = options.get("wind_field")        # may be None
+            self._last_template_id = None  # GADEN eval: template ID not applicable
         else:
             tid = self._template_id
             if tid is None and self._max_template_id is not None:
-                tid = int(self._rng.integers(0, self._max_template_id + 1))
+                if self._template_weights is not None:
+                    w = np.asarray(
+                        self._template_weights[: self._max_template_id + 1],
+                        dtype=float,
+                    )
+                    total = w.sum()
+                    if total > 0:
+                        w = w / total
+                    else:
+                        w = np.ones_like(w) / len(w)
+                    tid = int(self._rng.choice(self._max_template_id + 1, p=w))
+                else:
+                    tid = int(self._rng.integers(0, self._max_template_id + 1))
+            self._last_template_id = tid  # exposed for tests and logging
             map_data   = self._map_gen.generate(template_id=tid)
             wind_field = None
 
