@@ -440,6 +440,8 @@ def train(args):
     if is_spatial:
         gru_h = agent.initial_hidden(args.num_envs, device)
 
+    prev_max_template = -1  # sentinel — triggers print on first curriculum update
+
     for update in range(start_update + 1, num_updates + 1):
         # Learning rate annealing (only after anneal_start fraction of training)
         if args.anneal_lr:
@@ -458,6 +460,13 @@ def train(args):
             w_range, h_range = get_curriculum_ranges(progress)
             max_template, tmpl_weights = get_template_curriculum(progress)
             vec_env.set_curriculum(w_range, h_range, max_template, tmpl_weights)
+            if max_template != prev_max_template:
+                print(
+                    f"[Curriculum] Step {global_step:,} ({progress:.1%}) — "
+                    f"max_template: {prev_max_template} → {max_template} "
+                    f"(templates 0-{max_template} active)"
+                )
+                prev_max_template = max_template
 
         # === Rollout ===
         buffer.reset()
