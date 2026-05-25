@@ -1,4 +1,5 @@
 __pycache__
+.venv/
 log
 .vscode
 gsl_hit_map
@@ -18,3 +19,7 @@ slurm-*.out
 
 # Container images
 *.sqsh
+
+# Media
+*.png
+*.mp4

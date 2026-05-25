@@ -9,7 +9,6 @@ Single source of truth — all other modules import from here.
 MAX_STEPS = 600
 STEP_SIZE = 0.5                 # meters per action
 GRID_RESOLUTION = 0.1           # meters (occupancy grid cell size)
-VISITED_CELL_RESOLUTION = 0.5   # meters (for new-cell reward tracking)
 D_SUCCESS = 0.5                 # meters, source-found threshold
 ROBOT_RADIUS = 0.25             # meters, collision checking radius (matches GADEN planners)
 MIN_SOURCE_ROBOT_DIST = 3.0     # meters, minimum initial separation
@@ -30,11 +29,9 @@ STATE_DIM = GAS_HISTORY_LENGTH * GAS_FEATURES_PER_STEP + LIDAR_NUM_RAYS + 2 + 2 
 # Rewards
 # =============================================================================
 R_SUCCESS = 200.0
-R_DETECTION = 2.0
-R_NEW_CELL = 0.2
-R_STEP = -0.1
-R_COLLISION = -2.0
-R_MAX_STEPS = -20.0
+R_DETECTION = 0.75
+R_STEP = -1.0
+R_COLLISION = -5.0
 
 # =============================================================================
 # Wind
@@ -72,7 +69,6 @@ COARSE_RESOLUTION = 0.5         # coarse grid for Dijkstra
 SENSOR_ALPHA = 0.1              # proportional noise coefficient
 SENSOR_SIGMA_ENV = 0.1          # environmental noise std
 SENSOR_THRESHOLD_WEIGHT = 0.5   # adaptive threshold weight
-SENSOR_THRESHOLD_DECAY = 0.97   # per-step threshold decay when measurement < threshold
 SOURCE_RELEASE_RATE = 1.0       # Q for gas source
 
 # =============================================================================
@@ -89,12 +85,23 @@ CURRICULUM_HEIGHT_START = (6.0, 8.0)
 CURRICULUM_FRACTION = 0.5               # fraction of training to reach full size
 
 # Curriculum: template unlock schedule (progress → max template index)
-# Templates: 0=empty, 1=single_wall, 2=u_shape, 3=three_walls, 4=complex_maze, 5=multi_room
+# Templates: 0=empty, 1=single_wall, 2=u_shape, 3=three_walls, 4=complex_maze,
+#            5=multi_room, 6=dead_end_corridor, 7=serpentine_corridor,
+#            8=dense_multi_room, 9=hybrid
 TEMPLATE_CURRICULUM_STAGES = [
-    (0.00, 1),   # 0-25%:  templates 0-1 (open rooms, learn gas-following)
-    (0.25, 3),   # 25-50%: templates 0-3 (obstacles, learn wall navigation)
-    (0.50, 5),   # 50%+:   templates 0-5 (full set, corridors and multi-room)
+    (0.00, 1),    # 0-10%:  templates 0-1 (gas-following only)
+    (0.10, 3),    # 10-25%: + obstacles (T2, T3)
+    (0.25, 5),    # 25-40%: + corridors / 4-room (T4, T5) — old "full set"
+    (0.40, 8),    # 40-60%: + dead-ends, serpentine, dense multi-room (T6-T8)
+    (0.60, 9),    # 60%+:   + hybrids (T9)
 ]
+
+# Per-template sampling weights (used after curriculum unlocks them).
+# Higher weight = more episodes drawn from that template. T6/T7 get 3x
+# because they directly mirror the highest-impact OOD failures
+# (uleft/uright dead-ends, labyrinth corridors).
+TEMPLATE_SAMPLING_WEIGHTS = [1, 1, 1, 1, 1, 2, 3, 3, 2, 2]
+#                             T0 T1 T2 T3 T4 T5 T6 T7 T8 T9
 
 # =============================================================================
 # PPO
@@ -129,6 +136,7 @@ LIDAR_CONV_KERNEL = 5
 # Spatial CNN architecture
 # =============================================================================
 SPATIAL_CELL_RES      = 0.2          # m/cell — decoupled from VISITED_CELL_RESOLUTION
+VISITED_CELL_RESOLUTION = 0.5       # legacy alias used by installed gaden_transfer node
 SPATIAL_GRID_SIZE     = 221          # cells (110-cell half-width × 0.2m = 22m radius)
 SPATIAL_LAMBDA        = 0.015        # recency decay rate (half-life ~46 steps)
 SPATIAL_CNN_OUT_CH    = 48           # channels after 1×1 fusion conv

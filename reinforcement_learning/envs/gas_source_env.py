@@ -16,7 +16,7 @@ from .occupancy_grid import OccupancyGrid
 from .igdm_model import IGDMModel
 from .filament_plume import FilamentPlume
 from .lidar_sim import LidarSim
-from .wind_model import WindModel
+from .wind_model import WindModel, make_training_wind_field
 from .sensor_model import BinarySensorModel
 from .visualizer import StepVisualizer
 
@@ -24,8 +24,8 @@ from .visualizer import StepVisualizer
 class GasSourceEnv(gymnasium.Env):
     """Gas source localization environment.
 
-    Observation (59-dim):
-        [gas_history (30)] + [lidar (24)] + [pos_x, pos_y] + [wind_speed, wind_dir] + [time]
+    Observation (107-dim):
+        [gas_history (30)] + [lidar (24)] + [pos_x, pos_y] + [wind_local_ux, wind_local_uy] + [time]
         Gas history: 10 timesteps x 3 features (rel_x, rel_y, binary).
         Positions are relative to current robot position, normalized to [0, 1].
         All values normalized to [0, 1].
@@ -42,8 +42,9 @@ class GasSourceEnv(gymnasium.Env):
                  viz_output_dir=None):
         super().__init__()
         self.render_mode = render_mode
-        self._template_id = template_id  # None = random, 0-5 = fixed template
+        self._template_id = template_id  # None = random, 0-9 = fixed template
         self._max_template_id = None     # None = all templates, set by curriculum
+        self._template_weights = None    # None = uniform; else list/array len >= max_id+1
         self._viz_output_dir = viz_output_dir
         self._visualizer = None
 
@@ -74,7 +75,6 @@ class GasSourceEnv(gymnasium.Env):
         self._map_height = 0.0
         self._current_step = 0
         self._gas_history = None
-        self._visited_cells = None
         self._trajectory = []
         self._wind_offset = None
         self._dijkstra_from_source = None
@@ -84,9 +84,15 @@ class GasSourceEnv(gymnasium.Env):
         self._map_gen.width_range = width_range
         self._map_gen.height_range = height_range
 
-    def set_max_template(self, max_template_id):
-        """Set maximum template index for curriculum (0-5). None = use all."""
+    def set_max_template(self, max_template_id, weights=None):
+        """Set maximum template index for curriculum (0-9). None = use all.
+
+        weights : sequence of float, optional
+            Per-template sampling weights. Only the first (max_template_id+1)
+            entries are used. None = uniform sampling.
+        """
         self._max_template_id = max_template_id
+        self._template_weights = weights
 
     def reset(self, seed=None, options=None):
         if seed is not None:
@@ -97,10 +103,24 @@ class GasSourceEnv(gymnasium.Env):
         if options is not None and "map_data" in options:
             map_data   = options["map_data"]
             wind_field = options.get("wind_field")        # may be None
+            self._last_template_id = None  # GADEN eval: template ID not applicable
         else:
             tid = self._template_id
             if tid is None and self._max_template_id is not None:
-                tid = int(self._rng.integers(0, self._max_template_id + 1))
+                if self._template_weights is not None:
+                    w = np.asarray(
+                        self._template_weights[: self._max_template_id + 1],
+                        dtype=float,
+                    )
+                    total = w.sum()
+                    if total > 0:
+                        w = w / total
+                    else:
+                        w = np.ones_like(w) / len(w)
+                    tid = int(self._rng.choice(self._max_template_id + 1, p=w))
+                else:
+                    tid = int(self._rng.integers(0, self._max_template_id + 1))
+            self._last_template_id = tid  # exposed for tests and logging
             map_data   = self._map_gen.generate(template_id=tid)
             wind_field = None
 
@@ -117,7 +137,9 @@ class GasSourceEnv(gymnasium.Env):
             speed, direction = wind_field.spatial_mean()
             self._wind.set_uniform(speed, direction)
         else:
-            self._wind.randomize(self._rng)
+            self._wind = make_training_wind_field(
+                self._grid, self._rng, cfg.WIND_SPEED_RANGE, cfg.WIND_MAX_SPEED
+            )
 
         # Gas model selection
         if cfg.GAS_MODEL == "filament":
@@ -136,7 +158,9 @@ class GasSourceEnv(gymnasium.Env):
                 min_sigma=cfg.FILAMENT_MIN_SIGMA,
                 reflection_energy=cfg.FILAMENT_REFLECTION_ENERGY,
                 rng=self._rng,
-                wind_field=wind_field,
+                # Training: self._wind (spatial WindModel) drives both obs and advection.
+                # Eval: GadenWindField drives advection; self._wind gives uniform obs fallback.
+                wind_field=wind_field if wind_field is not None else self._wind,
             )
             # Warm up the plume so step 0 has some initial filaments
             for _ in range(cfg.FILAMENT_WARMUP_STEPS):
@@ -191,7 +215,6 @@ class GasSourceEnv(gymnasium.Env):
             alpha=cfg.SENSOR_ALPHA,
             sigma_env=cfg.SENSOR_SIGMA_ENV,
             threshold_weight=cfg.SENSOR_THRESHOLD_WEIGHT,
-            threshold_decay=cfg.SENSOR_THRESHOLD_DECAY,
         )
 
         # State
@@ -200,12 +223,7 @@ class GasSourceEnv(gymnasium.Env):
             [(None, None, 0)] * cfg.GAS_HISTORY_LENGTH,
             maxlen=cfg.GAS_HISTORY_LENGTH,
         )
-        self._visited_cells = set()
         self._trajectory = [self._robot_pos.copy()]
-
-        # Mark starting cell as visited
-        cell_key = self._cell_key(self._robot_pos)
-        self._visited_cells.add(cell_key)
 
         # Initialize sensor with first reading at start position
         if cfg.GAS_MODEL == "filament":
@@ -285,11 +303,6 @@ class GasSourceEnv(gymnasium.Env):
         if binary == 1:
             reward += cfg.R_DETECTION
 
-        cell_key = self._cell_key(self._robot_pos)
-        if cell_key not in self._visited_cells:
-            reward += cfg.R_NEW_CELL
-            self._visited_cells.add(cell_key)
-
         dist = np.linalg.norm(self._robot_pos - self._source_pos)
         terminated = False
         truncated = False
@@ -300,7 +313,6 @@ class GasSourceEnv(gymnasium.Env):
 
         self._current_step += 1
         if self._current_step >= cfg.MAX_STEPS:
-            reward += cfg.R_MAX_STEPS
             truncated = True
 
         obs = self._build_observation()
@@ -384,12 +396,12 @@ class GasSourceEnv(gymnasium.Env):
         sigma_m = self._igdm.get_sigma_m(self._current_step)
         return cfg.SOURCE_RELEASE_RATE * np.exp(-(d ** 2) / (2 * sigma_m ** 2))
 
-    def _cell_key(self, pos):
-        return (int(pos[0] / cfg.VISITED_CELL_RESOLUTION),
-                int(pos[1] / cfg.VISITED_CELL_RESOLUTION))
-
     def _build_observation(self):
-        """Build the 59-dim normalized observation vector."""
+        """Build the 107-dim normalized observation vector.
+
+        Wind slice (dims 104-105): local wind (Ux_norm, Uy_norm) at robot
+        position, encoded as (component / max_speed_uniform + 1) / 2 in [0, 1].
+        """
         gas_entries = []
         for ax, ay, b in self._gas_history:
             if ax is None:
@@ -408,7 +420,7 @@ class GasSourceEnv(gymnasium.Env):
             self._robot_pos[0] / self._map_width,
             self._robot_pos[1] / self._map_height,
         ], dtype=np.float32)
-        wind = np.array(self._wind.get_observation(), dtype=np.float32)
+        wind = self._wind.get_local_wind(self._robot_pos)  # local wind (Ux_norm, Uy_norm)
         time_frac = np.array([self._current_step / cfg.MAX_STEPS], dtype=np.float32)
 
         obs = np.concatenate([gas, lidar, pos, wind, time_frac])

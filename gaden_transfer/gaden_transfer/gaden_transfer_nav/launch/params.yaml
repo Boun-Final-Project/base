@@ -1,0 +1,39 @@
+/**:
+  ros__parameters:
+    # Absolute path to checkpoint .pt file (required)
+    checkpoint: ""
+
+    # PyTorch device
+    device: "cpu"
+
+    # Navigation goal position (metres)
+    goal_x: 5.0
+    goal_y: 5.0
+
+    # Goal reached threshold (metres)
+    goal_tolerance: 0.5
+
+    # Episode length cap (steps)
+    max_steps: 600
+
+    # Step size in metres (must match training: cfg.STEP_SIZE = 0.5)
+    step_size: 0.5
+
+    # cmd_vel P-controller
+    linear_speed: 0.3
+    angular_speed_gain: 2.0
+    arrival_tolerance: 0.15
+    cmd_vel_rate: 10.0
+    waypoint_timeout: 10.0
+
+    # Number of episodes to run before shutdown (batch eval)
+    num_episodes: 1
+
+    # GADEN occupancy service
+    occupancy_service: "/gaden_environment/occupancyMap3D"
+    occupancy_z_level: 5
+    occupancy_timeout: 60.0
+
+    # Logging
+    step_log_every: 1
+    publish_markers: true

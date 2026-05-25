@@ -2,12 +2,13 @@
 Evaluate all checkpoints of one or more training runs on fixed test environments.
 
 Loads test_envs.json, scans each run's checkpoints/ directory in step order,
-runs each checkpoint greedily on all 100 environments, and saves per-run
-results to eval_results/<run_name>.npz.
+evaluates each checkpoint on all 100 environments in parallel (one process per
+checkpoint), and saves per-run results to eval_results/<run_name>.npz.
 
 Usage:
     python3 eval_checkpoints.py --run-dirs ../../runs/run1 ../../runs/run2
-    python3 eval_checkpoints.py --run-dirs ../../runs/run1 --device cpu
+    python3 eval_checkpoints.py --run-dirs ../../runs/run1 --workers 8
+    python3 eval_checkpoints.py --run-dirs ../../runs/run1 --eval-device cpu --workers 4
 """
 
 import argparse
@@ -18,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(_SCRIPT_DIR)))
@@ -125,7 +128,39 @@ def run_episode(agent, arch, env_spec, device):
     return total_return, success
 
 
-def eval_run(run_dir, test_envs, device, output_dir):
+def _eval_one_ckpt(args):
+    """Worker: evaluate one checkpoint across all test environments.
+
+    Runs in a subprocess — patches cfg locally (safe, subprocess-isolated).
+    Returns (ci, step, returns_array, successes_array).
+    """
+    ckpt_path_str, run_cfg, test_envs, device_str, ci = args
+    torch.set_num_threads(1)
+    device    = torch.device(device_str)
+    ckpt_path = Path(ckpt_path_str)
+    step      = int(ckpt_path.stem.split("_")[1])
+
+    orig = {k: getattr(cfg, k) for k in ("LIDAR_NUM_RAYS", "STATE_DIM")}
+    try:
+        cfg.LIDAR_NUM_RAYS = run_cfg.get("LIDAR_NUM_RAYS", cfg.LIDAR_NUM_RAYS)
+        cfg.STATE_DIM      = run_cfg.get("STATE_DIM",      cfg.STATE_DIM)
+
+        agent, arch = load_agent(ckpt_path, run_cfg, device)
+
+        n_envs    = len(test_envs)
+        returns   = np.zeros(n_envs, dtype=np.float32)
+        successes = np.zeros(n_envs, dtype=bool)
+
+        for ei, env_spec in enumerate(test_envs):
+            returns[ei], successes[ei] = run_episode(agent, arch, env_spec, device)
+    finally:
+        for k, v in orig.items():
+            setattr(cfg, k, v)
+
+    return ci, step, returns, successes
+
+
+def eval_run(run_dir, test_envs, output_dir, eval_device="cpu", n_workers=None):
     run_dir  = Path(run_dir)
     ckpt_dir = run_dir / "checkpoints"
 
@@ -149,28 +184,30 @@ def eval_run(run_dir, test_envs, device, output_dir):
     returns   = np.zeros((n_ckpts, n_envs), dtype=np.float32)
     successes = np.zeros((n_ckpts, n_envs), dtype=bool)
 
-    # Patch cfg once for the entire run — all checkpoints share the same arch config.
-    orig = {k: getattr(cfg, k) for k in ("LIDAR_NUM_RAYS", "STATE_DIM")}
-    cfg.LIDAR_NUM_RAYS = run_cfg.get("LIDAR_NUM_RAYS", cfg.LIDAR_NUM_RAYS)
-    cfg.STATE_DIM      = run_cfg.get("STATE_DIM",      cfg.STATE_DIM)
-    try:
-        for ci, ckpt_path in enumerate(ckpt_files):
-            step      = int(ckpt_path.stem.split("_")[1])
-            steps[ci] = step
+    actual_workers = n_workers if n_workers is not None else min(os.cpu_count() or 1, n_ckpts)
+    print(f"  Using {actual_workers} worker(s) on device={eval_device}")
 
-            agent, arch = load_agent(ckpt_path, run_cfg, device)
+    worker_args = [
+        (str(ckpt_path), run_cfg, test_envs, eval_device, ci)
+        for ci, ckpt_path in enumerate(ckpt_files)
+    ]
 
-            for ei, env_spec in enumerate(test_envs):
-                ret, succ            = run_episode(agent, arch, env_spec, device)
-                returns[ci, ei]      = ret
-                successes[ci, ei]    = succ
-
-            print(f"  [{ci+1:3d}/{n_ckpts}]  step={step:>10,}  "
-                  f"return={returns[ci].mean():7.1f} ± {returns[ci].std():5.1f}  "
-                  f"success={successes[ci].mean():.1%}")
-    finally:
-        for k, v in orig.items():
-            setattr(cfg, k, v)
+    completed = 0
+    with ProcessPoolExecutor(max_workers=actual_workers) as pool:
+        futures = {pool.submit(_eval_one_ckpt, a): a for a in worker_args}
+        for fut in as_completed(futures):
+            ckpt_path_str = futures[fut][0]
+            try:
+                ci, step, rets, succs = fut.result()
+            except Exception as exc:
+                raise RuntimeError(f"Worker failed on {ckpt_path_str}") from exc
+            steps[ci]       = step
+            returns[ci]     = rets
+            successes[ci]   = succs
+            completed += 1
+            print(f"  [{completed:3d}/{n_ckpts}]  step={step:>10,}  "
+                  f"return={rets.mean():7.1f} ± {rets.std():5.1f}  "
+                  f"success={succs.mean():.1%}")
 
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, f"{run_dir.name}.npz")
@@ -197,17 +234,26 @@ def main():
                         help="Directory for result .npz files")
     parser.add_argument("--device", type=str, default=None,
                         help="'cuda' or 'cpu' (default: auto-detect)")
+    parser.add_argument(
+        "--eval-device", type=str, default="cpu",
+        help="Device used inside worker processes for model inference (default: cpu)",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=None,
+        help="Number of parallel worker processes (default: min(cpu_count, n_checkpoints))",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"Device: {device}")
+    print(f"Device: {device} | Eval workers device: {args.eval_device}")
 
     with open(args.test_envs) as f:
         test_envs = json.load(f)["envs"]
     print(f"Loaded {len(test_envs)} test environments from {args.test_envs}")
 
     for run_dir in args.run_dirs:
-        eval_run(run_dir, test_envs, device, args.output_dir)
+        eval_run(run_dir, test_envs, args.output_dir,
+                 eval_device=args.eval_device, n_workers=args.workers)
 
 
 if __name__ == "__main__":

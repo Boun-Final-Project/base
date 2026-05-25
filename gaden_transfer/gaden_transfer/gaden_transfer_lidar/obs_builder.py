@@ -50,7 +50,6 @@ class ObservationBuilder:
             alpha=cfg.SENSOR_ALPHA,
             sigma_env=cfg.SENSOR_SIGMA_ENV,
             threshold_weight=cfg.SENSOR_THRESHOLD_WEIGHT,
-            threshold_decay=cfg.SENSOR_THRESHOLD_DECAY,
         )
 
         # Rolling buffer: stores (abs_x, abs_y, binary) tuples
@@ -62,7 +61,7 @@ class ObservationBuilder:
         # Latest sensor readings (set by the node's callbacks)
         self.robot_x: Optional[float] = None
         self.robot_y: Optional[float] = None
-        self.robot_theta: float = 0.0  # radians, world-frame heading
+        self.robot_theta: float = 0.0  # radians, world-frame heading; set by node but not consumed by build()
         self.lidar_norm: Optional[np.ndarray] = None   # shape (72,), already [0,1], SENSOR frame
         self.wind_speed: Optional[float] = None
         self.wind_direction: Optional[float] = None    # radians from +x
@@ -94,7 +93,6 @@ class ObservationBuilder:
             alpha=cfg.SENSOR_ALPHA,
             sigma_env=cfg.SENSOR_SIGMA_ENV,
             threshold_weight=cfg.SENSOR_THRESHOLD_WEIGHT,
-            threshold_decay=cfg.SENSOR_THRESHOLD_DECAY,
         )
         # Wind lock persists across episodes (same wind field)
 
@@ -186,16 +184,10 @@ class ObservationBuilder:
                 ])
         gas = np.array(gas_entries, dtype=np.float32)  # (30,)
 
-        # --- LiDAR (72 dims) — rotate from sensor frame to world frame ---
-        # Training lidar: ray 0 always = world +x. Deployment lidar comes in
-        # robot/sensor frame (ray 0 = robot's forward). Roll the array so that
-        # index 0 corresponds to the world +x direction.
-        n_rays = self.lidar_norm.shape[0]
-        # World-frame angle of source ray i (sensor) = robot_theta + i*(2π/N).
-        # To put world +x at slot 0, shift so that slot 0 reads the source ray
-        # whose world-angle is 0 → i = -robot_theta * N / (2π).
-        shift = int(round(-self.robot_theta * n_rays / (2.0 * np.pi))) % n_rays
-        lidar = np.roll(self.lidar_norm, shift).astype(np.float32)
+        # --- LiDAR (72 dims) — sensor-frame, matches training convention ---
+        # lidar_norm slot-0 = robot forward, matching gas_source_env's
+        # LidarSim.scan(heading=robot_heading) convention.
+        lidar = self.lidar_norm.astype(np.float32)
 
         # --- Position (2 dims) ---
         pos = np.array([

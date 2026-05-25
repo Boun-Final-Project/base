@@ -85,16 +85,16 @@ def apply_run_config(run_cfg: dict) -> None:
     If GAS_MODEL is absent from the config (older runs trained before the
     filament model was added), it defaults to "igdm".
 
-    If SENSOR_THRESHOLD_DECAY is absent (older runs trained before decaying
-    threshold was added), it defaults to 1.0 (no decay).
+    Note: SENSOR_THRESHOLD_DECAY has been removed and is silently ignored
+    if present in older run configs.
     """
     run_cfg = dict(run_cfg)
 
     if "GAS_MODEL" not in run_cfg:
         run_cfg["GAS_MODEL"] = "filament" if "FILAMENTS_PER_STEP" in run_cfg else "igdm"
 
-    if "SENSOR_THRESHOLD_DECAY" not in run_cfg:
-        run_cfg["SENSOR_THRESHOLD_DECAY"] = 1.0
+    # Remove SENSOR_THRESHOLD_DECAY if present in older configs
+    run_cfg.pop("SENSOR_THRESHOLD_DECAY", None)
 
     for key, val in run_cfg.items():
         if key in _SKIP_KEYS:

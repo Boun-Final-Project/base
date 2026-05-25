@@ -137,7 +137,6 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         self.max_steps = 150
 
         # Algorithm parameters
-        self.sigma_threshold = 0.3  # Standard deviation threshold for particles (kept for calculation)
         self.d_success_thr = 0.5   # Success distance from true source location (meters)
 
         # Weighted movement parameters
@@ -280,18 +279,6 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         sigma = self.sensor.get_std(true_conc)
         noisy = true_conc + np.random.normal(0, sigma)
         return max(0, noisy)
-
-    def is_estimation_converged(self):
-        """Check if estimation has converged (sigma < threshold).
-
-        Returns:
-        --------
-        converged : bool
-            True if estimation has converged
-        """
-        _, stds = self.particle_filter.get_estimate()
-        sigma_p = max(stds['x'], stds['y'])
-        return sigma_p < self.sigma_threshold
 
     def calculate_weighted_move(self, debug_info, current_pos):
         """Calculate weighted movement position based on top utility paths.
@@ -475,9 +462,8 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         self.measurements.append({'pos': self.robot_pos, 'raw': measurement})
         self.estimates.append((mean, std))
 
-        # ==== CHECK CONVERGENCE (early check before planning) ====
+        # ==== CHECK TERMINATION (early check before planning) ====
         sigma_p = max(std['x'], std['y'])
-        self.log(f"[CONVERGE] sigma_p = {sigma_p:.3f}, sigma_t = {self.sigma_threshold:.3f}")
 
         # Check if robot has reached true source
         dist_to_true = np.sqrt((self.robot_pos[0] - self.true_source[0])**2 + (self.robot_pos[1] - self.true_source[1])**2)
@@ -491,36 +477,6 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
             self.log(f"  Localization error: {np.sqrt((mean['x']-self.true_source[0])**2 + (mean['y']-self.true_source[1])**2):.3f}m")
 
             # Save final visualization (no RRT since we return early)
-            self.visualizer.save_step(
-                robot_pos=self.robot_pos,
-                trajectory=self.trajectory,
-                est_source=(mean['x'], mean['y']),
-                est_std=(std['x'], std['y']),
-                true_source=self.true_source,
-                step_num=step_num,
-                sigma_p=sigma_p,
-                current_step=step_num,
-                particle_filter=self.particle_filter,
-                distance_to_true=dist_to_true,
-                d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid,
-                rrt_nodes=None,
-                sensor_reading=measurement,
-                threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement,
-            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
-)
-
-            self.search_complete = True
-            return False
-
-        if self.is_estimation_converged():
-            self.log(f"\n✓✓✓ ESTIMATION CONVERGED! ✓✓✓")
-            self.log(f"  True source: {self.true_source}")
-            self.log(f"  Estimated: ({mean['x']:.2f}, {mean['y']:.2f})")
-            self.log(f"  Error: {np.sqrt((mean['x']-self.true_source[0])**2 + (mean['y']-self.true_source[1])**2):.3f}m")
-
-            # Save final converged visualization (no RRT since we return early)
             self.visualizer.save_step(
                 robot_pos=self.robot_pos,
                 trajectory=self.trajectory,

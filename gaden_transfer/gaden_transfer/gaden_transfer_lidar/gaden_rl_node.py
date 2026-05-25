@@ -34,6 +34,8 @@ Only ``model_state_dict`` is loaded here — the optimiser state is ignored.
 import os
 import sys
 import math
+import json
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -49,7 +51,7 @@ from visualization_msgs.msg import Marker
 
 # RL package imports: add src/base/ to sys.path so both the installed entry
 # point and direct execution can find the reinforcement_learning package.
-_SRC_BASE = '/home/efe/ros2_ws/src/base'
+_SRC_BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', '..'))
 if _SRC_BASE not in sys.path:
     sys.path.insert(0, _SRC_BASE)
 
@@ -71,7 +73,8 @@ from efe_igdm.mapping.occupancy_grid import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load_agent(checkpoint_path: str, arch: str, device: torch.device):
+def _load_agent(checkpoint_path: str, arch: str, device: torch.device,
+                run_cfg: dict = None):
     """Load a trained agent from a checkpoint file.
 
     Parameters
@@ -83,26 +86,56 @@ def _load_agent(checkpoint_path: str, arch: str, device: torch.device):
         'modular', or 'dual'.  Must match the original training flag.
     device : torch.device
         Where to place the model (cpu / cuda).
+    run_cfg : dict, optional
+        Values from config.json; used to set obs/lidar/gas dims correctly.
 
     Returns
     -------
     agent : nn.Module
         Loaded model in eval mode.
     """
+    if run_cfg is None:
+        run_cfg = {}
+    lidar_len = run_cfg.get("LIDAR_NUM_RAYS", cfg.LIDAR_NUM_RAYS)
+    if ("GAS_HISTORY_LENGTH" in run_cfg and "GAS_FEATURES_PER_STEP" in run_cfg):
+        gas_len = run_cfg["GAS_HISTORY_LENGTH"] * run_cfg["GAS_FEATURES_PER_STEP"]
+    else:
+        gas_len = cfg.GAS_HISTORY_LENGTH * cfg.GAS_FEATURES_PER_STEP
+    obs_dim = run_cfg.get("STATE_DIM", cfg.STATE_DIM)
+
     if arch == 'spatial':
         agent = ActorCriticSpatial()
     elif arch == 'dual':
-        agent = ActorCriticDualBackbone(obs_dim=cfg.STATE_DIM)
+        agent = ActorCriticDualBackbone(obs_dim=obs_dim, gas_len=gas_len, lidar_len=lidar_len)
     elif arch == 'modular':
-        agent = ActorCriticModular(obs_dim=cfg.STATE_DIM)
+        agent = ActorCriticModular(obs_dim=obs_dim, gas_len=gas_len, lidar_len=lidar_len)
     else:
-        agent = ActorCritic(obs_dim=cfg.STATE_DIM)
+        agent = ActorCritic(obs_dim=obs_dim)
 
     ckpt = torch.load(checkpoint_path, map_location=device)
     agent.load_state_dict(ckpt['model_state_dict'])
     agent.to(device)
     agent.eval()
     return agent
+
+
+def _load_run_config(checkpoint_path: str) -> dict:
+    """Read config.json from the checkpoint's parent run directory.
+
+    Looks for config.json two levels up from the checkpoint file:
+      .../runs/<run-name>/checkpoints/agent_STEP.pt
+                         ^^^^^^^^^^^ config.json lives here
+    Returns an empty dict if not found.
+    """
+    run_dir = Path(checkpoint_path).parent.parent
+    config_path = run_dir / "config.json"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
 def _action_to_target(robot_x: float, robot_y: float,
@@ -278,7 +311,14 @@ class GadenRLNode(Node):
                 f"Checkpoint not found: {self._checkpoint_path}"
             )
 
-        self._agent = _load_agent(self._checkpoint_path, self._arch, self._device)
+        run_cfg = _load_run_config(self._checkpoint_path)
+        self._agent = _load_agent(self._checkpoint_path, self._arch, self._device, run_cfg)
+        self.get_logger().info(
+            f'Run config: LIDAR_NUM_RAYS={run_cfg.get("LIDAR_NUM_RAYS", cfg.LIDAR_NUM_RAYS)} '
+            f'GAS_HISTORY_LENGTH={run_cfg.get("GAS_HISTORY_LENGTH", cfg.GAS_HISTORY_LENGTH)} '
+            f'STATE_DIM={run_cfg.get("STATE_DIM", cfg.STATE_DIM)} '
+            f'({"from config.json" if run_cfg else "cfg defaults — config.json not found"})'
+        )
         n_params = sum(p.numel() for p in self._agent.parameters())
         self.get_logger().info(
             f'Loaded checkpoint: {self._checkpoint_path} '
@@ -501,7 +541,11 @@ class GadenRLNode(Node):
                 obs, dtype=torch.float32, device=self._device
             ).unsqueeze(0)
             with torch.no_grad():
-                action, _, _, _ = self._agent.get_action_and_value(obs_t)
+                if self._arch == 'dual':
+                    encoded = self._agent._encode_shared(obs_t)
+                    action = self._agent._actor_dist(encoded).mean
+                else:
+                    action, _, _, _ = self._agent.get_action_and_value(obs_t)
             action_np = action.cpu().numpy().flatten()  # (1,) or (2,)
 
         # --- Compute target position ---
@@ -547,7 +591,10 @@ class GadenRLNode(Node):
         msg.header.frame_id = 'map'
         msg.pose.pose.position.x = float(target_x)
         msg.pose.pose.position.y = float(target_y)
-        msg.pose.pose.orientation.w = 1.0
+        # Face the direction of movement so the LiDAR scan is in the same
+        # sensor frame as training (slot 0 = robot's forward = action direction).
+        msg.pose.pose.orientation.z = math.sin(theta / 2.0)
+        msg.pose.pose.orientation.w = math.cos(theta / 2.0)
         msg.pose.covariance = [0.0] * 36
         self._teleport_pub.publish(msg)
 

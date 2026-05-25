@@ -109,8 +109,8 @@ class SpatialObsWrapper:
     def set_room_size_range(self, width_range, height_range):
         self._env.set_room_size_range(width_range, height_range)
 
-    def set_max_template(self, max_template_id):
-        self._env.set_max_template(max_template_id)
+    def set_max_template(self, max_template_id, weights=None):
+        self._env.set_max_template(max_template_id, weights)
 
     # ------------------------------------------------------------------
     # Internal helpers
