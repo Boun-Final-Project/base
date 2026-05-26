@@ -33,6 +33,15 @@ R_DETECTION = 0.75
 R_STEP = -1.0
 R_COLLISION = -5.0
 
+# Trajectory-loop proximity penalty: penalize the robot for getting within
+# D_LOOP of any of the past LOOP_HISTORY trajectory points (most recent
+# past point excluded from the count is the previous step, age=1).
+# Per-point contribution decays with age: weight(age) = LOOP_DECAY**(age-1).
+LOOP_HISTORY = 10
+D_LOOP = 0.3   # < STEP_SIZE so a clean forward step doesn't self-trigger
+R_LOOP_BASE = -0.05
+LOOP_DECAY = 0.85
+
 # =============================================================================
 # Wind
 # =============================================================================
@@ -86,8 +95,7 @@ CURRICULUM_FRACTION = 0.5               # fraction of training to reach full siz
 
 # Curriculum: template unlock schedule (progress → max template index)
 # Templates: 0=empty, 1=single_wall, 2=u_shape, 3=three_walls, 4=complex_maze,
-#            5=multi_room, 6=dead_end_corridor, 7=serpentine_corridor,
-#            8=dense_multi_room, 9=hybrid
+# 5=multi_room, 6=dead_end_corridor, 7=serpentine, 8=dense_multi_room, 9=hybrid
 TEMPLATE_CURRICULUM_STAGES = [
     (0.00, 1),    # 0-10%:  templates 0-1 (gas-following only)
     (0.10, 3),    # 10-25%: + obstacles (T2, T3)

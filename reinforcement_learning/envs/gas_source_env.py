@@ -133,9 +133,14 @@ class GasSourceEnv(gymnasium.Env):
 
         # Wind: spatial mean of the field for the policy ctx vector when a
         # wind_field is provided; otherwise random per-episode uniform wind.
+        # If map_data has a "wind_bias" hint (radians, source->robot direction
+        # used by wall-trap-like templates), sample direction within ±30° of
+        # that hint so the plume saturates the robot's area.
         if wind_field is not None:
             speed, direction = wind_field.spatial_mean()
             self._wind.set_uniform(speed, direction)
+        elif map_data.get("wind_bias") is not None:
+            self._wind.randomize_biased(self._rng, float(map_data["wind_bias"]))
         else:
             self._wind = make_training_wind_field(
                 self._grid, self._rng, cfg.WIND_SPEED_RANGE, cfg.WIND_MAX_SPEED
@@ -302,6 +307,19 @@ class GasSourceEnv(gymnasium.Env):
 
         if binary == 1:
             reward += cfg.R_DETECTION
+
+        # Trajectory-loop proximity penalty: discourage tight revisits of
+        # recent positions. trajectory[-1] is the just-appended current pos;
+        # walk back through the previous LOOP_HISTORY points with age-decay.
+        n_traj = len(self._trajectory)
+        for age in range(1, cfg.LOOP_HISTORY + 1):
+            idx = -1 - age
+            if -idx > n_traj:
+                break
+            past = self._trajectory[idx]
+            if np.linalg.norm(self._robot_pos - past) < cfg.D_LOOP:
+                reward += cfg.R_LOOP_BASE * (cfg.LOOP_DECAY ** (age - 1))
+
 
         dist = np.linalg.norm(self._robot_pos - self._source_pos)
         terminated = False
