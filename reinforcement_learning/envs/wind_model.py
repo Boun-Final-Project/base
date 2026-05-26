@@ -63,6 +63,17 @@ class WindModel:
         self.speed = rng.uniform(*self.speed_range)
         self.direction = rng.uniform(0, 2 * np.pi)
 
+    def randomize_biased(self, rng, mean_dir, halfwidth=np.pi / 6):
+        """Sample wind speed uniformly but direction in mean_dir ± halfwidth.
+
+        Used by wall-trap-like templates to force the wind to blow plume from
+        the source area toward the robot start area, which saturates the
+        sensor on the robot side and forces the policy to learn upwind-
+        casting / doorway-finding behaviour.
+        """
+        self.speed = rng.uniform(*self.speed_range)
+        self.direction = float(mean_dir + rng.uniform(-halfwidth, halfwidth)) % (2 * np.pi)
+
     def set_uniform(self, speed, direction):
         """Pin wind to a deterministic (speed, direction). Used by GADEN eval
         to drive the policy ctx vector from the spatial mean of a real wind
