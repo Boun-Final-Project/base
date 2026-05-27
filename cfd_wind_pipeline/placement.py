@@ -189,8 +189,12 @@ def sample_openings(grid, cell_size, map_w, map_h, rng,
     return openings
 
 
-def sample_map_with_openings(template_id, seed, max_retries=10):
-    """Generate one map + valid openings. Returns (map_data, openings) or (None, None)."""
+def sample_map_with_openings(template_id, seed, max_retries=10, inlet_side=None):
+    """Generate one map + valid openings. Returns (map_data, openings) or (None, None).
+
+    `inlet_side` is forwarded to sample_openings. Pass 'west' to restrict to
+    W↔E placements (required when gen_case uses fixed inlet/outlet patches on
+    the x=0 / x=W bg-mesh faces)."""
     rng = np.random.default_rng(seed)
     gen_rng = np.random.default_rng(seed)
     gen = MapGenerator(rng=gen_rng)
@@ -199,7 +203,8 @@ def sample_map_with_openings(template_id, seed, max_retries=10):
     cell_size = map_data['grid'].resolution
     map_w = map_data['width']; map_h = map_data['height']
     for attempt in range(max_retries):
-        ops = sample_openings(grid, cell_size, map_w, map_h, rng)
+        ops = sample_openings(grid, cell_size, map_w, map_h, rng,
+                              inlet_side=inlet_side)
         if ops is not None:
             return map_data, ops
     return None, None

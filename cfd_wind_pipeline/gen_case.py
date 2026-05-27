@@ -570,17 +570,20 @@ boundaryField
 
 def find_in_mesh_point(grid_arr, cell_size, z):
     """Find a free-cell location to act as locationInMesh (the seed point
-    snappyHexMesh uses to identify the fluid region)."""
-    H, W = grid_arr.shape
-    # Try center first, then sweep
-    centers = [(H // 2, W // 2)]
-    for r in range(H):
-        for c in range(W):
-            centers.append((r, c))
-    for r, c in centers:
-        if grid_arr[r, c] == 0:
-            return ((c + 0.5) * cell_size, (r + 0.5) * cell_size, z)
-    raise RuntimeError("No free cell found for locationInMesh")
+    snappyHexMesh uses to identify the fluid region).
+
+    Picks the free cell whose Euclidean distance to the nearest wall is
+    maximized — i.e. the deepest interior point in the largest open chamber.
+    This avoids snappyHexMesh failures where a picked cell, after mesh
+    snapping, ends up inside a wall.
+    """
+    from scipy.ndimage import distance_transform_edt
+    free = (grid_arr == 0)
+    if not free.any():
+        raise RuntimeError("No free cell found for locationInMesh")
+    edt = distance_transform_edt(free)
+    r, c = np.unravel_index(np.argmax(edt), edt.shape)
+    return ((c + 0.5) * cell_size, (r + 0.5) * cell_size, z)
 
 
 def main():
