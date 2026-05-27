@@ -83,7 +83,12 @@ def main():
     p.add_argument('--templates', type=str, default='5,6,7,8,10',
                    help='Comma-separated template IDs to sample from')
     p.add_argument('--inlet-speeds', type=str, default='0.3,0.5,0.7',
-                   help='Comma-separated inlet speed values [m/s]')
+                   help='Discrete inlet speed values [m/s]. Used only if '
+                        '--inlet-speed-range is not given.')
+    p.add_argument('--inlet-speed-range', type=str, default=None,
+                   help='Continuous inlet-speed range "lo,hi" [m/s]. If given, '
+                        'each case samples uniformly from this range. '
+                        'Overrides --inlet-speeds.')
     p.add_argument('--start-seed', type=int, default=1000)
     p.add_argument('--bg-cells-per-meter', type=float, default=2.0,
                    help='Background mesh resolution. 2.0 gives ~5cm cells, '
@@ -91,7 +96,12 @@ def main():
     args = p.parse_args()
 
     templates = [int(x) for x in args.templates.split(',')]
-    speeds = [float(x) for x in args.inlet_speeds.split(',')]
+    if args.inlet_speed_range:
+        speed_lo, speed_hi = (float(x) for x in args.inlet_speed_range.split(','))
+        speeds = None
+    else:
+        speed_lo = speed_hi = None
+        speeds = [float(x) for x in args.inlet_speeds.split(',')]
 
     lib = Path(args.library_dir)
     lib.mkdir(parents=True, exist_ok=True)
@@ -106,7 +116,10 @@ def main():
     while case_idx < args.n_cases:
         template_id = int(rng.choice(templates))
         seed = args.start_seed + attempt
-        inlet_speed = float(rng.choice(speeds))
+        if speeds is not None:
+            inlet_speed = float(rng.choice(speeds))
+        else:
+            inlet_speed = float(rng.uniform(speed_lo, speed_hi))
         attempt += 1
 
         case_dir = lib / f"case_{case_idx:04d}"

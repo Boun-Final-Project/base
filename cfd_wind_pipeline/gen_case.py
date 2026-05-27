@@ -568,21 +568,33 @@ boundaryField
 # Main
 # ---------------------------------------------------------------------------
 
-def find_in_mesh_point(grid_arr, cell_size, z):
+def find_in_mesh_point(grid_arr, cell_size, z, bg_cells_per_meter=4.0):
     """Find a free-cell location to act as locationInMesh (the seed point
     snappyHexMesh uses to identify the fluid region).
 
     Picks the free cell whose Euclidean distance to the nearest wall is
     maximized — i.e. the deepest interior point in the largest open chamber.
-    This avoids snappyHexMesh failures where a picked cell, after mesh
-    snapping, ends up inside a wall.
+    Filters to points with enough clearance to survive mesh snapping at the
+    given bg-mesh resolution (snappyHexMesh effectively thickens walls by
+    up to one bg-cell).
     """
     from scipy.ndimage import distance_transform_edt
     free = (grid_arr == 0)
     if not free.any():
         raise RuntimeError("No free cell found for locationInMesh")
-    edt = distance_transform_edt(free)
-    r, c = np.unravel_index(np.argmax(edt), edt.shape)
+    edt = distance_transform_edt(free) * cell_size  # in meters
+    # Require clearance >= bg_cell_size + safety margin. At bg=2 (0.5m cells)
+    # this needs ~0.7m clearance; at bg=4 (0.25m cells) it needs ~0.45m.
+    bg_cell = 1.0 / bg_cells_per_meter
+    min_clearance = bg_cell + 0.2
+    candidates = (edt >= min_clearance)
+    if candidates.any():
+        # Among well-cleared cells, pick the one with maximum EDT
+        masked = np.where(candidates, edt, -1.0)
+        r, c = np.unravel_index(np.argmax(masked), masked.shape)
+    else:
+        # No cell has the desired clearance — fall back to global max
+        r, c = np.unravel_index(np.argmax(edt), edt.shape)
     return ((c + 0.5) * cell_size, (r + 0.5) * cell_size, z)
 
 
@@ -693,7 +705,8 @@ def main():
                           nx, ny, nz)
 
     # 4. snappyHexMeshDict
-    in_mesh_pt = find_in_mesh_point(grid_arr, cell_size, args.height / 2)
+    in_mesh_pt = find_in_mesh_point(grid_arr, cell_size, args.height / 2,
+                                    bg_cells_per_meter=args.bg_cells_per_meter)
     print(f"locationInMesh = {in_mesh_pt}")
     write_snappy_dict(out_dir / 'system' / 'snappyHexMeshDict', in_mesh_pt)
 
