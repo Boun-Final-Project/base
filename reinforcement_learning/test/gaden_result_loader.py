@@ -145,8 +145,25 @@ class GadenResultSequence:
             )
         raise ValueError(f"unknown compression mode {comp_mode}")
 
+    # per-type extra fields (bytes) BEFORE the trailing Vector3 pos + int gasType,
+    # per GasSource::DeserializeBinary (src/GasSource.cpp).
+    _GASSOURCE_EXTRA = {
+        "point": 0,
+        "box": 12,        # Vector3 size
+        "line": 12,       # Vector3 lineEnd
+        "sphere": 4,      # float radius
+        "cylinder": 8,    # float radius + float height
+    }
+
     def _parse_body(self, body: bytes):
-        # Front: version (2x int32) + Description (40 B POD).
+        # Body layout (BufferWriter order, see RunningSimulation::SaveResults):
+        #   i32 verMajor, i32 verMinor
+        #   Description (40 B): Vec3i dims, Vec3 min, Vec3 max, f32 cellSize
+        #   GasSource (var): string type + per-type fields + Vec3 pos + i32 gasType
+        #   Constants (8 B): f32 totalMolesInFilament, f32 numMolesAllGasesIncm3
+        #   i32 windIndex
+        #   string mode  ("concentrations" | "filaments")
+        #   vector payload (u64 count + count * {f32 grid | Filament})
         off = 0
         ver_major, ver_minor = struct.unpack_from("<ii", body, off); off += 8
         if ver_major < 3:
@@ -166,49 +183,128 @@ class GadenResultSequence:
         if n_cells <= 0:
             raise ValueError(f"bad grid dims {self.dims}")
 
-        # Tail: concentration vector is the last write — [uint64 count][count f32].
-        # Robustly grab the final n_cells floats and verify the preceding count.
-        grid_bytes = n_cells * 4
-        if len(body) < grid_bytes + 8:
-            raise ValueError(
-                f"body too short ({len(body)} B) for {n_cells} cells + count"
-            )
-        count_off = len(body) - grid_bytes - 8
-        (count,) = struct.unpack_from("<Q", body, count_off)
-        if count != n_cells:
-            raise ValueError(
-                f"tail vector count {count} != numCells {n_cells}. File may be "
-                "'filaments' mode (regenerate with preCalculateConcentrations: true) "
-                "or layout mismatch."
-            )
-        flat = np.frombuffer(body, dtype="<f4", count=n_cells, offset=count_off + 8)
-        # indexFrom3D = x + y*nx + z*nx*ny  → reshape (nz, ny, nx)
-        self.grid = flat.reshape(dz, dy, dx).astype(np.float32)
+        # GasSource (variable) — must be parsed to reach mode + payload.
+        (slen,) = struct.unpack_from("<Q", body, off); off += 8
+        stype = body[off:off + slen].decode("ascii", "replace"); off += slen
+        off += self._GASSOURCE_EXTRA.get(stype, 0)
+        self.source_pos = struct.unpack_from("<fff", body, off); off += 12
+        (self.gas_type,) = struct.unpack_from("<i", body, off); off += 4
+
+        # Constants (used for filament-mode concentration).
+        total_moles, moles_all = struct.unpack_from("<ff", body, off); off += 8
+        self._total_moles = float(total_moles)
+        self._moles_all = float(moles_all)
+
+        (self._wind_index,) = struct.unpack_from("<i", body, off); off += 4
+
+        (mlen,) = struct.unpack_from("<Q", body, off); off += 8
+        self.mode = body[off:off + mlen].decode("ascii", "replace"); off += mlen
+
+        (count,) = struct.unpack_from("<Q", body, off); off += 8
+
+        if self.mode == "concentrations":
+            if count != n_cells:
+                raise ValueError(f"concentration count {count} != numCells {n_cells}")
+            flat = np.frombuffer(body, dtype="<f4", count=n_cells, offset=off)
+            # indexFrom3D = x + y*nx + z*nx*ny  → reshape (nz, ny, nx)
+            self.grid = flat.reshape(dz, dy, dx).astype(np.float32)
+            self.filaments = None
+        elif self.mode == "filaments":
+            # Filament POD = Vector3 position (3 f32) + float sigma = 16 B.
+            fil = np.frombuffer(body, dtype="<f4", count=count * 4, offset=off)
+            fil = fil.reshape(count, 4)
+            self.filaments = {
+                "pos": fil[:, :3].astype(np.float64),     # (N,3) metres
+                "sigma": fil[:, 3].astype(np.float64),    # (N,)  GADEN sigma (cm)
+            }
+            self.grid = None
+        else:
+            raise ValueError(f"unknown payload mode '{self.mode}'")
 
     # ------------------------------------------------------------------
-    def concentration_at(self, x: float, y: float, z: float = 0.5) -> float:
-        """Gas concentration [ppm] at world coords (env frame). Nearest cell.
+    def _conc_at_center(self, sigma):
+        """ppm at a filament's center — GADEN Simulation::ConcentrationAtCenter.
 
-        Matches gaden Environment::coordsToIndices: floor((coord - min)/cellSize).
-        Out-of-bounds queries return 0.0.
+        numMolesTarget_cm3 = totalMolesInFilament / (sqrt(8 pi^3) * sigma^3)
+        ppm = 1e6 * numMolesTarget_cm3 / numMolesAllGasesIncm3
+        (sigma is GADEN's filament sigma, in cm.)
         """
-        if self.grid is None:
-            raise RuntimeError("call load_iteration() first")
+        denom = np.sqrt(8.0 * np.pi ** 3) * sigma ** 3
+        num_moles = self._total_moles / denom
+        return 1e6 * num_moles / self._moles_all
+
+    def concentration_at(self, x: float, y: float, z: float = 0.5) -> float:
+        """Gas concentration [ppm] at world coords (env frame).
+
+        concentrations mode: nearest-cell lookup (matches coordsToIndices).
+        filaments mode: sum of Gaussian filament kernels exactly as GADEN's
+        Simulation::CalculateConcentration — per filament within 3*sigma/100 m,
+            ppm = ConcentrationAtCenter(sigma) * exp(-dist_cm^2 / (2 sigma^2))
+        with dist_cm = 100 * |fil.pos - sample|. Line-of-sight wall occlusion
+        (GADEN's CheckLineOfSight) is NOT applied here — the loader has no
+        occupancy grid; pass an occupancy to ``concentration_field_slice`` if
+        you need it. For point queries the LoS effect is usually small.
+        Out-of-bounds returns 0.0.
+        """
         nx, ny, nz = self.dims
         ix = int((x - self.min_coord[0]) / self.cell_size)
         iy = int((y - self.min_coord[1]) / self.cell_size)
         iz = int((z - self.min_coord[2]) / self.cell_size)
         if not (0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz):
             return 0.0
-        return float(self.grid[iz, iy, ix])
+        if self.mode == "concentrations":
+            return float(self.grid[iz, iy, ix])
+        # filaments mode
+        f = self.filaments
+        if f is None or len(f["sigma"]) == 0:
+            return 0.0
+        sample = np.array([x, y, z], dtype=np.float64)
+        d = f["pos"] - sample                              # (N,3)
+        dist2_m = np.einsum("ij,ij->i", d, d)              # squared metres
+        sigma = f["sigma"]                                 # cm
+        limit_m = 3.0 * sigma / 100.0                      # GADEN's 3-sigma cutoff
+        near = dist2_m < limit_m * limit_m
+        if not near.any():
+            return 0.0
+        dist_cm2 = dist2_m[near] * 1e4                     # (100*m)^2
+        s = sigma[near]
+        ppm = self._conc_at_center(s) * np.exp(-dist_cm2 / (2.0 * s * s))
+        return float(ppm.sum())
 
     def slice_z(self, z: float = 0.5) -> np.ndarray:
-        """Return the (ny, nx) horizontal concentration slice at height z."""
-        if self.grid is None:
-            raise RuntimeError("call load_iteration() first")
+        """Return the (ny, nx) horizontal concentration slice at height z.
+
+        concentrations mode: direct grid slice. filaments mode: evaluate the
+        kernel sum at every cell center on that z-plane (vectorized).
+        """
+        nx, ny, nz = self.dims
         iz = int((z - self.min_coord[2]) / self.cell_size)
-        iz = max(0, min(self.dims[2] - 1, iz))
-        return self.grid[iz]
+        iz = max(0, min(nz - 1, iz))
+        if self.mode == "concentrations":
+            return self.grid[iz]
+        # filaments: evaluate at each cell center on the plane.
+        zc = self.min_coord[2] + (iz + 0.5) * self.cell_size
+        xs = self.min_coord[0] + (np.arange(nx) + 0.5) * self.cell_size
+        ys = self.min_coord[1] + (np.arange(ny) + 0.5) * self.cell_size
+        out = np.zeros((ny, nx), dtype=np.float32)
+        f = self.filaments
+        if f is None or len(f["sigma"]) == 0:
+            return out
+        # Loop over filaments (typically a few thousand) accumulating onto grid.
+        for p, sg in zip(f["pos"], f["sigma"]):
+            limit_m = 3.0 * sg / 100.0
+            if abs(p[2] - zc) > limit_m:
+                continue
+            dx2 = (xs - p[0]) ** 2
+            dy2 = (ys - p[1]) ** 2
+            dz2 = (zc - p[2]) ** 2
+            dist2 = dx2[None, :] + dy2[:, None] + dz2
+            mask = dist2 < limit_m * limit_m
+            if not mask.any():
+                continue
+            cc = self._conc_at_center(sg)
+            out[mask] += (cc * np.exp(-(dist2[mask] * 1e4) / (2.0 * sg * sg))).astype(np.float32)
+        return out
 
 
 def _cli():
