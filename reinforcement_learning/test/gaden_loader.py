@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import csv
+import os
 import struct
 
 import numpy as np
@@ -55,15 +56,41 @@ _WIND_CSV_REL  = Path("wind_simulations/1ms/wind_at_cell_centers_0.csv")
 _CONFIG_REL    = Path("environment_configurations/config1/config.yaml")
 _OCC_CSV_REL   = Path("environment_configurations/config1/OccupancyGrid3D.csv")
 
-# Where GADEN's preprocessed OccupancyGrid3D.csv lives (the install scenarios
-# tree). The Python harness re-rasterized walls.stl, which produced ~10pp wider
-# corridors than GADEN's own occupancy at z_level=5 — the cause of the
-# labyrinth over-success vs real deployment. Prefer GADEN's grid so the eval
-# robot navigates the IDENTICAL occupancy the deployment node clamps against.
-# Folder names match between gaden_maps/ and the scenarios tree.
-_GADEN_SCENARIOS_ROOT = Path(
-    "/home/efe/ros2_ws/install/test_env/share/test_env/scenarios"
-)
+# Where GADEN's preprocessed OccupancyGrid3D.csv + result/iteration_<N> live
+# (the built test_env scenarios tree). The Python harness re-rasterized
+# walls.stl, which produced ~10pp wider corridors than GADEN's own occupancy at
+# z_level=5 — the cause of the labyrinth over-success vs real deployment. Prefer
+# GADEN's grid so the eval robot navigates the IDENTICAL occupancy the
+# deployment node clamps against. Folder names match between gaden_maps/ and the
+# scenarios tree.
+#
+# Machine-portable resolution (no hardcoded user path):
+#   1. $GADEN_SCENARIOS_ROOT env var if set;
+#   2. else search common ros2_ws layouts relative to $ROS2_WS / cwd / home.
+# If none is found this is None, and callers fall back to STL raster / the
+# surrogate plume (so the harness still runs, just without GADEN-grid/real-gas).
+def _find_scenarios_root():
+    env = os.environ.get("GADEN_SCENARIOS_ROOT")
+    if env:
+        return Path(env)
+    rel = "install/test_env/share/test_env/scenarios"
+    candidates = []
+    ws = os.environ.get("ROS2_WS")
+    if ws:
+        candidates.append(Path(ws) / rel)
+    # walk up from this file to find a ros2_ws-style dir
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidates.append(parent / rel)
+        candidates.append(parent / "share/test_env/scenarios")
+    candidates.append(Path.home() / "ros2_ws" / rel)
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+_GADEN_SCENARIOS_ROOT = _find_scenarios_root()
 # z-slice that deployment uses (gaden_rl_node occupancy_z_level default = 5,
 # i.e. z in [0.5, 0.6) m — matches the STL slice height ~0.5 m).
 _OCC_Z_LEVEL = 5
@@ -260,6 +287,8 @@ def resolve_result_dir(map_key: str, sim_id: str = "sim1"):
     the surrogate plume. Folder names match between gaden_maps/ and the install
     scenarios tree.
     """
+    if _GADEN_SCENARIOS_ROOT is None:
+        return None
     folder = MAP_NAME_ALIASES.get(map_key, map_key)
     rel = Path("environment_configurations/config1/simulations") / sim_id / "result"
     result_dir = _GADEN_SCENARIOS_ROOT / folder / rel
@@ -313,6 +342,8 @@ def load_gaden_grid_from_csv(map_key: str):
     deployment node navigates against — instead of re-rasterizing the STL.
     Returns None if the CSV is not available (caller falls back to STL).
     """
+    if _GADEN_SCENARIOS_ROOT is None:
+        return None
     folder = MAP_NAME_ALIASES.get(map_key, map_key)
     csv_path = _GADEN_SCENARIOS_ROOT / folder / _OCC_CSV_REL
     if not csv_path.is_file():
