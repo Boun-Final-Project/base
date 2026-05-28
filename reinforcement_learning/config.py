@@ -49,6 +49,13 @@ WIND_SPEED_RANGE = (0.1, 1.5)   # m/s, per-episode uniform sample
 WIND_MAX_SPEED = 2.0            # for normalization
 WIND_DISPERSION_FACTOR = 2.0    # how much wind shifts concentration peak
 
+# When True AND a spatial wind_field is provided at reset, the policy OBSERVES
+# the local wind at the robot's position (wind_field.query(robot_pos)) instead
+# of the spatial mean. Must match between training and eval. Gated by env var
+# OSL_LOCAL_WIND_OBS so old checkpoints (trained on mean wind) are unaffected.
+import os as _os
+LOCAL_WIND_OBS = _os.environ.get('OSL_LOCAL_WIND_OBS', '0') == '1'
+
 # =============================================================================
 # Gas dispersion model selection
 # =============================================================================

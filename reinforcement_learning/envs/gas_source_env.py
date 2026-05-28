@@ -138,6 +138,18 @@ class GasSourceEnv(gymnasium.Env):
         # that hint so the plume saturates the robot's area.
         if wind_field is not None:
             speed, direction = wind_field.spatial_mean()
+            if cfg.LOCAL_WIND_OBS and getattr(wind_field, "field", None) is not None:
+                # Policy observes LOCAL wind at the robot (point anemometer),
+                # matching real GADEN deployment. Wrap the spatial field in a
+                # WindModel so get_local_wind(robot_pos) queries it. set_uniform
+                # still sets (speed, direction) for the dispersion-offset calc
+                # and as fallback, but does NOT clear _field.
+                self._wind = WindModel(
+                    field=np.asarray(wind_field.field, dtype=np.float64),
+                    resolution=wind_field.resolution,
+                    occupancy=~wind_field._free_mask,
+                    max_speed=cfg.WIND_MAX_SPEED,
+                )
             self._wind.set_uniform(speed, direction)
         elif map_data.get("wind_bias") is not None:
             self._wind.randomize_biased(self._rng, float(map_data["wind_bias"]))
