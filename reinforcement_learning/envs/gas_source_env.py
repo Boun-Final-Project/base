@@ -179,8 +179,18 @@ class GasSourceEnv(gymnasium.Env):
                 # Eval: GadenWindField drives advection; self._wind gives uniform obs fallback.
                 wind_field=wind_field if wind_field is not None else self._wind,
             )
-            # Warm up the plume so step 0 has some initial filaments
-            for _ in range(cfg.FILAMENT_WARMUP_STEPS):
+            # Warm up the plume so step 0 has some initial filaments. For GADEN
+            # eval maps, warm to the scenario's playback start_time (real GADEN
+            # begins playback at start_time s, by which point the plume has
+            # dispersed for minutes — saturating large maps). Procedural
+            # training keeps the short fresh-dispersion warmup. start_time is in
+            # seconds; convert to filament steps via FILAMENT_DT.
+            start_time = float(map_data.get("start_time", 0) or 0)
+            if start_time > 0:
+                warmup_steps = int(round(start_time / cfg.FILAMENT_DT))
+            else:
+                warmup_steps = cfg.FILAMENT_WARMUP_STEPS
+            for _ in range(warmup_steps):
                 self._plume.update()
             self._igdm = None
             self._wind_offset = None

@@ -75,6 +75,12 @@ def greedy_action_dual(agent, obs_t):
 def run_episode(agent, full_map, episode_seed, device, arch="spatial"):
     map_data = {k: full_map[k] for k in ("grid", "source_pos", "robot_pos",
                                           "width", "height")}
+    # Forward the GADEN scenario's playback start_time so the env can warm the
+    # plume to match how far the real plume has dispersed at that wall-clock
+    # time (real GADEN starts playback at start_time s, not t=0). Without this
+    # the plume only gets FILAMENT_WARMUP_STEPS of dispersion regardless of map
+    # size, starving big maps (ultimate/many_rooms) of gas at the start region.
+    map_data["start_time"] = full_map.get("spec", {}).get("start_time", 0)
     total_return = 0.0
     success = False
 
