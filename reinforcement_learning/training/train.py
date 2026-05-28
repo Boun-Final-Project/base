@@ -77,6 +77,10 @@ class VecEnv:
             env.set_room_size_range(w_range, h_range)
             env.set_max_template(max_template, weights)
 
+    def close(self):
+        """No-op: serial envs have no background resources to release."""
+        pass
+
     def step(self, actions):
         """Step all envs. Auto-resets on termination/truncation.
 

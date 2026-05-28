@@ -94,6 +94,54 @@ class GasSourceEnv(gymnasium.Env):
         self._max_template_id = max_template_id
         self._template_weights = weights
 
+    def get_map_canvas(self) -> np.ndarray:
+        """Return ego-centric 2-channel occupancy canvas centred on the robot.
+
+        Returns
+        -------
+        canvas : np.ndarray
+            Shape (2, MAP_CANVAS_H, MAP_CANVAS_W), float32.
+            Channel 0 — occupied : 1.0 = wall, 0.0 = free
+            Channel 1 — known    : 1.0 = inside map, 0.0 = out-of-map padding
+        """
+        canvas = np.zeros((2, cfg.MAP_CANVAS_H, cfg.MAP_CANVAS_W), dtype=np.float32)
+
+        rx, ry = self._robot_pos
+        ds_res  = cfg.MAP_DOWNSAMPLE_RES
+        half_w  = cfg.MAP_HALF_W
+        half_h  = cfg.MAP_HALF_H
+
+        # Canvas column / row where the map's world-origin (0, 0) falls.
+        # Canvas origin is at world (rx - half_w, ry - half_h).
+        dst_x0 = int(round((half_w - rx) / ds_res))   # column
+        dst_y0 = int(round((half_h - ry) / ds_res))   # row
+
+        ds_h, ds_w = self._map_ds.shape
+        dst_x1 = dst_x0 + ds_w
+        dst_y1 = dst_y0 + ds_h
+
+        # Source indices into _map_ds (needed only if map were larger than canvas).
+        src_x0, src_y0 = 0, 0
+        src_x1, src_y1 = ds_w, ds_h
+
+        # Clip to canvas bounds (should never trigger for configured map/canvas sizes).
+        if dst_x0 < 0:
+            src_x0 -= dst_x0; dst_x0 = 0
+        if dst_y0 < 0:
+            src_y0 -= dst_y0; dst_y0 = 0
+        if dst_x1 > cfg.MAP_CANVAS_W:
+            src_x1 -= dst_x1 - cfg.MAP_CANVAS_W; dst_x1 = cfg.MAP_CANVAS_W
+        if dst_y1 > cfg.MAP_CANVAS_H:
+            src_y1 -= dst_y1 - cfg.MAP_CANVAS_H; dst_y1 = cfg.MAP_CANVAS_H
+
+        if dst_x1 > dst_x0 and dst_y1 > dst_y0:
+            canvas[0, dst_y0:dst_y1, dst_x0:dst_x1] = (
+                self._map_ds[src_y0:src_y1, src_x0:src_x1]
+            )
+            canvas[1, dst_y0:dst_y1, dst_x0:dst_x1] = 1.0
+
+        return canvas
+
     def reset(self, seed=None, options=None):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
@@ -130,6 +178,13 @@ class GasSourceEnv(gymnasium.Env):
         self._robot_heading = 0.0
         self._map_width = map_data["width"]
         self._map_height = map_data["height"]
+
+        # Downsample occupancy grid 2× (0.1 m/cell → 0.2 m/cell) for teacher map canvas.
+        # Uses max-pooling so thin walls (1-cell at 0.1m) survive downsampling.
+        raw = self._grid.grid.astype(np.float32)   # (grid_height, grid_width)
+        H, W = raw.shape
+        H2, W2 = H // 2, W // 2
+        self._map_ds = raw[:H2 * 2, :W2 * 2].reshape(H2, 2, W2, 2).max(axis=(1, 3))
 
         # Wind: spatial mean of the field for the policy ctx vector when a
         # wind_field is provided; otherwise random per-episode uniform wind.

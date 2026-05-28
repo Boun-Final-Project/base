@@ -147,3 +147,14 @@ SPATIAL_CRITIC_DIM    = 256
 SPATIAL_RES_BLOCKS    = 3
 SPATIAL_GRU_HIDDEN    = 256          # GRU hidden state size for temporal reasoning
 SPATIAL_SEQ_LEN       = 16           # truncated BPTT sequence length
+
+# =============================================================================
+# Teacher-student distillation / map canvas
+# =============================================================================
+MAP_DOWNSAMPLE_RES  = 0.2    # m/cell — 2× downsample from GRID_RESOLUTION
+MAP_HALF_W          = 20.0   # metres — half-width of ego-centric canvas
+MAP_HALF_H          = 15.0   # metres — half-height of ego-centric canvas
+MAP_CANVAS_W        = int(2 * MAP_HALF_W / MAP_DOWNSAMPLE_RES)  # cells — 200 with defaults
+MAP_CANVAS_H        = int(2 * MAP_HALF_H / MAP_DOWNSAMPLE_RES)  # cells — 150 with defaults
+MAP_FEAT_DIM        = 128    # MapCNN output dimension
+DISTIL_LAMBDA       = 0.5    # fixed KL weight in student loss

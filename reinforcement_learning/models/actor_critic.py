@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.distributions import Beta, Normal
 
 from .. import config as cfg
+from .map_encoder import MapCNN
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -385,14 +386,35 @@ class ActorCriticDualBackbone(nn.Module):
         fused = torch.cat([gas_feat, lidar_feat, context], dim=1)
         return self.gate(fused)
 
+    def _actor_params(self, encoded):
+        """Extract (mean, log_std) from actor head without building distribution."""
+        feat = self.actor_res(self.actor_proj(encoded))
+        out = self.actor_head(feat)          # (B, 4)
+        mean = out[:, :2]
+        log_std = out[:, 2:].clamp(-5, 0.5)
+        return mean, log_std
+
     def _actor_dist(self, encoded):
         """Build 2D Gaussian distribution for (cos θ, sin θ)."""
-        feat = self.actor_res(self.actor_proj(encoded))
-        out = self.actor_head(feat)  # (B, 4)
-        mean = out[:, :2]           # (mean_cos, mean_sin)
-        log_std = out[:, 2:].clamp(-5, 0.5)
-        std = log_std.exp()
-        return Normal(mean, std)
+        mean, log_std = self._actor_params(encoded)
+        return Normal(mean, log_std.exp())
+
+    def get_actor_params(self, obs):
+        """Return (mean, log_std) of the actor distribution.
+
+        Used by the distillation loss to compute KL without sampling.
+        Callers should wrap in ``torch.no_grad()`` when using on a frozen teacher.
+
+        Parameters
+        ----------
+        obs : torch.Tensor  Shape (B, obs_dim)
+
+        Returns
+        -------
+        mean : torch.Tensor    Shape (B, 2)
+        log_std : torch.Tensor Shape (B, 2)
+        """
+        return self._actor_params(self._encode_shared(obs))
 
     def get_value(self, obs):
         encoded = self._encode_shared(obs)
@@ -415,3 +437,113 @@ class ActorCriticDualBackbone(nn.Module):
         value = self.critic_head(critic_feat)
 
         return action, log_prob, entropy, value
+
+
+class ActorCriticTeacher(ActorCriticDualBackbone):
+    """DualBackbone + MapCNN encoder for teacher-student distillation.
+
+    Identical to ActorCriticDualBackbone but _encode_shared also accepts a
+    map_canvas tensor.  All public methods gain a `map_canvas` parameter.
+    The student (ActorCriticDualBackbone) is unchanged and deployed at test
+    time.
+
+    Architecture addition:
+        map_canvas (B, 2, MAP_CANVAS_H, MAP_CANVAS_W)
+            → MapCNN → map_feat (B, MAP_FEAT_DIM)
+
+        cat(gas_feat, lidar_feat, map_feat, context)
+            → GatedFusion(213 + MAP_FEAT_DIM)
+            → actor/critic backbones  (unchanged from DualBackbone)
+    """
+
+    def __init__(self, obs_dim=cfg.STATE_DIM,
+                 gas_len=cfg.GAS_HISTORY_LENGTH * cfg.GAS_FEATURES_PER_STEP,
+                 lidar_len=cfg.LIDAR_NUM_RAYS,
+                 gru_hidden=cfg.GAS_GRU_HIDDEN,
+                 conv_channels=cfg.LIDAR_CONV_CHANNELS,
+                 conv_kernel=cfg.LIDAR_CONV_KERNEL,
+                 actor_fusion_dim=128,
+                 critic_fusion_dim=256,
+                 actor_head_dim=cfg.ACTOR_HEAD_DIM,
+                 critic_head_dim=256,
+                 map_feat_dim=cfg.MAP_FEAT_DIM):
+        super().__init__(
+            obs_dim=obs_dim,
+            gas_len=gas_len,
+            lidar_len=lidar_len,
+            gru_hidden=gru_hidden,
+            conv_channels=conv_channels,
+            conv_kernel=conv_kernel,
+            actor_fusion_dim=actor_fusion_dim,
+            critic_fusion_dim=critic_fusion_dim,
+            actor_head_dim=actor_head_dim,
+            critic_head_dim=critic_head_dim,
+        )
+        self.map_feat_dim = map_feat_dim
+        self.map_encoder = MapCNN(map_feat_dim=map_feat_dim)
+
+        parent_fusion_in = (gru_hidden
+                            + conv_channels * lidar_len
+                            + self.context_len)
+        teacher_fusion_in = parent_fusion_in + map_feat_dim
+
+        # Replace gate and both projection heads to match the new fusion dim.
+        self.gate = GatedFusion(teacher_fusion_in)
+        self.actor_proj = nn.Sequential(
+            layer_init(nn.Linear(teacher_fusion_in, actor_fusion_dim)),
+            nn.LayerNorm(actor_fusion_dim),
+            nn.ReLU(),
+        )
+        self.critic_proj = nn.Sequential(
+            layer_init(nn.Linear(teacher_fusion_in, critic_fusion_dim)),
+            nn.LayerNorm(critic_fusion_dim),
+            nn.ReLU(),
+        )
+
+    def _encode_shared(self, obs, map_canvas):          # type: ignore[override]
+        """Encode all modalities including the map crop."""
+        assert map_canvas.ndim == 4 and map_canvas.shape[1] == 2, (
+            f"map_canvas must be (B, 2, H, W), got {tuple(map_canvas.shape)}"
+        )
+        gas   = obs[:, :self.gas_len]
+        lidar = obs[:, self.gas_len:self.gas_len + self.lidar_len]
+        context = obs[:, self.gas_len + self.lidar_len:]
+
+        gas_seq = gas.view(gas.size(0), self.gas_steps, cfg.GAS_FEATURES_PER_STEP)
+        _, gas_h = self.gas_gru(gas_seq)
+        gas_feat = gas_h[-1]
+
+        lidar_seq = lidar.unsqueeze(1)
+        lidar_feat = self.lidar_conv(lidar_seq).flatten(1)
+
+        map_feat = self.map_encoder(map_canvas)
+
+        fused = torch.cat([gas_feat, lidar_feat, map_feat, context], dim=1)
+        return self.gate(fused)
+
+    def get_value(self, obs, map_canvas):
+        encoded = self._encode_shared(obs, map_canvas)
+        feat = self.critic_res(self.critic_proj(encoded))
+        return self.critic_head(feat)
+
+    def get_action_and_value(self, obs, map_canvas, action=None):
+        encoded = self._encode_shared(obs, map_canvas)
+
+        dist = self._actor_dist(encoded)
+        if action is None:
+            action = dist.rsample()
+
+        log_prob = dist.log_prob(action).sum(dim=-1)
+        entropy  = dist.entropy().sum(dim=-1)
+
+        critic_feat = self.critic_res(self.critic_proj(encoded))
+        value = self.critic_head(critic_feat)
+
+        return action, log_prob, entropy, value
+
+    def get_actor_params(self, obs, map_canvas):        # type: ignore[override]
+        """Return (mean, log_std) of the actor distribution.
+
+        Callers should wrap in ``torch.no_grad()`` when using on a frozen teacher.
+        """
+        return self._actor_params(self._encode_shared(obs, map_canvas))
