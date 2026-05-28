@@ -19,12 +19,24 @@ import time
 import numpy as np
 import torch
 
-from .. import config as cfg
-from ..envs.gas_source_env import GasSourceEnv
-from ..models.actor_critic import ActorCriticTeacher
-from .distil_ppo import DistilRolloutBuffer, teacher_ppo_update
-from .ppo import RunningMeanStd, compute_gae
-from .train import VecEnv, get_curriculum_ranges, get_template_curriculum
+# Support both direct execution and module execution
+if __package__ is None or __package__ == "":
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
+    from reinforcement_learning import config as cfg
+    from reinforcement_learning.envs.gas_source_env import GasSourceEnv
+    from reinforcement_learning.models.actor_critic import ActorCriticTeacher
+    from reinforcement_learning.training.distil_ppo import DistilRolloutBuffer, teacher_ppo_update
+    from reinforcement_learning.training.ppo import RunningMeanStd, compute_gae
+    from reinforcement_learning.training.train import VecEnv, get_curriculum_ranges, get_template_curriculum
+else:
+    from .. import config as cfg
+    from ..envs.gas_source_env import GasSourceEnv
+    from ..models.actor_critic import ActorCriticTeacher
+    from .distil_ppo import DistilRolloutBuffer, teacher_ppo_update
+    from .ppo import RunningMeanStd, compute_gae
+    from .train import VecEnv, get_curriculum_ranges, get_template_curriculum
 
 
 def make_env(seed, rank, template_id=None):
