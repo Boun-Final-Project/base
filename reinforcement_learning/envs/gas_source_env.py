@@ -76,6 +76,7 @@ class GasSourceEnv(gymnasium.Env):
         self._current_step = 0
         self._gas_history = None
         self._deploy_motion = False  # set per-episode in reset()
+        self._sensor_noise = True     # set per-episode in reset(); see reset()
         self._trajectory = []
         self._wind_offset = None
         self._dijkstra_from_source = None
@@ -112,6 +113,12 @@ class GasSourceEnv(gymnasium.Env):
             # library, which injects map_data+wind_field every reset) keep the
             # all-or-nothing training motion the policy is trained against.
             self._deploy_motion = bool(options.get("deploy_motion", False))
+            # Sensor noise: default True (training behavior). The GADEN eval
+            # harness passes sensor_noise=False to match the real ROS2 deploy
+            # pipeline, which feeds the raw (noiseless) PID concentration — so
+            # the Python eval predicts real deployment rather than injecting a
+            # sigma_env floor the deployed sensor doesn't have.
+            self._sensor_noise = bool(options.get("sensor_noise", True))
         else:
             tid = self._template_id
             if tid is None and self._max_template_id is not None:
@@ -133,6 +140,7 @@ class GasSourceEnv(gymnasium.Env):
             wind_field = None
             gas_field  = None
             self._deploy_motion = False  # training keeps all-or-nothing motion
+            self._sensor_noise = True     # training keeps the sensor noise floor
 
         self._grid = map_data["grid"]
         self._source_pos = np.array(map_data["source_pos"], dtype=np.float64)
@@ -276,7 +284,8 @@ class GasSourceEnv(gymnasium.Env):
             conc = self._plume.concentration_at(self._robot_pos)
         else:
             conc = self._get_concentration_igdm()
-        noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
+        noisy = conc + (self._rng.normal(0, self._sensor.get_std(conc))
+                        if self._sensor_noise else 0.0)
         self._last_noisy = noisy
         self._sensor.initialize_threshold(noisy)
         # First reading is always 0 by definition (at threshold)
@@ -362,7 +371,8 @@ class GasSourceEnv(gymnasium.Env):
         else:
             conc = self._get_concentration_igdm()
 
-        noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
+        noisy = conc + (self._rng.normal(0, self._sensor.get_std(conc))
+                        if self._sensor_noise else 0.0)
         self._last_noisy = noisy
         self._sensor.update_threshold(noisy)
         binary = self._sensor.get_binary_measurement(noisy)
