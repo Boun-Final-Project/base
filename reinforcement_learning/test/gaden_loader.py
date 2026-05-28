@@ -250,6 +250,22 @@ def _rasterize_stl_walls(map_dir: Path, H: int, W: int, cell_size: float,
     return solid | (~fluid)
 
 
+_RESULT_REL = Path("environment_configurations/config1/simulations/sim1/result")
+
+
+def resolve_result_dir(map_key: str, sim_id: str = "sim1"):
+    """Path to a map's stored GADEN gas snapshots (result/iteration_<N>), or None.
+
+    Used by the eval harness to replay the REAL concentration field instead of
+    the surrogate plume. Folder names match between gaden_maps/ and the install
+    scenarios tree.
+    """
+    folder = MAP_NAME_ALIASES.get(map_key, map_key)
+    rel = Path("environment_configurations/config1/simulations") / sim_id / "result"
+    result_dir = _GADEN_SCENARIOS_ROOT / folder / rel
+    return result_dir if result_dir.is_dir() else None
+
+
 def _parse_occupancy_csv(csv_path: Path, z_level: int = _OCC_Z_LEVEL):
     """Parse GADEN's OccupancyGrid3D.csv -> (wall_mask (H,W) bool, origin_xy, cell_size).
 

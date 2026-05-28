@@ -104,6 +104,7 @@ class GasSourceEnv(gymnasium.Env):
         if options is not None and "map_data" in options:
             map_data   = options["map_data"]
             wind_field = options.get("wind_field")        # may be None
+            gas_field  = options.get("gas_field")         # may be None (ReplayGasSource)
             self._last_template_id = None  # GADEN eval: template ID not applicable
             # Injected map = GADEN-eval: match the deployment node's walk-back
             # collision motion. Caller can override with options["deploy_motion"].
@@ -127,6 +128,7 @@ class GasSourceEnv(gymnasium.Env):
             self._last_template_id = tid  # exposed for tests and logging
             map_data   = self._map_gen.generate(template_id=tid)
             wind_field = None
+            gas_field  = None
             self._deploy_motion = False  # training keeps all-or-nothing motion
 
         self._grid = map_data["grid"]
@@ -164,7 +166,16 @@ class GasSourceEnv(gymnasium.Env):
             )
 
         # Gas model selection
-        if cfg.GAS_MODEL == "filament":
+        if gas_field is not None:
+            # GADEN eval: replay the REAL stored concentration field (drop-in
+            # gas source) instead of the surrogate plume. Removes the largest
+            # eval fidelity gap — the surrogate's gas field differs in structure
+            # from real GADEN's (esp. near-homogeneous in tight curved mazes).
+            self._plume = gas_field
+            self._igdm = None
+            self._wind_offset = None
+            self._dijkstra_from_source = None
+        elif cfg.GAS_MODEL == "filament":
             self._plume = FilamentPlume(
                 source_pos=self._source_pos,
                 wind_speed=self._wind.speed,
