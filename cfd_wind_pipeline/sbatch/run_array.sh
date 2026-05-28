@@ -26,7 +26,10 @@ PYBIN=${CFD_PYTHON_BIN:-/home/efe-mantaroglu/simenv/bin/python}
 # scratch location, so ${BASH_SOURCE[0]} resolves to /var/spool/slurm/...
 SCRIPT_DIR=${CFD_PIPELINE_DIR:-/comp04-storage/efe-mantaroglu/osl/base/cfd_wind_pipeline}
 
-IDX=${SLURM_ARRAY_TASK_ID:?"must be run as a SLURM array job"}
+# Manifest index = array task id + optional offset. SLURM caps array indices
+# at MaxArraySize-1 (1000 here), so libraries > 1000 cases are submitted in
+# chunks: e.g. the 1000-1599 range goes as `--array=0-599` with CFD_ARRAY_OFFSET=1000.
+IDX=$(( ${SLURM_ARRAY_TASK_ID:?"must be run as a SLURM array job"} + ${CFD_ARRAY_OFFSET:-0} ))
 
 # Pull the case_dir for this index out of the manifest using a tiny python
 # inline call (avoids extra dep).
