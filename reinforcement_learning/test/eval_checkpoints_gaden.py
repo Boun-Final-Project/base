@@ -103,7 +103,8 @@ def run_episode(agent, full_map, episode_seed, device, arch="spatial",
 
     if arch == "dual":
         env = GasSourceEnv()
-        opts = {"map_data": map_data, "wind_field": full_map["wind_field"]}
+        opts = {"map_data": map_data, "wind_field": full_map["wind_field"],
+                "deploy_motion": True}  # eval matches the deployment walk-back motion
         if gas_field is not None:
             opts["gas_field"] = gas_field
         obs, _ = env.reset(seed=episode_seed, options=opts)
@@ -119,7 +120,8 @@ def run_episode(agent, full_map, episode_seed, device, arch="spatial",
                 break
     else:
         env = SpatialObsWrapper(GasSourceEnv())
-        opts = {"map_data": map_data, "wind_field": full_map["wind_field"]}
+        opts = {"map_data": map_data, "wind_field": full_map["wind_field"],
+                "deploy_motion": True}  # eval matches the deployment walk-back motion
         if gas_field is not None:
             opts["gas_field"] = gas_field
         (spatial, wind), _ = env.reset(seed=episode_seed, options=opts)
