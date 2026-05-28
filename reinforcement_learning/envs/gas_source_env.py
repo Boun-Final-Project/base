@@ -75,6 +75,7 @@ class GasSourceEnv(gymnasium.Env):
         self._map_height = 0.0
         self._current_step = 0
         self._gas_history = None
+        self._deploy_motion = False  # set per-episode in reset()
         self._trajectory = []
         self._wind_offset = None
         self._dijkstra_from_source = None
@@ -104,6 +105,9 @@ class GasSourceEnv(gymnasium.Env):
             map_data   = options["map_data"]
             wind_field = options.get("wind_field")        # may be None
             self._last_template_id = None  # GADEN eval: template ID not applicable
+            # Injected map = GADEN-eval: match the deployment node's walk-back
+            # collision motion. Caller can override with options["deploy_motion"].
+            self._deploy_motion = bool(options.get("deploy_motion", True))
         else:
             tid = self._template_id
             if tid is None and self._max_template_id is not None:
@@ -123,6 +127,7 @@ class GasSourceEnv(gymnasium.Env):
             self._last_template_id = tid  # exposed for tests and logging
             map_data   = self._map_gen.generate(template_id=tid)
             wind_field = None
+            self._deploy_motion = False  # training keeps all-or-nothing motion
 
         self._grid = map_data["grid"]
         self._source_pos = np.array(map_data["source_pos"], dtype=np.float64)
@@ -280,6 +285,23 @@ class GasSourceEnv(gymnasium.Env):
         info = self._build_info(0.0, False, 0)
         return obs, info
 
+    def _clamp_to_free(self, rx, ry, tx, ty, theta):
+        """Validate target; if blocked, walk back along the ray until free.
+
+        Mirrors gaden_transfer_lidar/gaden_rl_node._clamp_to_free so eval
+        motion matches deployment. Returns (x, y, collided).
+        """
+        if self._grid.is_valid(position=(tx, ty), radius=cfg.ROBOT_RADIUS):
+            return tx, ty, False
+        step = cfg.STEP_SIZE - 0.05
+        while step >= 0.1:
+            cx = rx + step * np.cos(theta)
+            cy = ry + step * np.sin(theta)
+            if self._grid.is_valid(position=(cx, cy), radius=cfg.ROBOT_RADIUS):
+                return cx, cy, True
+            step -= 0.05
+        return rx, ry, True
+
     def step(self, action):
         action = np.asarray(action).flatten()
         if len(action) == 1:
@@ -296,13 +318,26 @@ class GasSourceEnv(gymnasium.Env):
         dy = cfg.STEP_SIZE * np.sin(theta)
         new_pos = self._robot_pos + np.array([dx, dy])
 
-        # Collision check
-        collision = not self._grid.is_valid(
-            position=(new_pos[0], new_pos[1]),
-            radius=cfg.ROBOT_RADIUS,
-        )
-        if not collision:
-            self._robot_pos = new_pos
+        if self._deploy_motion:
+            # Match the deployment node's _clamp_to_free: if the full-step
+            # target is blocked, walk back along the ray in 0.05 m decrements
+            # until a free cell is found (robot creeps up to the wall and stops
+            # short) instead of the all-or-nothing "stay put" used in training.
+            # This removes the frictionless wall-hugging that made the Python
+            # eval over-succeed on tight-corridor maps vs real GADEN.
+            cx, cy, collision = self._clamp_to_free(
+                self._robot_pos[0], self._robot_pos[1],
+                new_pos[0], new_pos[1], theta,
+            )
+            self._robot_pos = np.array([cx, cy], dtype=np.float64)
+        else:
+            # Collision check (training: all-or-nothing full step)
+            collision = not self._grid.is_valid(
+                position=(new_pos[0], new_pos[1]),
+                radius=cfg.ROBOT_RADIUS,
+            )
+            if not collision:
+                self._robot_pos = new_pos
 
         self._trajectory.append(self._robot_pos.copy())
 
