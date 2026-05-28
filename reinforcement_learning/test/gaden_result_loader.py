@@ -307,6 +307,51 @@ class GadenResultSequence:
         return out
 
 
+class ReplayGasSource:
+    """Drop-in gas source backed by real GADEN result/iteration_<N> snapshots.
+
+    Matches the subset of the FilamentPlume interface that GasSourceEnv uses
+    (``update()``, ``concentration_at(pos)``, ``get_all_filaments()``), so the
+    env can query the *real* GADEN concentration field instead of the surrogate
+    plume — eliminating the largest eval fidelity gap (the labyrinth gas field
+    is near-homogeneous in real GADEN but the surrogate produces a different,
+    more followable field).
+
+    Coordinate handling: the env works in env-frame (origin-shifted) positions;
+    GADEN snapshots are in absolute world coords. ``origin_xy`` (the map's
+    env_min) converts env→absolute. Time: saveDeltaTime = 0.5 s per snapshot, so
+    one env step advances one snapshot. Starts at ``start_iteration`` (=
+    start_time / saveDeltaTime) and clamps to the last available snapshot.
+    """
+
+    def __init__(self, result_dir, origin_xy, start_iteration: int,
+                 z: float = 0.5):
+        self._seq = GadenResultSequence(result_dir)
+        self._avail = self._seq.available_iterations()
+        self._max_iter = self._avail[-1] if self._avail else 0
+        self._ox, self._oy = float(origin_xy[0]), float(origin_xy[1])
+        self._z = float(z)
+        self._iter = max(0, min(int(start_iteration), self._max_iter))
+        self._seq.load_iteration(self._iter)
+
+    def update(self):
+        # One env step == one saved snapshot (saveDeltaTime). Hold the last
+        # snapshot once the recording runs out (short result dirs, e.g. u_left).
+        if self._iter < self._max_iter:
+            self._iter += 1
+            self._seq.load_iteration(self._iter)
+
+    def concentration_at(self, pos):
+        return self._seq.concentration_at(pos[0] + self._ox,
+                                          pos[1] + self._oy, self._z)
+
+    def get_all_filaments(self):
+        # For viz compatibility; return absolute filament positions if present.
+        if self._seq.filaments is not None:
+            return {"positions": self._seq.filaments["pos"][:, :2].copy()}
+        return {"positions": np.zeros((0, 2))}
+
+
 def _cli():
     import argparse
     p = argparse.ArgumentParser(description="Inspect a GADEN concentration snapshot.")
