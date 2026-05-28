@@ -32,10 +32,26 @@ MIX=${CFD_MIX_SYNTHETIC:-0.2}
 VENV_PY=${CFD_PYTHON_BIN:-/home/efe-mantaroglu/simenv/bin/python}
 CFD_PKG=/comp04-storage/efe-mantaroglu/osl/base/cfd_wind_pipeline
 
+# Propagate the local-wind-observation flag (read by the RL package config).
+# Set OSL_LOCAL_WIND_OBS=1 in the submitting shell to train the policy on
+# local point wind instead of the spatial mean. MUST match at eval time.
+export OSL_LOCAL_WIND_OBS=${OSL_LOCAL_WIND_OBS:-0}
+echo "OSL_LOCAL_WIND_OBS=${OSL_LOCAL_WIND_OBS}"
+
+# --template-filter is a LAUNCHER arg (parsed by train_with_cfd_library.py
+# before the `--`), NOT a train.py arg. Pass it via CFD_TEMPLATE_FILTER so it
+# lands on the correct side of the `--`. e.g. CFD_TEMPLATE_FILTER=0,1,2,3,4,5
+TEMPLATE_FILTER_ARG=()
+if [ -n "${CFD_TEMPLATE_FILTER:-}" ]; then
+    TEMPLATE_FILTER_ARG=(--template-filter "${CFD_TEMPLATE_FILTER}")
+    echo "CFD_TEMPLATE_FILTER=${CFD_TEMPLATE_FILTER}"
+fi
+
 cd ${RL_PKG}
 
 ${VENV_PY} -u ${CFD_PKG}/train_with_cfd_library.py \
     --library-dir ${LIB_DIR} \
     --rl-package-path ${RL_PKG} \
     --mix-synthetic ${MIX} \
+    "${TEMPLATE_FILTER_ARG[@]}" \
     -- "$@"

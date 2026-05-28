@@ -93,58 +93,79 @@ class CFDLibrarySampler:
     degenerate at construction time so training never sees junk wind.
     """
 
-    def __init__(self, library_dir: str | Path, rng: np.random.Generator,
+    def __init__(self, library_dirs, rng: np.random.Generator,
                  rl_package_path: str,
                  reject_degenerate: bool = True,
                  min_speed: float = 0.05,
                  min_speed_std: float = 0.02,
-                 min_circ_std: float = 0.3):
-        """Scan the library and cache the valid case dirs.
+                 min_circ_std: float = 0.3,
+                 template_filter=None):
+        """Scan one or more libraries and cache the valid case dirs.
 
-        Filters mirror cfd_wind_pipeline.library_stats.is_degenerate:
-        - mean |U| >= min_speed
-        - std |U| >= min_speed_std
-        - circular std >= min_circ_std (rules out single-direction stagnation)
+        library_dirs : str | Path | list
+            A single library dir, or a list to pool multiple libraries
+            (e.g. easy T0-3 + hard T4-9) into one sampling distribution.
+        template_filter : iterable of int, optional
+            If given, keep only cases whose template_id is in this set.
+            Use to restrict to the champ's known templates (0-5) and avoid
+            OOD template shock during finetuning.
+
+        Degenerate filters mirror library_stats.is_degenerate:
+        mean |U| >= min_speed, std |U| >= min_speed_std,
+        circular std >= min_circ_std (rules out single-direction stagnation).
         """
         self._rng = rng
         self._rl_pkg = rl_package_path
-        lib = Path(library_dir)
-        manifest_path = lib / 'manifest.json'
-        if not manifest_path.exists():
-            raise FileNotFoundError(f"No manifest.json at {lib}")
-        manifest = json.loads(manifest_path.read_text())
+        if isinstance(library_dirs, (str, Path)):
+            library_dirs = [library_dirs]
+        tmpl_set = set(template_filter) if template_filter is not None else None
 
         self._cases = []
         n_skipped = 0
-        for entry in manifest:
-            # Manifests store absolute paths (legacy) — but a library can be
-            # moved/renamed. Always resolve relative to manifest location.
-            cd = lib / Path(entry['case_dir']).name
-            wf_path = cd / 'wind_field.npz'
-            if not wf_path.exists():
-                n_skipped += 1
-                continue
-            if reject_degenerate:
-                d = np.load(wf_path)
-                g = np.load(cd / 'grid.npz')['grid']
-                field = d['field']
-                speeds = np.linalg.norm(field, axis=-1)
-                free = (g == 0)
-                s = speeds[free]
-                if s.size == 0 or s.mean() < min_speed or s.std() < min_speed_std:
+        n_tmpl_filtered = 0
+        for library_dir in library_dirs:
+            lib = Path(library_dir)
+            manifest_path = lib / 'manifest.json'
+            if not manifest_path.exists():
+                raise FileNotFoundError(f"No manifest.json at {lib}")
+            manifest = json.loads(manifest_path.read_text())
+            kept_here = 0
+            for entry in manifest:
+                if tmpl_set is not None and entry.get('template_id') not in tmpl_set:
+                    n_tmpl_filtered += 1
+                    continue
+                # Resolve relative to manifest location (libraries may be moved).
+                cd = lib / Path(entry['case_dir']).name
+                wf_path = cd / 'wind_field.npz'
+                if not wf_path.exists():
                     n_skipped += 1
                     continue
-                dirs = np.arctan2(field[..., 1], field[..., 0])[free]
-                R = np.sqrt(np.mean(np.sin(dirs))**2 + np.mean(np.cos(dirs))**2)
-                circ = np.sqrt(-2*np.log(R)) if R > 1e-8 else float('inf')
-                if circ < min_circ_std:
-                    n_skipped += 1
-                    continue
-            self._cases.append(cd)
-        print(f"[CFDLibrarySampler] {library_dir}: kept {len(self._cases)} cases "
-              f"({n_skipped} skipped — incomplete or degenerate)")
+                if reject_degenerate:
+                    d = np.load(wf_path)
+                    g = np.load(cd / 'grid.npz')['grid']
+                    field = d['field']
+                    speeds = np.linalg.norm(field, axis=-1)
+                    free = (g == 0)
+                    s = speeds[free]
+                    if s.size == 0 or s.mean() < min_speed or s.std() < min_speed_std:
+                        n_skipped += 1
+                        continue
+                    dirs = np.arctan2(field[..., 1], field[..., 0])[free]
+                    R = np.sqrt(np.mean(np.sin(dirs))**2 + np.mean(np.cos(dirs))**2)
+                    circ = np.sqrt(-2*np.log(R)) if R > 1e-8 else float('inf')
+                    if circ < min_circ_std:
+                        n_skipped += 1
+                        continue
+                self._cases.append(cd)
+                kept_here += 1
+            print(f"[CFDLibrarySampler] {library_dir}: kept {kept_here} cases")
+        msg = (f"[CFDLibrarySampler] TOTAL kept {len(self._cases)} "
+               f"({n_skipped} incomplete/degenerate")
+        if tmpl_set is not None:
+            msg += f", {n_tmpl_filtered} template-filtered (keep {sorted(tmpl_set)})"
+        print(msg + ")")
         if not self._cases:
-            raise RuntimeError(f"No valid cases in {library_dir}")
+            raise RuntimeError(f"No valid cases in {library_dirs}")
 
     def __len__(self) -> int:
         return len(self._cases)

@@ -32,12 +32,17 @@ def main():
         passthrough = []
 
     p = argparse.ArgumentParser()
-    p.add_argument('--library-dir', required=True)
+    p.add_argument('--library-dir', required=True,
+                   help='CFD library dir, or comma-separated list to pool '
+                        '(e.g. hard T4-9 + easy T0-3).')
     p.add_argument('--rl-package-path', required=True,
                    help='Path to the RL package providing train.py / GasSourceEnv')
     p.add_argument('--mix-synthetic', type=float, default=0.0,
                    help='Fraction of episodes that reset to procedural+synthetic '
                         '(default 0 = always use library)')
+    p.add_argument('--template-filter', type=str, default=None,
+                   help='Comma-separated template_ids to keep (e.g. "0,1,2,3,4,5" '
+                        'to match the champ and avoid OOD template shock).')
     args = p.parse_args(launcher_argv)
 
     rl_pkg = os.path.abspath(args.rl_package_path)
@@ -50,21 +55,22 @@ def main():
     from reinforcement_learning.training import train as train_mod
     from cfd_library_env import make_cfd_env
 
-    library_dir = os.path.abspath(args.library_dir)
+    library_dirs = [os.path.abspath(d) for d in args.library_dir.split(',')]
     mix = args.mix_synthetic
-
-    orig_make_env = train_mod.make_env
+    tmpl_filter = ([int(x) for x in args.template_filter.split(',')]
+                   if args.template_filter else None)
 
     def patched_make_env(seed, rank, template_id=None):
         return make_cfd_env(seed=seed, rank=rank,
-                            library_dir=library_dir,
+                            library_dirs=library_dirs,
                             rl_package_path=rl_pkg,
                             mix_synthetic=mix,
-                            template_id=template_id)
+                            template_id=template_id,
+                            template_filter=tmpl_filter)
 
     train_mod.make_env = patched_make_env
-    print(f"[train_with_cfd_library] Patched make_env → CFD library "
-          f"({library_dir}, mix_synthetic={mix})")
+    print(f"[train_with_cfd_library] Patched make_env → CFD libraries "
+          f"({library_dirs}, mix_synthetic={mix}, template_filter={tmpl_filter})")
 
     # Hand off to train.main() with the remaining argv.
     sys.argv = [sys.argv[0]] + passthrough

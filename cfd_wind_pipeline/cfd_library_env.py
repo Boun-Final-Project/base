@@ -54,12 +54,17 @@ class CFDLibraryEnv:
         return self._env.step(action)
 
 
-def make_cfd_env(seed: int, rank: int, library_dir: str,
+def make_cfd_env(seed: int, rank: int, library_dirs,
                  rl_package_path: str,
                  mix_synthetic: float = 0.0,
-                 template_id: Optional[int] = None):
+                 template_id: Optional[int] = None,
+                 template_filter=None):
     """Factory replacing train.py's `make_env`. Returns a thunk that
-    constructs a CFDLibraryEnv ready for the VecEnv."""
+    constructs a CFDLibraryEnv ready for the VecEnv.
+
+    library_dirs : str | list of str — one or more CFD libraries to pool.
+    template_filter : iterable of int — restrict to these template_ids.
+    """
     # Lazy imports because this module is also used outside training contexts.
     if rl_package_path not in sys.path:
         sys.path.insert(0, rl_package_path)
@@ -72,7 +77,9 @@ def make_cfd_env(seed: int, rank: int, library_dir: str,
     def _init():
         env = GasSourceEnv(template_id=template_id)
         rng = np.random.default_rng(seed + rank)
-        sampler = CFDLibrarySampler(library_dir, rng, rl_package_path=rl_package_path)
+        sampler = CFDLibrarySampler(library_dirs, rng,
+                                    rl_package_path=rl_package_path,
+                                    template_filter=template_filter)
         wrapped = CFDLibraryEnv(env, sampler, mix_synthetic=mix_synthetic, rng=rng)
         wrapped.reset(seed=seed + rank)
         return wrapped
