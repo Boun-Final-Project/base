@@ -106,9 +106,12 @@ class GasSourceEnv(gymnasium.Env):
             wind_field = options.get("wind_field")        # may be None
             gas_field  = options.get("gas_field")         # may be None (ReplayGasSource)
             self._last_template_id = None  # GADEN eval: template ID not applicable
-            # Injected map = GADEN-eval: match the deployment node's walk-back
-            # collision motion. Caller can override with options["deploy_motion"].
-            self._deploy_motion = bool(options.get("deploy_motion", True))
+            # Deployment walk-back collision motion is opt-in via
+            # options["deploy_motion"] (the GADEN eval harness sets it True).
+            # Default False so injected-map TRAINING paths (e.g. the CFD wind
+            # library, which injects map_data+wind_field every reset) keep the
+            # all-or-nothing training motion the policy is trained against.
+            self._deploy_motion = bool(options.get("deploy_motion", False))
         else:
             tid = self._template_id
             if tid is None and self._max_template_id is not None:
