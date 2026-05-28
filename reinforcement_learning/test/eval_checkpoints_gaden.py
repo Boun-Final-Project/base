@@ -131,7 +131,7 @@ def load_maps(gaden_root: Path, map_keys):
 
 
 def eval_run(run_dir, full_maps, map_keys, episodes_per_map, device,
-             output_dir, latest_only=False):
+             output_dir, latest_only=False, incremental=False):
     run_dir  = Path(run_dir)
     ckpt_dir = run_dir / "checkpoints"
     run_cfg  = load_run_config(run_dir)
@@ -145,6 +145,22 @@ def eval_run(run_dir, full_maps, map_keys, episodes_per_map, device,
         return
     if latest_only:
         ckpt_files = ckpt_files[-1:]
+
+    # Incremental mode: skip checkpoints already in the saved npz, then merge.
+    # Eval is deterministic (fixed seeds), so already-done steps need no redo.
+    prev = None
+    if incremental:
+        out_path_existing = os.path.join(output_dir, f"{run_dir.name}.npz")
+        if os.path.exists(out_path_existing):
+            prev = np.load(out_path_existing, allow_pickle=True)
+            done_steps = set(int(s) for s in prev["steps"])
+            ckpt_files = [p for p in ckpt_files
+                          if int(p.stem.split("_")[1]) not in done_steps]
+            if not ckpt_files:
+                print(f"  [incremental] no new checkpoints for {run_dir.name}.")
+                return
+            print(f"  [incremental] {len(ckpt_files)} new checkpoint(s); "
+                  f"{len(done_steps)} already done.")
 
     n_maps  = len(full_maps)
     n_ckpts = len(ckpt_files)
@@ -181,6 +197,14 @@ def eval_run(run_dir, full_maps, map_keys, episodes_per_map, device,
         for k, v in orig.items():
             setattr(cfg, k, v)
 
+    # Merge with previously-saved results (incremental mode).
+    if incremental and prev is not None:
+        steps     = np.concatenate([prev["steps"], steps])
+        returns   = np.concatenate([prev["returns"], returns], axis=0)
+        successes = np.concatenate([prev["successes"], successes], axis=0)
+        order     = np.argsort(steps)
+        steps, returns, successes = steps[order], returns[order], successes[order]
+
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, f"{run_dir.name}.npz")
     np.savez(
@@ -211,6 +235,9 @@ def main():
     parser.add_argument("--device",           type=str, default=None)
     parser.add_argument("--latest-only",      action="store_true", default=False,
                         help="Only evaluate the newest checkpoint per run")
+    parser.add_argument("--incremental",      action="store_true", default=False,
+                        help="Skip checkpoints already in the saved npz and "
+                             "merge new results (for a live training-curve watcher)")
     args = parser.parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -220,7 +247,8 @@ def main():
 
     for run_dir in args.run_dirs:
         eval_run(run_dir, full_maps, args.maps, args.episodes_per_map,
-                 device, args.output_dir, latest_only=args.latest_only)
+                 device, args.output_dir, latest_only=args.latest_only,
+                 incremental=args.incremental)
 
 
 if __name__ == "__main__":
