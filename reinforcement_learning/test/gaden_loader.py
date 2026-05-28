@@ -53,6 +53,20 @@ DEFAULT_MAP_KEYS = list(MAP_NAME_ALIASES.keys())
 
 _WIND_CSV_REL  = Path("wind_simulations/1ms/wind_at_cell_centers_0.csv")
 _CONFIG_REL    = Path("environment_configurations/config1/config.yaml")
+_OCC_CSV_REL   = Path("environment_configurations/config1/OccupancyGrid3D.csv")
+
+# Where GADEN's preprocessed OccupancyGrid3D.csv lives (the install scenarios
+# tree). The Python harness re-rasterized walls.stl, which produced ~10pp wider
+# corridors than GADEN's own occupancy at z_level=5 — the cause of the
+# labyrinth over-success vs real deployment. Prefer GADEN's grid so the eval
+# robot navigates the IDENTICAL occupancy the deployment node clamps against.
+# Folder names match between gaden_maps/ and the scenarios tree.
+_GADEN_SCENARIOS_ROOT = Path(
+    "/home/efe/ros2_ws/install/test_env/share/test_env/scenarios"
+)
+# z-slice that deployment uses (gaden_rl_node occupancy_z_level default = 5,
+# i.e. z in [0.5, 0.6) m — matches the STL slice height ~0.5 m).
+_OCC_Z_LEVEL = 5
 
 
 def resolve_map_dir(gaden_root: Path, map_key: str) -> Path:
@@ -236,6 +250,64 @@ def _rasterize_stl_walls(map_dir: Path, H: int, W: int, cell_size: float,
     return solid | (~fluid)
 
 
+def _parse_occupancy_csv(csv_path: Path, z_level: int = _OCC_Z_LEVEL):
+    """Parse GADEN's OccupancyGrid3D.csv -> (wall_mask (H,W) bool, origin_xy, cell_size).
+
+    File format (from gaden Environment::WriteToFile):
+        #env_min(m) x y z
+        #env_max(m) x y z
+        #num_cells nx ny nz
+        #cell_size(m) c
+        then nz z-layers, each ny rows of nx ints, layers separated by ';'.
+    Cell values: 0 free, 1 wall, 2 outlet. Deployment treats (>0) as wall
+    (gaden_rl_node / load_3d_occupancy_grid_from_service do grid_2d>0), so we
+    mirror that — outlets are obstacles for navigation (gas still flows through
+    them via the wind field, which is separate).
+    """
+    lines = csv_path.read_text().splitlines()
+    env_min = [float(v) for v in lines[0].split()[1:4]]
+    nx, ny, nz = [int(v) for v in lines[2].split()[1:4]]
+    cell_size = float(lines[3].split()[1])
+
+    layers, cur = [], []
+    for ln in lines[4:]:
+        s = ln.strip()
+        if s == ";":
+            if cur:
+                layers.append(cur); cur = []
+        elif s:
+            cur.append([int(v) for v in s.split()])
+    if cur:
+        layers.append(cur)
+
+    # GADEN writes each z-layer as nx rows (outer loop col=x) of ny values
+    # (inner loop row=y), so a layer array is (nx, ny) indexed [x, y]. The
+    # harness grid is (H, W) = (ny, nx) indexed [y, x], so transpose.
+    grid3d = np.array(layers)          # (nz, nx, ny)
+    z = max(0, min(nz - 1, z_level))
+    wall = (grid3d[z].T > 0)           # (ny, nx) = (H, W); matches deployment grid>0
+    return wall, (env_min[0], env_min[1]), cell_size
+
+
+def load_gaden_grid_from_csv(map_key: str):
+    """Build the occupancy grid from GADEN's OccupancyGrid3D.csv (z=5).
+
+    Returns (grid, origin_xy) like load_gaden_grid, but the walls and origin
+    come from GADEN's own preprocessed occupancy — identical to what the
+    deployment node navigates against — instead of re-rasterizing the STL.
+    Returns None if the CSV is not available (caller falls back to STL).
+    """
+    folder = MAP_NAME_ALIASES.get(map_key, map_key)
+    csv_path = _GADEN_SCENARIOS_ROOT / folder / _OCC_CSV_REL
+    if not csv_path.is_file():
+        return None
+    wall, origin_xy, cell_size = _parse_occupancy_csv(csv_path)
+    H, W = wall.shape
+    grid = OccupancyGrid(W * cell_size, H * cell_size, cell_size)
+    grid.grid = wall.astype(np.int8)
+    return grid, origin_xy
+
+
 def load_gaden_grid(map_dir: Path):
     """Rasterize a GADEN map's wind cloud into a 2D occupancy grid.
 
@@ -401,7 +473,14 @@ def load_full_map(gaden_root: Path, yaml_path: Path, map_key: str,
         ``options["map_data"]`` to ``GasSourceEnv.reset()``.
     """
     map_dir = resolve_map_dir(gaden_root, map_key)
-    grid, origin = load_gaden_grid(map_dir)
+    # Prefer GADEN's own occupancy (z=5) — identical to deployment's nav grid —
+    # over re-rasterizing the STL (which gave ~10pp wider corridors and caused
+    # the labyrinth over-success). Fall back to STL raster if the CSV is absent.
+    csv_grid = load_gaden_grid_from_csv(map_key)
+    if csv_grid is not None:
+        grid, origin = csv_grid
+    else:
+        grid, origin = load_gaden_grid(map_dir)
     wind_field   = load_gaden_wind_field(map_dir, grid, origin)
     spec         = load_gaden_spec(yaml_path, map_key, origin, sim_id=sim_id)
     return {
