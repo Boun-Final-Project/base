@@ -100,6 +100,12 @@ class GasSourceEnv(gymnasium.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
             self._map_gen = MapGenerator(rng=self._rng)
+            # LidarSim uses the GLOBAL np.random for its measurement noise
+            # (lidar_sim.py); without seeding it here, identical reset(seed=)
+            # produces different lidar scans across process runs, making the
+            # eval non-reproducible (borderline episodes flip solve/fail). Seed
+            # it from the episode seed so the whole eval is deterministic.
+            np.random.seed(seed % (2**32 - 1))
 
         # Map: either injected by caller (GADEN eval) or generated procedurally.
         if options is not None and "map_data" in options:
@@ -168,6 +174,12 @@ class GasSourceEnv(gymnasium.Env):
                     occupancy=~wind_field._free_mask,
                     max_speed=cfg.WIND_MAX_SPEED,
                 )
+                # GADEN_FAITHFUL_WIND anemometer noise must be reproducible per
+                # episode: seed it from this env's per-episode RNG so identical
+                # reset(seed=) gives identical wind-noise draws (not a process-
+                # global cached RNG).
+                self._wind._anemo_rng = np.random.default_rng(
+                    self._rng.integers(0, 2**31 - 1))
             self._wind.set_uniform(speed, direction)
         elif map_data.get("wind_bias") is not None:
             self._wind.randomize_biased(self._rng, float(map_data["wind_bias"]))

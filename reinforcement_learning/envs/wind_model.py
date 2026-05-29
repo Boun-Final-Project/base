@@ -157,10 +157,12 @@ class WindModel:
             # chain so the policy's local-wind obs matches the deployed topic.
             ns = float(os.environ.get("GADEN_ANEMO_NOISE_STD", "0.3"))
             if ns > 0.0:
+                # The env seeds _anemo_rng per episode (off reset(seed=)) for
+                # reproducibility. If it wasn't set (WindModel used standalone),
+                # fall back to a fixed-seed RNG created once.
                 rng = getattr(self, "_anemo_rng", None)
                 if rng is None:
-                    rng = np.random.default_rng(
-                        int(os.environ.get("GADEN_ANEMO_SEED", "0")))
+                    rng = np.random.default_rng(0)
                     self._anemo_rng = rng
                 u = uv[:, 0]; v = uv[:, 1]
                 sp2 = u * u + v * v                       # squared speed (as cpp)
