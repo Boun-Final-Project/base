@@ -75,6 +75,8 @@ class GasSourceEnv(gymnasium.Env):
         self._map_height = 0.0
         self._current_step = 0
         self._gas_history = None
+        self._deploy_motion = False  # set per-episode in reset()
+        self._sensor_noise = True     # set per-episode in reset(); see reset()
         self._trajectory = []
         self._wind_offset = None
         self._dijkstra_from_source = None
@@ -98,12 +100,31 @@ class GasSourceEnv(gymnasium.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
             self._map_gen = MapGenerator(rng=self._rng)
+            # LidarSim uses the GLOBAL np.random for its measurement noise
+            # (lidar_sim.py); without seeding it here, identical reset(seed=)
+            # produces different lidar scans across process runs, making the
+            # eval non-reproducible (borderline episodes flip solve/fail). Seed
+            # it from the episode seed so the whole eval is deterministic.
+            np.random.seed(seed % (2**32 - 1))
 
         # Map: either injected by caller (GADEN eval) or generated procedurally.
         if options is not None and "map_data" in options:
             map_data   = options["map_data"]
             wind_field = options.get("wind_field")        # may be None
+            gas_field  = options.get("gas_field")         # may be None (ReplayGasSource)
             self._last_template_id = None  # GADEN eval: template ID not applicable
+            # Deployment walk-back collision motion is opt-in via
+            # options["deploy_motion"] (the GADEN eval harness sets it True).
+            # Default False so injected-map TRAINING paths (e.g. the CFD wind
+            # library, which injects map_data+wind_field every reset) keep the
+            # all-or-nothing training motion the policy is trained against.
+            self._deploy_motion = bool(options.get("deploy_motion", False))
+            # Sensor noise: default True (training behavior). The GADEN eval
+            # harness passes sensor_noise=False to match the real ROS2 deploy
+            # pipeline, which feeds the raw (noiseless) PID concentration — so
+            # the Python eval predicts real deployment rather than injecting a
+            # sigma_env floor the deployed sensor doesn't have.
+            self._sensor_noise = bool(options.get("sensor_noise", True))
         else:
             tid = self._template_id
             if tid is None and self._max_template_id is not None:
@@ -123,6 +144,9 @@ class GasSourceEnv(gymnasium.Env):
             self._last_template_id = tid  # exposed for tests and logging
             map_data   = self._map_gen.generate(template_id=tid)
             wind_field = None
+            gas_field  = None
+            self._deploy_motion = False  # training keeps all-or-nothing motion
+            self._sensor_noise = True     # training keeps the sensor noise floor
 
         self._grid = map_data["grid"]
         self._source_pos = np.array(map_data["source_pos"], dtype=np.float64)
@@ -150,6 +174,12 @@ class GasSourceEnv(gymnasium.Env):
                     occupancy=~wind_field._free_mask,
                     max_speed=cfg.WIND_MAX_SPEED,
                 )
+                # GADEN_FAITHFUL_WIND anemometer noise must be reproducible per
+                # episode: seed it from this env's per-episode RNG so identical
+                # reset(seed=) gives identical wind-noise draws (not a process-
+                # global cached RNG).
+                self._wind._anemo_rng = np.random.default_rng(
+                    self._rng.integers(0, 2**31 - 1))
             self._wind.set_uniform(speed, direction)
         elif map_data.get("wind_bias") is not None:
             self._wind.randomize_biased(self._rng, float(map_data["wind_bias"]))
@@ -159,7 +189,16 @@ class GasSourceEnv(gymnasium.Env):
             )
 
         # Gas model selection
-        if cfg.GAS_MODEL == "filament":
+        if gas_field is not None:
+            # GADEN eval: replay the REAL stored concentration field (drop-in
+            # gas source) instead of the surrogate plume. Removes the largest
+            # eval fidelity gap — the surrogate's gas field differs in structure
+            # from real GADEN's (esp. near-homogeneous in tight curved mazes).
+            self._plume = gas_field
+            self._igdm = None
+            self._wind_offset = None
+            self._dijkstra_from_source = None
+        elif cfg.GAS_MODEL == "filament":
             self._plume = FilamentPlume(
                 source_pos=self._source_pos,
                 wind_speed=self._wind.speed,
@@ -179,8 +218,18 @@ class GasSourceEnv(gymnasium.Env):
                 # Eval: GadenWindField drives advection; self._wind gives uniform obs fallback.
                 wind_field=wind_field if wind_field is not None else self._wind,
             )
-            # Warm up the plume so step 0 has some initial filaments
-            for _ in range(cfg.FILAMENT_WARMUP_STEPS):
+            # Warm up the plume so step 0 has some initial filaments. For GADEN
+            # eval maps, warm to the scenario's playback start_time (real GADEN
+            # begins playback at start_time s, by which point the plume has
+            # dispersed for minutes — saturating large maps). Procedural
+            # training keeps the short fresh-dispersion warmup. start_time is in
+            # seconds; convert to filament steps via FILAMENT_DT.
+            start_time = float(map_data.get("start_time", 0) or 0)
+            if start_time > 0:
+                warmup_steps = int(round(start_time / cfg.FILAMENT_DT))
+            else:
+                warmup_steps = cfg.FILAMENT_WARMUP_STEPS
+            for _ in range(warmup_steps):
                 self._plume.update()
             self._igdm = None
             self._wind_offset = None
@@ -247,7 +296,8 @@ class GasSourceEnv(gymnasium.Env):
             conc = self._plume.concentration_at(self._robot_pos)
         else:
             conc = self._get_concentration_igdm()
-        noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
+        noisy = conc + (self._rng.normal(0, self._sensor.get_std(conc))
+                        if self._sensor_noise else 0.0)
         self._last_noisy = noisy
         self._sensor.initialize_threshold(noisy)
         # First reading is always 0 by definition (at threshold)
@@ -270,6 +320,23 @@ class GasSourceEnv(gymnasium.Env):
         info = self._build_info(0.0, False, 0)
         return obs, info
 
+    def _clamp_to_free(self, rx, ry, tx, ty, theta):
+        """Validate target; if blocked, walk back along the ray until free.
+
+        Mirrors gaden_transfer_lidar/gaden_rl_node._clamp_to_free so eval
+        motion matches deployment. Returns (x, y, collided).
+        """
+        if self._grid.is_valid(position=(tx, ty), radius=cfg.ROBOT_RADIUS):
+            return tx, ty, False
+        step = cfg.STEP_SIZE - 0.05
+        while step >= 0.1:
+            cx = rx + step * np.cos(theta)
+            cy = ry + step * np.sin(theta)
+            if self._grid.is_valid(position=(cx, cy), radius=cfg.ROBOT_RADIUS):
+                return cx, cy, True
+            step -= 0.05
+        return rx, ry, True
+
     def step(self, action):
         action = np.asarray(action).flatten()
         if len(action) == 1:
@@ -286,13 +353,26 @@ class GasSourceEnv(gymnasium.Env):
         dy = cfg.STEP_SIZE * np.sin(theta)
         new_pos = self._robot_pos + np.array([dx, dy])
 
-        # Collision check
-        collision = not self._grid.is_valid(
-            position=(new_pos[0], new_pos[1]),
-            radius=cfg.ROBOT_RADIUS,
-        )
-        if not collision:
-            self._robot_pos = new_pos
+        if self._deploy_motion:
+            # Match the deployment node's _clamp_to_free: if the full-step
+            # target is blocked, walk back along the ray in 0.05 m decrements
+            # until a free cell is found (robot creeps up to the wall and stops
+            # short) instead of the all-or-nothing "stay put" used in training.
+            # This removes the frictionless wall-hugging that made the Python
+            # eval over-succeed on tight-corridor maps vs real GADEN.
+            cx, cy, collision = self._clamp_to_free(
+                self._robot_pos[0], self._robot_pos[1],
+                new_pos[0], new_pos[1], theta,
+            )
+            self._robot_pos = np.array([cx, cy], dtype=np.float64)
+        else:
+            # Collision check (training: all-or-nothing full step)
+            collision = not self._grid.is_valid(
+                position=(new_pos[0], new_pos[1]),
+                radius=cfg.ROBOT_RADIUS,
+            )
+            if not collision:
+                self._robot_pos = new_pos
 
         self._trajectory.append(self._robot_pos.copy())
 
@@ -303,7 +383,8 @@ class GasSourceEnv(gymnasium.Env):
         else:
             conc = self._get_concentration_igdm()
 
-        noisy = conc + self._rng.normal(0, self._sensor.get_std(conc))
+        noisy = conc + (self._rng.normal(0, self._sensor.get_std(conc))
+                        if self._sensor_noise else 0.0)
         self._last_noisy = noisy
         self._sensor.update_threshold(noisy)
         binary = self._sensor.get_binary_measurement(noisy)

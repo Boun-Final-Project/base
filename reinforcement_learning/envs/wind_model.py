@@ -7,6 +7,7 @@ provided so that WindModel also serves as the ``wind_field`` argument to
 FilamentPlume during training (bilinear-interpolated queries).
 """
 
+import os
 import numpy as np
 
 
@@ -136,6 +137,42 @@ class WindModel:
             positions = positions[np.newaxis, :]   # (2,) → (1, 2)
         if positions.size == 0:
             return np.zeros((0, 2), dtype=np.float64)
+
+        # GADEN-faithful: the deployed anemometer reads the wind of the robot's
+        # single cell (nearest-cell), with no bilinear blend. Match that so the
+        # eval's local-wind obs equals what ROS2 feeds the policy.
+        if os.environ.get("GADEN_FAITHFUL_WIND", "0") == "1":
+            res = self._resolution
+            cols = np.clip(np.floor(positions[:, 0] / res).astype(np.int64), 0, self.W - 1)
+            rows = np.clip(np.floor(positions[:, 1] / res).astype(np.int64), 0, self.H - 1)
+            uv = self._field[rows, cols].astype(np.float64)
+
+            # Replicate fake_anemometer.cpp noise (noise_std=0.3 in the deploy
+            # launch). The anemometer works in (speed^2, dir) space:
+            #   wind_speed   = u^2 + v^2                 (squared — the units quirk)
+            #   wind_dir     = atan2(v, u)
+            #   dir   += N(0, noise_std)
+            #   speed += N(0, noise_std) * 0.1, clamped >= 0
+            # The deploy node then takes sqrt(speed). We reproduce that exact
+            # chain so the policy's local-wind obs matches the deployed topic.
+            ns = float(os.environ.get("GADEN_ANEMO_NOISE_STD", "0.3"))
+            if ns > 0.0:
+                # The env seeds _anemo_rng per episode (off reset(seed=)) for
+                # reproducibility. If it wasn't set (WindModel used standalone),
+                # fall back to a fixed-seed RNG created once.
+                rng = getattr(self, "_anemo_rng", None)
+                if rng is None:
+                    rng = np.random.default_rng(0)
+                    self._anemo_rng = rng
+                u = uv[:, 0]; v = uv[:, 1]
+                sp2 = u * u + v * v                       # squared speed (as cpp)
+                direction = np.arctan2(v, u)
+                direction = direction + rng.normal(0.0, ns, size=direction.shape)
+                sp2 = np.maximum(0.0, sp2 + rng.normal(0.0, ns, size=sp2.shape) * 0.1)
+                speed = np.sqrt(sp2)                      # deploy node's sqrt fix
+                uv = np.stack([speed * np.cos(direction),
+                               speed * np.sin(direction)], axis=1)
+            return uv
 
         x = positions[:, 0]
         y = positions[:, 1]

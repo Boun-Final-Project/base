@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import csv
+import os
 import struct
 
 import numpy as np
@@ -53,6 +54,46 @@ DEFAULT_MAP_KEYS = list(MAP_NAME_ALIASES.keys())
 
 _WIND_CSV_REL  = Path("wind_simulations/1ms/wind_at_cell_centers_0.csv")
 _CONFIG_REL    = Path("environment_configurations/config1/config.yaml")
+_OCC_CSV_REL   = Path("environment_configurations/config1/OccupancyGrid3D.csv")
+
+# Where GADEN's preprocessed OccupancyGrid3D.csv + result/iteration_<N> live
+# (the built test_env scenarios tree). The Python harness re-rasterized
+# walls.stl, which produced ~10pp wider corridors than GADEN's own occupancy at
+# z_level=5 — the cause of the labyrinth over-success vs real deployment. Prefer
+# GADEN's grid so the eval robot navigates the IDENTICAL occupancy the
+# deployment node clamps against. Folder names match between gaden_maps/ and the
+# scenarios tree.
+#
+# Machine-portable resolution (no hardcoded user path):
+#   1. $GADEN_SCENARIOS_ROOT env var if set;
+#   2. else search common ros2_ws layouts relative to $ROS2_WS / cwd / home.
+# If none is found this is None, and callers fall back to STL raster / the
+# surrogate plume (so the harness still runs, just without GADEN-grid/real-gas).
+def _find_scenarios_root():
+    env = os.environ.get("GADEN_SCENARIOS_ROOT")
+    if env:
+        return Path(env)
+    rel = "install/test_env/share/test_env/scenarios"
+    candidates = []
+    ws = os.environ.get("ROS2_WS")
+    if ws:
+        candidates.append(Path(ws) / rel)
+    # walk up from this file to find a ros2_ws-style dir
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidates.append(parent / rel)
+        candidates.append(parent / "share/test_env/scenarios")
+    candidates.append(Path.home() / "ros2_ws" / rel)
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+_GADEN_SCENARIOS_ROOT = _find_scenarios_root()
+# z-slice that deployment uses (gaden_rl_node occupancy_z_level default = 5,
+# i.e. z in [0.5, 0.6) m — matches the STL slice height ~0.5 m).
+_OCC_Z_LEVEL = 5
 
 
 def resolve_map_dir(gaden_root: Path, map_key: str) -> Path:
@@ -236,6 +277,84 @@ def _rasterize_stl_walls(map_dir: Path, H: int, W: int, cell_size: float,
     return solid | (~fluid)
 
 
+_RESULT_REL = Path("environment_configurations/config1/simulations/sim1/result")
+
+
+def resolve_result_dir(map_key: str, sim_id: str = "sim1"):
+    """Path to a map's stored GADEN gas snapshots (result/iteration_<N>), or None.
+
+    Used by the eval harness to replay the REAL concentration field instead of
+    the surrogate plume. Folder names match between gaden_maps/ and the install
+    scenarios tree.
+    """
+    if _GADEN_SCENARIOS_ROOT is None:
+        return None
+    folder = MAP_NAME_ALIASES.get(map_key, map_key)
+    rel = Path("environment_configurations/config1/simulations") / sim_id / "result"
+    result_dir = _GADEN_SCENARIOS_ROOT / folder / rel
+    return result_dir if result_dir.is_dir() else None
+
+
+def _parse_occupancy_csv(csv_path: Path, z_level: int = _OCC_Z_LEVEL):
+    """Parse GADEN's OccupancyGrid3D.csv -> (wall_mask (H,W) bool, origin_xy, cell_size).
+
+    File format (from gaden Environment::WriteToFile):
+        #env_min(m) x y z
+        #env_max(m) x y z
+        #num_cells nx ny nz
+        #cell_size(m) c
+        then nz z-layers, each ny rows of nx ints, layers separated by ';'.
+    Cell values: 0 free, 1 wall, 2 outlet. Deployment treats (>0) as wall
+    (gaden_rl_node / load_3d_occupancy_grid_from_service do grid_2d>0), so we
+    mirror that — outlets are obstacles for navigation (gas still flows through
+    them via the wind field, which is separate).
+    """
+    lines = csv_path.read_text().splitlines()
+    env_min = [float(v) for v in lines[0].split()[1:4]]
+    nx, ny, nz = [int(v) for v in lines[2].split()[1:4]]
+    cell_size = float(lines[3].split()[1])
+
+    layers, cur = [], []
+    for ln in lines[4:]:
+        s = ln.strip()
+        if s == ";":
+            if cur:
+                layers.append(cur); cur = []
+        elif s:
+            cur.append([int(v) for v in s.split()])
+    if cur:
+        layers.append(cur)
+
+    # GADEN writes each z-layer as nx rows (outer loop col=x) of ny values
+    # (inner loop row=y), so a layer array is (nx, ny) indexed [x, y]. The
+    # harness grid is (H, W) = (ny, nx) indexed [y, x], so transpose.
+    grid3d = np.array(layers)          # (nz, nx, ny)
+    z = max(0, min(nz - 1, z_level))
+    wall = (grid3d[z].T > 0)           # (ny, nx) = (H, W); matches deployment grid>0
+    return wall, (env_min[0], env_min[1]), cell_size
+
+
+def load_gaden_grid_from_csv(map_key: str):
+    """Build the occupancy grid from GADEN's OccupancyGrid3D.csv (z=5).
+
+    Returns (grid, origin_xy) like load_gaden_grid, but the walls and origin
+    come from GADEN's own preprocessed occupancy — identical to what the
+    deployment node navigates against — instead of re-rasterizing the STL.
+    Returns None if the CSV is not available (caller falls back to STL).
+    """
+    if _GADEN_SCENARIOS_ROOT is None:
+        return None
+    folder = MAP_NAME_ALIASES.get(map_key, map_key)
+    csv_path = _GADEN_SCENARIOS_ROOT / folder / _OCC_CSV_REL
+    if not csv_path.is_file():
+        return None
+    wall, origin_xy, cell_size = _parse_occupancy_csv(csv_path)
+    H, W = wall.shape
+    grid = OccupancyGrid(W * cell_size, H * cell_size, cell_size)
+    grid.grid = wall.astype(np.int8)
+    return grid, origin_xy
+
+
 def load_gaden_grid(map_dir: Path):
     """Rasterize a GADEN map's wind cloud into a 2D occupancy grid.
 
@@ -302,6 +421,48 @@ class GadenWindField:
 
     def max_speed(self) -> float:
         return self._max_speed
+
+
+def load_served_wind_field(map_key: str, grid: OccupancyGrid,
+                           origin_xy: tuple[float, float],
+                           anemometer_z: float = 0.5) -> "GadenWindField":
+    """GADEN-FAITHFUL wind: read the SAME binary wind grid GADEN serves and
+    take the single z=anemometer_z layer, queried nearest-cell — exactly what
+    the deployed anemometer samples. Unlike load_gaden_wind_field (which
+    z-collapses every layer and EDT-fills gaps), this contains no information
+    a real point sensor at the anemometer height could not measure, so the eval
+    score predicts ROS2 deployment instead of overstating it.
+
+    Falls back to the z-collapsed+EDT field if the served binary grid is absent.
+    """
+    if _GADEN_SCENARIOS_ROOT is None:
+        return load_gaden_wind_field(resolve_map_dir(None, map_key), grid, origin_xy)
+    folder = MAP_NAME_ALIASES.get(map_key, map_key)
+    wind_bin = (_GADEN_SCENARIOS_ROOT / folder /
+                "environment_configurations/config1/wind/wind_iteration_0")
+    H, W = grid.grid.shape
+    occupancy = (grid.grid != 0)
+    nz_dim = None
+    # dims from OccupancyGrid3D.csv (#num_cells nx ny nz)
+    occ_csv = _GADEN_SCENARIOS_ROOT / folder / _OCC_CSV_REL
+    if occ_csv.is_file():
+        for line in occ_csv.open():
+            if line.startswith("#num_cells"):
+                _nx, _ny, nz_dim = (int(v) for v in line.split()[1:4])
+                break
+    if not wind_bin.is_file() or nz_dim is None or _nx != W or _ny != H:
+        # served grid unavailable or shape mismatch -> safe fallback
+        return load_gaden_wind_field(_GADEN_SCENARIOS_ROOT / folder, grid, origin_xy)
+
+    with wind_bin.open("rb") as f:
+        f.read(8)  # versionMajor, versionMinor (two int32)
+        data = np.frombuffer(f.read(), dtype=np.float32)[: W * H * nz_dim * 3]
+    vol = data.reshape(nz_dim, H, W, 3)            # GADEN layout: z, y, x
+    zc = int(round(anemometer_z / grid.resolution))
+    zc = max(0, min(nz_dim - 1, zc))
+    field = vol[zc, :, :, :2].astype(np.float64)   # (H, W, 2) Ux, Uy
+    field[occupancy] = 0.0
+    return GadenWindField(field, grid.resolution, occupancy)
 
 
 def load_gaden_wind_field(map_dir: Path, grid: OccupancyGrid,
@@ -401,8 +562,21 @@ def load_full_map(gaden_root: Path, yaml_path: Path, map_key: str,
         ``options["map_data"]`` to ``GasSourceEnv.reset()``.
     """
     map_dir = resolve_map_dir(gaden_root, map_key)
-    grid, origin = load_gaden_grid(map_dir)
-    wind_field   = load_gaden_wind_field(map_dir, grid, origin)
+    # Prefer GADEN's own occupancy (z=5) — identical to deployment's nav grid —
+    # over re-rasterizing the STL (which gave ~10pp wider corridors and caused
+    # the labyrinth over-success). Fall back to STL raster if the CSV is absent.
+    csv_grid = load_gaden_grid_from_csv(map_key)
+    if csv_grid is not None:
+        grid, origin = csv_grid
+    else:
+        grid, origin = load_gaden_grid(map_dir)
+    # GADEN_FAITHFUL_WIND=1: read the exact single-z-layer wind GADEN serves
+    # (nearest-cell), so the eval predicts ROS2 deployment. Default (unset) keeps
+    # the z-collapsed + EDT-filled field for backward comparison.
+    if os.environ.get("GADEN_FAITHFUL_WIND", "0") == "1":
+        wind_field = load_served_wind_field(map_key, grid, origin)
+    else:
+        wind_field = load_gaden_wind_field(map_dir, grid, origin)
     spec         = load_gaden_spec(yaml_path, map_key, origin, sim_id=sim_id)
     return {
         "grid":       grid,
