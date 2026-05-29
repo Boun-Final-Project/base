@@ -423,6 +423,48 @@ class GadenWindField:
         return self._max_speed
 
 
+def load_served_wind_field(map_key: str, grid: OccupancyGrid,
+                           origin_xy: tuple[float, float],
+                           anemometer_z: float = 0.5) -> "GadenWindField":
+    """GADEN-FAITHFUL wind: read the SAME binary wind grid GADEN serves and
+    take the single z=anemometer_z layer, queried nearest-cell — exactly what
+    the deployed anemometer samples. Unlike load_gaden_wind_field (which
+    z-collapses every layer and EDT-fills gaps), this contains no information
+    a real point sensor at the anemometer height could not measure, so the eval
+    score predicts ROS2 deployment instead of overstating it.
+
+    Falls back to the z-collapsed+EDT field if the served binary grid is absent.
+    """
+    if _GADEN_SCENARIOS_ROOT is None:
+        return load_gaden_wind_field(resolve_map_dir(None, map_key), grid, origin_xy)
+    folder = MAP_NAME_ALIASES.get(map_key, map_key)
+    wind_bin = (_GADEN_SCENARIOS_ROOT / folder /
+                "environment_configurations/config1/wind/wind_iteration_0")
+    H, W = grid.grid.shape
+    occupancy = (grid.grid != 0)
+    nz_dim = None
+    # dims from OccupancyGrid3D.csv (#num_cells nx ny nz)
+    occ_csv = _GADEN_SCENARIOS_ROOT / folder / _OCC_CSV_REL
+    if occ_csv.is_file():
+        for line in occ_csv.open():
+            if line.startswith("#num_cells"):
+                _nx, _ny, nz_dim = (int(v) for v in line.split()[1:4])
+                break
+    if not wind_bin.is_file() or nz_dim is None or _nx != W or _ny != H:
+        # served grid unavailable or shape mismatch -> safe fallback
+        return load_gaden_wind_field(_GADEN_SCENARIOS_ROOT / folder, grid, origin_xy)
+
+    with wind_bin.open("rb") as f:
+        f.read(8)  # versionMajor, versionMinor (two int32)
+        data = np.frombuffer(f.read(), dtype=np.float32)[: W * H * nz_dim * 3]
+    vol = data.reshape(nz_dim, H, W, 3)            # GADEN layout: z, y, x
+    zc = int(round(anemometer_z / grid.resolution))
+    zc = max(0, min(nz_dim - 1, zc))
+    field = vol[zc, :, :, :2].astype(np.float64)   # (H, W, 2) Ux, Uy
+    field[occupancy] = 0.0
+    return GadenWindField(field, grid.resolution, occupancy)
+
+
 def load_gaden_wind_field(map_dir: Path, grid: OccupancyGrid,
                           origin_xy: tuple[float, float]) -> GadenWindField:
     """Build the (H, W, 2) z-collapsed wind field for a GADEN map.
@@ -528,7 +570,13 @@ def load_full_map(gaden_root: Path, yaml_path: Path, map_key: str,
         grid, origin = csv_grid
     else:
         grid, origin = load_gaden_grid(map_dir)
-    wind_field   = load_gaden_wind_field(map_dir, grid, origin)
+    # GADEN_FAITHFUL_WIND=1: read the exact single-z-layer wind GADEN serves
+    # (nearest-cell), so the eval predicts ROS2 deployment. Default (unset) keeps
+    # the z-collapsed + EDT-filled field for backward comparison.
+    if os.environ.get("GADEN_FAITHFUL_WIND", "0") == "1":
+        wind_field = load_served_wind_field(map_key, grid, origin)
+    else:
+        wind_field = load_gaden_wind_field(map_dir, grid, origin)
     spec         = load_gaden_spec(yaml_path, map_key, origin, sim_id=sim_id)
     return {
         "grid":       grid,
