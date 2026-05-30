@@ -13,6 +13,7 @@ The only difference from train.py is:
 """
 
 import argparse
+import json
 import os
 import time
 
@@ -29,14 +30,16 @@ if __package__ is None or __package__ == "":
     from reinforcement_learning.models.actor_critic import ActorCriticTeacher
     from reinforcement_learning.training.distil_ppo import DistilRolloutBuffer, teacher_ppo_update
     from reinforcement_learning.training.ppo import RunningMeanStd, compute_gae
-    from reinforcement_learning.training.train import VecEnv, get_curriculum_ranges, get_template_curriculum
+    from reinforcement_learning.training.train import (
+        VecEnv, get_curriculum_ranges, get_template_curriculum, plot_training_curves)
 else:
     from .. import config as cfg
     from ..envs.gas_source_env import GasSourceEnv
     from ..models.actor_critic import ActorCriticTeacher
     from .distil_ppo import DistilRolloutBuffer, teacher_ppo_update
     from .ppo import RunningMeanStd, compute_gae
-    from .train import VecEnv, get_curriculum_ranges, get_template_curriculum
+    from .train import (
+        VecEnv, get_curriculum_ranges, get_template_curriculum, plot_training_curves)
 
 
 def make_env(seed, rank, template_id=None):
@@ -85,8 +88,35 @@ def train(args):
     ep_length_running = np.zeros(args.num_envs, dtype=int)
     episode_returns, episode_lengths, episode_successes = [], [], []
 
+    # Per-update metrics for plotting
+    metrics = {
+        "steps": [],
+        "mean_return": [],
+        "mean_length": [],
+        "success_rate": [],
+        "policy_loss": [],
+        "value_loss": [],
+        "entropy": [],
+        "approx_kl": [],
+        "clipfrac": [],
+        "reward_per_step": [],
+        "sps": [],
+    }
+
     ckpt_dir = os.path.join(args.output_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
+
+    print(f"\nTraining for {args.total_timesteps:,} timesteps "
+          f"({num_updates} updates, {args.rollout_length * args.num_envs} steps/update)")
+    print(f"Envs: {args.num_envs}, Rollout: {args.rollout_length}, "
+          f"Minibatches: {args.num_minibatches}, Epochs: {args.update_epochs}")
+    print()
+
+    # Save config snapshot (CLI args used for this run)
+    config_path = os.path.join(args.output_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(vars(args), f, indent=2)
+    print(f"Config saved to {config_path}")
 
     obs, _ = vec_env.reset()
     # Register initial maps for all envs.
@@ -197,15 +227,32 @@ def train(args):
         else:
             mean_ret = mean_len = success_rate = 0.0
 
+        # Record metrics every update
+        metrics["steps"].append(global_step)
+        metrics["mean_return"].append(mean_ret)
+        metrics["mean_length"].append(mean_len)
+        metrics["success_rate"].append(success_rate)
+        metrics["policy_loss"].append(stats["policy_loss"])
+        metrics["value_loss"].append(stats["value_loss"])
+        metrics["entropy"].append(stats["entropy"])
+        metrics["approx_kl"].append(stats["approx_kl"])
+        metrics["clipfrac"].append(stats["clipfrac"])
+        metrics["reward_per_step"].append(mean_ret / max(mean_len, 1))
+        metrics["sps"].append(sps)
+
         if update % args.log_interval == 0 or update == 1:
             print(
                 f"Update {update:4d}/{num_updates} | "
-                f"Step {global_step:>9,} | SPS {sps:5.0f} | "
-                f"Return {mean_ret:7.1f} | EpLen {mean_len:5.0f} | "
+                f"Step {global_step:>9,} | "
+                f"SPS {sps:5.0f} | "
+                f"Return {mean_ret:7.1f} | "
+                f"EpLen {mean_len:5.0f} | "
                 f"Succ {success_rate:4.0%} | "
                 f"PgLoss {stats['policy_loss']:7.4f} | "
                 f"VLoss {stats['value_loss']:8.2f} | "
-                f"Ent {stats['entropy']:6.3f}"
+                f"Ent {stats['entropy']:6.3f} | "
+                f"KL {stats['approx_kl']:.4f} | "
+                f"Clip {stats['clipfrac']:.3f}"
             )
 
         # === Checkpoint ===
@@ -220,7 +267,23 @@ def train(args):
             print(f"  Saved: {path}")
 
     vec_env.close()
-    print(f"\nPhase 1 complete. {global_step:,} steps in {time.time()-start_time:.0f}s")
+
+    total_time = time.time() - start_time
+    print(f"\nPhase 1 complete. {global_step:,} steps in {total_time:.0f}s "
+          f"({global_step / total_time:.0f} SPS)")
+    if episode_returns:
+        print(f"Final avg return (last 50): {np.mean(episode_returns[-50:]):.1f}")
+        print(f"Final avg length (last 50): {np.mean(episode_lengths[-50:]):.0f}")
+        print(f"Final success rate (last 50): "
+              f"{np.mean(episode_successes[-50:]):.0%}")
+
+    # Save metrics and plot
+    metrics_path = os.path.join(args.output_dir, "metrics.npz")
+    np.savez(metrics_path, **{k: np.array(v) for k, v in metrics.items()})
+    print(f"Metrics saved to {metrics_path}")
+
+    plot_path = os.path.join(args.output_dir, "training_curves.png")
+    plot_training_curves(metrics, plot_path)
 
 
 def parse_args():
@@ -244,8 +307,8 @@ def parse_args():
     p.add_argument("--anneal-lr",       action="store_true")
     p.add_argument("--resume",          type=str,   default=None)
     p.add_argument("--output-dir",      type=str,   default="runs/teacher")
-    p.add_argument("--log-interval",    type=int,   default=10)
-    p.add_argument("--save-interval",   type=int,   default=100)
+    p.add_argument("--log-interval",    type=int,   default=1)
+    p.add_argument("--save-interval",   type=int,   default=50)
     return p.parse_args()
 
 

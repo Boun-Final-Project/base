@@ -28,8 +28,14 @@ class MapCNN(nn.Module):
         Layer 5: stride=2  — (64,  10,  13) — cross-room layout
         Flatten + Linear   — (MAP_FEAT_DIM,)
 
-    BatchNorm2d after each conv stabilises training across 5 layers of
-    stride-2 compression.
+    GroupNorm after each conv stabilises training across 5 layers of
+    stride-2 compression. GroupNorm (not BatchNorm) is used deliberately:
+    its statistics are per-sample, so the encoder is independent of batch
+    size/composition and behaves identically in train() and eval(). This
+    matters because the teacher is an on-policy PPO actor — BatchNorm would
+    make the policy batch-dependent and corrupt the importance ratio between
+    rollout (small batch) and update (large minibatch), and would shift the
+    policy when the teacher is frozen with eval() during distillation.
     """
 
     def __init__(self, map_feat_dim: int = cfg.MAP_FEAT_DIM):
@@ -37,23 +43,23 @@ class MapCNN(nn.Module):
         self.cnn = nn.Sequential(
             # Layer 1 — stride 1, preserve fine structure
             nn.Conv2d(2, 16, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(16),
+            nn.GroupNorm(4, 16),
             nn.ReLU(inplace=True),
-            # Layer 2 — stride 2 → (16, 75, 100)
+            # Layer 2 — stride 2 → (32, 75, 100)
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(32),
+            nn.GroupNorm(8, 32),
             nn.ReLU(inplace=True),
-            # Layer 3 — stride 2 → (32, 38, 50)
+            # Layer 3 — stride 2 → (64, 38, 50)
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.GroupNorm(8, 64),
             nn.ReLU(inplace=True),
             # Layer 4 — stride 2 → (64, 19, 25)
             nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.GroupNorm(8, 64),
             nn.ReLU(inplace=True),
             # Layer 5 — stride 2 → (64, 10, 13)
             nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.GroupNorm(8, 64),
             nn.ReLU(inplace=True),
         )
         # 64 * 10 * 13 = 8320
