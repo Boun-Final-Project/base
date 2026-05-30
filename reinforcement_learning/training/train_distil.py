@@ -122,7 +122,7 @@ def train(args):
           f"({num_updates} updates, {args.rollout_length * args.num_envs} steps/update)")
     print(f"Envs: {args.num_envs}, Rollout: {args.rollout_length}, "
           f"Minibatches: {args.num_minibatches}, Epochs: {args.update_epochs}, "
-          f"DistilLambda: {args.distil_lambda}")
+          f"DistilLambda: {args.distil_lambda}, DistilFrom: {args.distil_from}")
     print()
 
     # Save config snapshot (CLI args used for this run)
@@ -214,6 +214,7 @@ def train(args):
             args.clip_epsilon, args.entropy_coeff, args.value_loss_coeff,
             args.max_grad_norm, args.update_epochs, args.num_minibatches,
             args.distil_lambda, device, target_kl=args.target_kl,
+            distil_from_map=(args.distil_from == "on"),
         )
 
         # === Logging ===
@@ -294,6 +295,8 @@ def parse_args():
     p.add_argument("--total-timesteps", type=int,   default=cfg.TOTAL_TIMESTEPS)
     p.add_argument("--lr",              type=float, default=cfg.LEARNING_RATE)
     p.add_argument("--distil-lambda",   type=float, default=cfg.DISTIL_LAMBDA)
+    p.add_argument("--distil-from",     choices=["on", "off"], default="on",
+                   help="query the frozen teacher with the real (on) or blank (off) map")
     p.add_argument("--num-envs",        type=int,   default=cfg.NUM_ENVS)
     p.add_argument("--rollout-length",  type=int,   default=cfg.ROLLOUT_LENGTH)
     p.add_argument("--num-minibatches", type=int,   default=cfg.NUM_MINIBATCHES)

@@ -158,3 +158,4 @@ MAP_CANVAS_W        = int(2 * MAP_HALF_W / MAP_DOWNSAMPLE_RES)  # cells — 200 
 MAP_CANVAS_H        = int(2 * MAP_HALF_H / MAP_DOWNSAMPLE_RES)  # cells — 150 with defaults
 MAP_FEAT_DIM        = 128    # MapCNN output dimension
 DISTIL_LAMBDA       = 0.5    # fixed KL weight in student loss
+MAP_DROPOUT_P       = 0.3    # fraction of teacher episodes trained with a blank map

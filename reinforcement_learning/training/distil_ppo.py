@@ -63,8 +63,13 @@ def build_map_canvases(
     agent_positions: np.ndarray,   # (B, 2)  float32, world coords
     map_ids: np.ndarray,           # (B,)    int32, keys into map_registry
     map_registry: dict,            # int → np.ndarray (H_ds, W_ds) at MAP_DOWNSAMPLE_RES
+    dropped: np.ndarray | None = None,  # (B,) bool — True rows are blanked to zeros
 ) -> torch.Tensor:                 # (B, 2, MAP_CANVAS_H, MAP_CANVAS_W)
-    """Reconstruct ego-centric map canvases for a minibatch on-the-fly."""
+    """Reconstruct ego-centric map canvases for a minibatch on-the-fly.
+
+    Rows flagged in ``dropped`` are returned as all-zero canvases (the
+    "map withheld" signal used by teacher map-dropout training).
+    """
     B = len(agent_positions)
     canvases = np.zeros(
         (B, 2, cfg.MAP_CANVAS_H, cfg.MAP_CANVAS_W), dtype=np.float32
@@ -100,6 +105,8 @@ def build_map_canvases(
             )
             canvases[i, 1, dst_y0:dst_y1, dst_x0:dst_x1] = 1.0
 
+    if dropped is not None:
+        canvases[np.asarray(dropped, dtype=bool)] = 0.0
     return torch.from_numpy(canvases)
 
 
@@ -114,6 +121,7 @@ class DistilRolloutBuffer(RolloutBuffer):
         super().__init__(num_steps, num_envs, obs_dim, action_dim, device)
         self.agent_positions = np.zeros((num_steps, num_envs, 2), dtype=np.float32)
         self.map_ids         = np.zeros((num_steps, num_envs),    dtype=np.int32)
+        self.map_dropped     = np.zeros((num_steps, num_envs),    dtype=bool)
         self._map_registry: dict[int, np.ndarray] = {}
         self._current_map_id = np.zeros(num_envs, dtype=np.int32)
         self._next_id = 0
@@ -140,11 +148,12 @@ class DistilRolloutBuffer(RolloutBuffer):
         # Do NOT clear the registry here; caller decides when to clear.
 
     def insert(self, obs, action, log_prob, reward, done, value,
-               agent_pos: np.ndarray) -> None:
+               agent_pos: np.ndarray, map_dropped: np.ndarray | None = None) -> None:
         assert (self._current_map_id >= 0).all(), \
             "register_map() must be called for all envs before insert()"
         self.agent_positions[self.pos] = agent_pos
         self.map_ids[self.pos]         = self._current_map_id
+        self.map_dropped[self.pos]     = False if map_dropped is None else map_dropped
         super().insert(obs, action, log_prob, reward, done, value)
 
     def get_batches(self, advantages, returns, num_minibatches):
@@ -160,6 +169,7 @@ class DistilRolloutBuffer(RolloutBuffer):
         b_values    = self.values.reshape(batch_size)
         b_agent_pos = self.agent_positions.reshape(batch_size, 2)
         b_map_ids   = self.map_ids.reshape(batch_size)
+        b_map_dropped = self.map_dropped.reshape(batch_size)
 
         indices = torch.randperm(batch_size, device=self.device)
         for start in range(0, batch_size, mb_size):
@@ -174,6 +184,7 @@ class DistilRolloutBuffer(RolloutBuffer):
                 "values":          b_values[mb_idx],
                 "agent_positions": b_agent_pos[cpu_idx],
                 "map_ids":         b_map_ids[cpu_idx],
+                "map_dropped":     b_map_dropped[cpu_idx],
             }
 
 
@@ -213,7 +224,8 @@ def teacher_ppo_update(
 
         for mb in buffer.get_batches(advantages, returns, num_minibatches):
             canvases = build_map_canvases(
-                mb["agent_positions"], mb["map_ids"], buffer._map_registry
+                mb["agent_positions"], mb["map_ids"], buffer._map_registry,
+                dropped=mb["map_dropped"],
             ).to(device)
 
             _, new_log_prob, entropy, new_value = teacher.get_action_and_value(
@@ -281,6 +293,7 @@ def distil_ppo_update(
     distil_lambda: float,
     device: torch.device,
     target_kl: float | None = None,
+    distil_from_map: bool = True,
 ) -> dict:
     """PPO + KL-distillation update for ActorCriticDualBackbone (student).
 
@@ -330,9 +343,12 @@ def distil_ppo_update(
             ppo_loss = pg_loss - entropy_coeff * entropy.mean() + value_loss_coeff * v_loss
 
             # --- Distillation: KL(student || teacher) ---
+            # map-on: real canvas (privileged target). map-off: blank canvas
+            # (target recoverable from the student's own observations).
+            teacher_canvas = canvases if distil_from_map else torch.zeros_like(canvases)
             mu_s, log_std_s = student.get_actor_params(mb["obs"])
             with torch.no_grad():
-                mu_t, log_std_t = frozen_teacher.get_actor_params(mb["obs"], canvases)
+                mu_t, log_std_t = frozen_teacher.get_actor_params(mb["obs"], teacher_canvas)
 
             kl_loss = kl_diagonal_gaussian(mu_s, log_std_s, mu_t, log_std_t).mean()
 

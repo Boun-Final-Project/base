@@ -110,6 +110,7 @@ def train(args):
           f"({num_updates} updates, {args.rollout_length * args.num_envs} steps/update)")
     print(f"Envs: {args.num_envs}, Rollout: {args.rollout_length}, "
           f"Minibatches: {args.num_minibatches}, Epochs: {args.update_epochs}")
+    print(f"Map dropout p: {args.map_dropout}")
     print()
 
     # Save config snapshot (CLI args used for this run)
@@ -122,6 +123,11 @@ def train(args):
     # Register initial maps for all envs.
     for i, env in enumerate(vec_env.envs):
         buffer.register_map(i, env._map_ds)
+
+    # Per-episode map dropout: a fixed fraction of episodes are trained blind
+    # (blank canvas) so the teacher stays competent from gas/lidar alone.
+    BLANK = np.zeros((2, cfg.MAP_CANVAS_H, cfg.MAP_CANVAS_W), dtype=np.float32)
+    map_active = np.random.rand(args.num_envs) > args.map_dropout  # True = map visible
 
     start_time = time.time()
     prev_max_template = -1
@@ -150,10 +156,12 @@ def train(args):
         for step in range(args.rollout_length):
             global_step += args.num_envs
 
-            # Collect canvases BEFORE the step (matches obs_t).
-            canvases_np = np.stack(
-                [env.get_map_canvas() for env in vec_env.envs]
-            )                                                    # (N, 2, H, W)
+            # Collect canvases BEFORE the step (matches obs_t). Blind episodes
+            # get a blank canvas so the teacher cannot use the map this episode.
+            canvases_np = np.stack([
+                env.get_map_canvas() if map_active[i] else BLANK
+                for i, env in enumerate(vec_env.envs)
+            ])                                                   # (N, 2, H, W)
             canvases_t = torch.tensor(canvases_np, dtype=torch.float32, device=device)
             obs_t      = torch.tensor(obs, dtype=torch.float32, device=device)
             agent_pos  = np.stack([env._robot_pos for env in vec_env.envs])
@@ -175,12 +183,15 @@ def train(args):
                 torch.tensor(dones, device=device),
                 value.squeeze(-1),
                 agent_pos=agent_pos,
+                map_dropped=~map_active,
             )
 
-            # Register new maps for envs whose episode ended (auto-reset happened).
+            # Register new maps for envs whose episode ended (auto-reset happened)
+            # and redraw the per-episode dropout mask for the new episode.
             for i in range(args.num_envs):
                 if dones[i]:
                     buffer.register_map(i, vec_env.envs[i]._map_ds)
+                    map_active[i] = np.random.rand() > args.map_dropout
 
             ep_return_running += rewards
             ep_length_running += 1
@@ -194,11 +205,12 @@ def train(args):
 
             obs = next_obs
 
-        # Bootstrap value
+        # Bootstrap value (honour the active dropout mask)
         with torch.no_grad():
-            canvases_np = np.stack(
-                [env.get_map_canvas() for env in vec_env.envs]
-            )
+            canvases_np = np.stack([
+                env.get_map_canvas() if map_active[i] else BLANK
+                for i, env in enumerate(vec_env.envs)
+            ])
             canvases_t  = torch.tensor(canvases_np, dtype=torch.float32, device=device)
             next_obs_t  = torch.tensor(obs, dtype=torch.float32, device=device)
             next_value  = teacher.get_value(next_obs_t, canvases_t).squeeze(-1)
@@ -305,6 +317,7 @@ def parse_args():
     p.add_argument("--template",        type=int,   default=-1)
     p.add_argument("--curriculum",      action="store_true")
     p.add_argument("--anneal-lr",       action="store_true")
+    p.add_argument("--map-dropout",     type=float, default=cfg.MAP_DROPOUT_P)
     p.add_argument("--resume",          type=str,   default=None)
     p.add_argument("--output-dir",      type=str,   default="runs/teacher")
     p.add_argument("--log-interval",    type=int,   default=1)
