@@ -7,8 +7,10 @@ Usage:
 
 The teacher (ActorCriticTeacher) is trained with standard PPO.
 The only difference from train.py is:
-  - Uses serial VecEnv (required for direct env state access)
-  - Collects map canvases at each rollout step via env.get_map_canvas()
+  - Map canvases are rebuilt each rollout step via build_map_canvases() from
+    the robot position + downsampled map carried in the env ``info`` dict, so
+    the rollout can run on a parallel SubprocVecEnv (use --serial to force the
+    synchronous VecEnv for debugging).
   - Uses DistilRolloutBuffer and teacher_ppo_update
 """
 
@@ -28,18 +30,22 @@ if __package__ is None or __package__ == "":
     from reinforcement_learning import config as cfg
     from reinforcement_learning.envs.gas_source_env import GasSourceEnv
     from reinforcement_learning.models.actor_critic import ActorCriticTeacher
-    from reinforcement_learning.training.distil_ppo import DistilRolloutBuffer, teacher_ppo_update
+    from reinforcement_learning.training.distil_ppo import (
+        DistilRolloutBuffer, build_map_canvases, teacher_ppo_update)
     from reinforcement_learning.training.ppo import RunningMeanStd, compute_gae
     from reinforcement_learning.training.train import (
-        VecEnv, get_curriculum_ranges, get_template_curriculum, plot_training_curves)
+        SubprocVecEnv, VecEnv, get_curriculum_ranges, get_template_curriculum,
+        plot_training_curves)
 else:
     from .. import config as cfg
     from ..envs.gas_source_env import GasSourceEnv
     from ..models.actor_critic import ActorCriticTeacher
-    from .distil_ppo import DistilRolloutBuffer, teacher_ppo_update
+    from .distil_ppo import (
+        DistilRolloutBuffer, build_map_canvases, teacher_ppo_update)
     from .ppo import RunningMeanStd, compute_gae
     from .train import (
-        VecEnv, get_curriculum_ranges, get_template_curriculum, plot_training_curves)
+        SubprocVecEnv, VecEnv, get_curriculum_ranges, get_template_curriculum,
+        plot_training_curves)
 
 
 def make_env(seed, rank, template_id=None):
@@ -60,9 +66,14 @@ def train(args):
     template_id = args.template if args.template >= 0 else None
     env_fns = [make_env(args.seed, i, template_id=template_id)
                for i in range(args.num_envs)]
-    # Serial VecEnv required: env state (_robot_pos, _map_ds) accessed directly.
-    vec_env = VecEnv(env_fns)
-    print(f"VecEnv: serial ({args.num_envs} envs)")
+    # Map canvases are reconstructed from info["robot_pos"]/info["map_ds"], so
+    # the rollout no longer needs direct env access and can run in parallel.
+    if args.serial:
+        vec_env = VecEnv(env_fns)
+        print(f"VecEnv: serial ({args.num_envs} envs)")
+    else:
+        vec_env = SubprocVecEnv(env_fns)
+        print(f"VecEnv: subprocess ({args.num_envs} envs)")
 
     teacher   = ActorCriticTeacher(obs_dim=cfg.STATE_DIM).to(device)
     optimizer = torch.optim.Adam(teacher.parameters(), lr=args.lr, eps=1e-5)
@@ -119,14 +130,17 @@ def train(args):
         json.dump(vars(args), f, indent=2)
     print(f"Config saved to {config_path}")
 
-    obs, _ = vec_env.reset()
+    obs, infos = vec_env.reset()
+    # Caches of per-env state, fed from the env info dict (see env._build_info /
+    # reset). robot_pos is refreshed every step; map_ds only changes on reset.
+    robot_pos    = np.stack([info["robot_pos"] for info in infos])   # (N, 2)
+    map_ds_cache = [info["map_ds"] for info in infos]
     # Register initial maps for all envs.
-    for i, env in enumerate(vec_env.envs):
-        buffer.register_map(i, env._map_ds)
+    for i in range(args.num_envs):
+        buffer.register_map(i, map_ds_cache[i])
 
     # Per-episode map dropout: a fixed fraction of episodes are trained blind
     # (blank canvas) so the teacher stays competent from gas/lidar alone.
-    BLANK = np.zeros((2, cfg.MAP_CANVAS_H, cfg.MAP_CANVAS_W), dtype=np.float32)
     map_active = np.random.rand(args.num_envs) > args.map_dropout  # True = map visible
 
     start_time = time.time()
@@ -150,21 +164,20 @@ def train(args):
         # === Rollout ===
         buffer.reset()
         buffer.clear_registry()
-        for i, env in enumerate(vec_env.envs):
-            buffer.register_map(i, env._map_ds)
+        for i in range(args.num_envs):
+            buffer.register_map(i, map_ds_cache[i])
 
         for step in range(args.rollout_length):
             global_step += args.num_envs
 
-            # Collect canvases BEFORE the step (matches obs_t). Blind episodes
-            # get a blank canvas so the teacher cannot use the map this episode.
-            canvases_np = np.stack([
-                env.get_map_canvas() if map_active[i] else BLANK
-                for i, env in enumerate(vec_env.envs)
-            ])                                                   # (N, 2, H, W)
-            canvases_t = torch.tensor(canvases_np, dtype=torch.float32, device=device)
-            obs_t      = torch.tensor(obs, dtype=torch.float32, device=device)
-            agent_pos  = np.stack([env._robot_pos for env in vec_env.envs])
+            # Build canvases BEFORE the step (matches obs_t) from the cached
+            # pre-step positions + current registry. Blind episodes (map_active
+            # False) are blanked by build_map_canvases via the dropped mask.
+            canvases_t = build_map_canvases(
+                robot_pos, buffer._current_map_id, buffer._map_registry,
+                dropped=~map_active,
+            ).to(device)                                         # (N, 2, H, W)
+            obs_t = torch.tensor(obs, dtype=torch.float32, device=device)
 
             with torch.no_grad():
                 action, log_prob, _, value = teacher.get_action_and_value(
@@ -182,15 +195,18 @@ def train(args):
                 torch.tensor(normalized_rewards, device=device),
                 torch.tensor(dones, device=device),
                 value.squeeze(-1),
-                agent_pos=agent_pos,
+                agent_pos=robot_pos,          # pre-step positions (match obs_t)
                 map_dropped=~map_active,
             )
 
+            # Refresh caches from the returned info (post-step, post-autoreset).
+            robot_pos = np.stack([info["robot_pos"] for info in infos])
             # Register new maps for envs whose episode ended (auto-reset happened)
             # and redraw the per-episode dropout mask for the new episode.
             for i in range(args.num_envs):
                 if dones[i]:
-                    buffer.register_map(i, vec_env.envs[i]._map_ds)
+                    map_ds_cache[i] = infos[i]["map_ds"]
+                    buffer.register_map(i, map_ds_cache[i])
                     map_active[i] = np.random.rand() > args.map_dropout
 
             ep_return_running += rewards
@@ -207,11 +223,10 @@ def train(args):
 
         # Bootstrap value (honour the active dropout mask)
         with torch.no_grad():
-            canvases_np = np.stack([
-                env.get_map_canvas() if map_active[i] else BLANK
-                for i, env in enumerate(vec_env.envs)
-            ])
-            canvases_t  = torch.tensor(canvases_np, dtype=torch.float32, device=device)
+            canvases_t  = build_map_canvases(
+                robot_pos, buffer._current_map_id, buffer._map_registry,
+                dropped=~map_active,
+            ).to(device)
             next_obs_t  = torch.tensor(obs, dtype=torch.float32, device=device)
             next_value  = teacher.get_value(next_obs_t, canvases_t).squeeze(-1)
 
@@ -317,6 +332,8 @@ def parse_args():
     p.add_argument("--template",        type=int,   default=-1)
     p.add_argument("--curriculum",      action="store_true")
     p.add_argument("--anneal-lr",       action="store_true")
+    p.add_argument("--serial",          action="store_true",
+                   help="Use synchronous VecEnv instead of SubprocVecEnv (debug).")
     p.add_argument("--map-dropout",     type=float, default=cfg.MAP_DROPOUT_P)
     p.add_argument("--resume",          type=str,   default=None)
     p.add_argument("--output-dir",      type=str,   default="runs/teacher")

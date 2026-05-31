@@ -306,6 +306,9 @@ class GasSourceEnv(gymnasium.Env):
         # _robot_heading must be set before this call (scan() needs it)
         obs = self._build_observation()
         info = self._build_info(0.0, False, 0)
+        # Downsampled occupancy map — needed by the teacher to (re)build map
+        # canvases out-of-process. Only sent on reset (constant per episode).
+        info["map_ds"] = self._map_ds.copy()
         return obs, info
 
     def step(self, action):
@@ -487,4 +490,7 @@ class GasSourceEnv(gymnasium.Env):
             "gas_reading": binary,
             "collision": collision,
             "step": self._current_step,
+            # Robot position — lets the teacher rebuild map canvases out-of-process
+            # (subprocess VecEnv) without direct access to env internals.
+            "robot_pos": self._robot_pos.copy(),
         }
