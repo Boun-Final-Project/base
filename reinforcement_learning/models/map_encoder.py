@@ -62,10 +62,13 @@ class MapCNN(nn.Module):
             nn.GroupNorm(8, 64),
             nn.ReLU(inplace=True),
         )
-        # 64 * 10 * 13 = 8320
+        # H,W after 5 conv layers (strides 1,2,2,2,2): ceil(H/16), ceil(W/16)
+        # 75x100 -> 64*5*7 = 2240  (was 150x200 -> 64*10*13 = 8320)
+        _h = (cfg.MAP_CANVAS_H + 15) // 16
+        _w = (cfg.MAP_CANVAS_W + 15) // 16
         self.proj = nn.Sequential(
             nn.Flatten(),
-            layer_init(nn.Linear(64 * 10 * 13, map_feat_dim)),
+            layer_init(nn.Linear(64 * _h * _w, map_feat_dim)),
             nn.ReLU(inplace=True),
         )
 
