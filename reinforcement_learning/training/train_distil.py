@@ -66,7 +66,8 @@ def train(args):
     print(f"VecEnv: serial ({args.num_envs} envs)")
 
     # --- Frozen teacher ---
-    frozen_teacher = ActorCriticTeacher(obs_dim=cfg.STATE_DIM).to(device)
+    frozen_teacher = ActorCriticTeacher(obs_dim=cfg.STATE_DIM,
+                                        use_attention=args.attention).to(device)
     ckpt = torch.load(args.teacher_ckpt, map_location=device)
     frozen_teacher.load_state_dict(ckpt["model_state_dict"])
     frozen_teacher.eval()
@@ -292,6 +293,9 @@ def train(args):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--teacher-ckpt",    type=str,   required=True)
+    p.add_argument("--attention",       action="store_true",
+                   help="Teacher checkpoint uses the cross-attention map readout (MapCrossAttn). "
+                        "Must match how the teacher was trained.")
     p.add_argument("--total-timesteps", type=int,   default=cfg.TOTAL_TIMESTEPS)
     p.add_argument("--lr",              type=float, default=cfg.LEARNING_RATE)
     p.add_argument("--distil-lambda",   type=float, default=cfg.DISTIL_LAMBDA)

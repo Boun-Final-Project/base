@@ -1,4 +1,4 @@
-from .map_encoder import MapCNN
+from .map_encoder import MapCNN, MapCrossAttn
 from .actor_critic import (
     ActorCritic,
     ActorCriticModular,

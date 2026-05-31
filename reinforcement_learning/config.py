@@ -152,10 +152,12 @@ SPATIAL_SEQ_LEN       = 16           # truncated BPTT sequence length
 # Teacher-student distillation / map canvas
 # =============================================================================
 MAP_DOWNSAMPLE_RES  = 0.2    # m/cell — 2× downsample from GRID_RESOLUTION
-MAP_HALF_W          = 10.0   # metres — half-width of ego-centric canvas (25% removed from each side -> 20 m total, was 40 m)
-MAP_HALF_H          = 7.5    # metres — half-height of ego-centric canvas (25% removed from each side -> 15 m total, was 30 m)
-MAP_CANVAS_W        = int(2 * MAP_HALF_W / MAP_DOWNSAMPLE_RES)  # cells — 200 with defaults
-MAP_CANVAS_H        = int(2 * MAP_HALF_H / MAP_DOWNSAMPLE_RES)  # cells — 150 with defaults
-MAP_FEAT_DIM        = 128    # MapCNN output dimension
+MAP_HALF_W          = 20.0   # metres — half-width of ego-centric canvas (full 40 m field of view)
+MAP_HALF_H          = 15.0   # metres — half-height of ego-centric canvas (full 30 m field of view)
+MAP_CANVAS_W        = int(2 * MAP_HALF_W / MAP_DOWNSAMPLE_RES)  # cells — 200
+MAP_CANVAS_H        = int(2 * MAP_HALF_H / MAP_DOWNSAMPLE_RES)  # cells — 150
+MAP_STEM_CHANNELS   = 16     # final conv-stem channel count (token dim) — shared by MapCNN & MapCrossAttn
+MAP_ATTN_HEADS      = 4       # MapCrossAttn attention heads (must divide MAP_STEM_CHANNELS)
+MAP_FEAT_DIM        = 128    # map encoder output dimension
 DISTIL_LAMBDA       = 0.5    # fixed KL weight in student loss
 MAP_DROPOUT_P       = 0.3    # fraction of teacher episodes trained with a blank map

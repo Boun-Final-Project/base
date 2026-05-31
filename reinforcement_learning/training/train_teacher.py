@@ -75,7 +75,8 @@ def train(args):
         vec_env = SubprocVecEnv(env_fns)
         print(f"VecEnv: subprocess ({args.num_envs} envs)")
 
-    teacher   = ActorCriticTeacher(obs_dim=cfg.STATE_DIM).to(device)
+    teacher   = ActorCriticTeacher(obs_dim=cfg.STATE_DIM,
+                                   use_attention=args.attention).to(device)
     optimizer = torch.optim.Adam(teacher.parameters(), lr=args.lr, eps=1e-5)
     print(f"Parameters: {sum(p.numel() for p in teacher.parameters()):,}")
 
@@ -335,6 +336,8 @@ def parse_args():
     p.add_argument("--serial",          action="store_true",
                    help="Use synchronous VecEnv instead of SubprocVecEnv (debug).")
     p.add_argument("--map-dropout",     type=float, default=cfg.MAP_DROPOUT_P)
+    p.add_argument("--attention",       action="store_true",
+                   help="Use cross-attention map readout (MapCrossAttn) instead of MapCNN.")
     p.add_argument("--resume",          type=str,   default=None)
     p.add_argument("--output-dir",      type=str,   default="runs/teacher")
     p.add_argument("--log-interval",    type=int,   default=1)

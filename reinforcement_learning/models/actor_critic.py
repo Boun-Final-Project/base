@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch.distributions import Beta, Normal
 
 from .. import config as cfg
-from .map_encoder import MapCNN
+from .map_encoder import MapCNN, MapCrossAttn
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -466,7 +466,8 @@ class ActorCriticTeacher(ActorCriticDualBackbone):
                  critic_fusion_dim=256,
                  actor_head_dim=cfg.ACTOR_HEAD_DIM,
                  critic_head_dim=256,
-                 map_feat_dim=cfg.MAP_FEAT_DIM):
+                 map_feat_dim=cfg.MAP_FEAT_DIM,
+                 use_attention=False):
         super().__init__(
             obs_dim=obs_dim,
             gas_len=gas_len,
@@ -480,11 +481,19 @@ class ActorCriticTeacher(ActorCriticDualBackbone):
             critic_head_dim=critic_head_dim,
         )
         self.map_feat_dim = map_feat_dim
-        self.map_encoder = MapCNN(map_feat_dim=map_feat_dim)
+        self.use_attention = use_attention
 
         parent_fusion_in = (gru_hidden
                             + conv_channels * lidar_len
                             + self.context_len)
+        # MapCrossAttn uses the agent's fused sensor features (gas+lidar+context,
+        # = parent_fusion_in) as the attention query; MapCNN ignores them.
+        if use_attention:
+            self.map_encoder = MapCrossAttn(agent_feat_dim=parent_fusion_in,
+                                            map_feat_dim=map_feat_dim)
+        else:
+            self.map_encoder = MapCNN(map_feat_dim=map_feat_dim)
+
         teacher_fusion_in = parent_fusion_in + map_feat_dim
 
         # Replace gate and both projection heads to match the new fusion dim.
@@ -516,7 +525,12 @@ class ActorCriticTeacher(ActorCriticDualBackbone):
         lidar_seq = lidar.unsqueeze(1)
         lidar_feat = self.lidar_conv(lidar_seq).flatten(1)
 
-        map_feat = self.map_encoder(map_canvas)
+        if self.use_attention:
+            # Agent sensor state (gas+lidar+context) queries the map tokens.
+            agent_feat = torch.cat([gas_feat, lidar_feat, context], dim=1)
+            map_feat = self.map_encoder(map_canvas, agent_feat)
+        else:
+            map_feat = self.map_encoder(map_canvas)
 
         fused = torch.cat([gas_feat, lidar_feat, map_feat, context], dim=1)
         return self.gate(fused)
