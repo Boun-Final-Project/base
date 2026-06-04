@@ -204,6 +204,24 @@ class Navigator:
     def _goal_cancel_callback(self, future):
         pass
 
+    def cancel_current_goal(self):
+        """Cancel the active navigate_to_pose goal (used by the node's per-step
+        drive timeout). The cancel result arrives via _nav_result_callback, which
+        clears is_moving and fires on_complete_callback so the node re-predicts."""
+        if self.goal_handle is not None:
+            try:
+                self.goal_handle.cancel_goal_async().add_done_callback(
+                    self._goal_cancel_callback)
+            except Exception as e:
+                self.node.get_logger().warn(f'cancel_current_goal failed: {e}')
+        else:
+            # Goal request not yet accepted (rare at multi-second timeouts): force
+            # completion so the node re-predicts; any stale goal that lands later is
+            # preempted by the next send_goal anyway.
+            self.is_moving = False
+            if self.on_complete_callback:
+                self.on_complete_callback()
+
     def _teleport_robot(self, target_x, target_y):
         msg = PoseWithCovarianceStamped()
         msg.header.stamp = self.node.get_clock().now().to_msg()

@@ -23,3 +23,8 @@ slurm-*.out
 # Media
 *.png
 *.mp4
+
+# RL checkpoints — weights live in the rl_deploy_bundle, not in git
+*.pt
+# local deploy-time backups of train/deploy-shared files
+*.deploy_bak

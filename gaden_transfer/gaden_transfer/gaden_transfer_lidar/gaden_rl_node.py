@@ -35,6 +35,7 @@ import os
 import sys
 import math
 import json
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -43,8 +44,11 @@ import torch
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 
 from olfaction_msgs.msg import GasSensor, Anemometer
+from gaden_msgs.srv import WindPosition
 from geometry_msgs.msg import PoseWithCovarianceStamped, Point
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker
@@ -67,6 +71,9 @@ from geometry_msgs.msg import PoseWithCovarianceStamped as PoseWCS
 from efe_igdm.mapping.occupancy_grid import (
     load_3d_occupancy_grid_from_service, OccupancyGridMap
 )
+from rclpy.action import ActionClient
+from nav2_msgs.action import NavigateToPose
+from efe_igdm.planning.navigator import Navigator
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +229,20 @@ class GadenRLNode(Node):
         # Debug image dump (only for arch=spatial — flat obs isn't 2D)
         self.declare_parameter('debug_dump_dir', '')
         self.declare_parameter('debug_dump_every', 20)
+        # Lidar frame the policy was trained against:
+        #   "world"   → current branch (ray 0 = world +x), needs roll at deploy
+        #   "heading" → feature/rl* training (ray 0 = robot forward), no roll
+        self.declare_parameter('lidar_frame', 'world')
+        # Motion mode: False = teleport between steps (default, unchanged);
+        # True = drive to each step's target via Nav2 (stop-go). Driving gives the
+        # robot a real heading, handled by the obs builder's drive_mode roll.
+        self.declare_parameter('use_nav2', False)
+        # Nav2 arrival tolerance (m): the robot stops within this of each target.
+        self.declare_parameter('nav_goal_tolerance', 0.1)
+        # Per-step drive timeout (s, sim time): if Nav2 hasn't reached the target
+        # within this, cancel the goal and let the policy re-predict — avoids the
+        # ~150 s recovery-loop stalls when DWB gets wedged. 0 = disabled.
+        self.declare_parameter('drive_timeout', 8.0)
 
     def _load_parameters(self):
         self._checkpoint_path: str = self.get_parameter('checkpoint').value
@@ -247,6 +268,10 @@ class GadenRLNode(Node):
         self._action_marker_topic: str = self.get_parameter('action_marker_topic').value
         self._debug_dump_dir: str = self.get_parameter('debug_dump_dir').value
         self._debug_dump_every: int = int(self.get_parameter('debug_dump_every').value)
+        self._lidar_frame: str = self.get_parameter('lidar_frame').value
+        self._use_nav2: bool = bool(self.get_parameter('use_nav2').value)
+        self._nav_goal_tolerance: float = float(self.get_parameter('nav_goal_tolerance').value)
+        self._drive_timeout: float = float(self.get_parameter('drive_timeout').value)
 
     def _init_state(self):
         self._robot_x: Optional[float] = None
@@ -257,6 +282,9 @@ class GadenRLNode(Node):
         self._step_in_episode: int = 0
 
         self._is_moving: bool = False
+        # Per-step drive-timeout bookkeeping (drive mode only)
+        self._drive_goal_time = None        # rclpy Time when current goal was sent
+        self._drive_canceling: bool = False  # cancel issued, awaiting completion
         self._search_complete: bool = False
         self._start_teleport_done: bool = False
         self._last_step_time_ns: int = 0
@@ -272,6 +300,30 @@ class GadenRLNode(Node):
         self._teleport_wait_stamp_ns: Optional[int] = None
 
         self._obs_builder: Optional[ObservationBuilder] = None
+
+        # Nav2 driving (use_nav2=True): Navigator drives the robot to each target
+        # and clears _is_moving on completion (stop-go). None in teleport mode.
+        self._navigator = None
+        # Actual travelled path length (m), integrated from pose deltas; the
+        # d<1.0 guard skips teleport jumps so it is meaningful in both modes.
+        self._last_pose_xy: Optional[tuple] = None
+        self._travel_distance_m: float = 0.0
+
+        # Wind z-snap (local-wind policies only). The anemometer reads wind at a
+        # fixed TF height z=0.5, but the CFD wind field has irregular z-banding:
+        # at many (x,y) cells z=0.5 lands in an empty layer and returns 0 m/s.
+        # When active, we query /wind_value at a few z-offsets in ONE service
+        # call and use the first nonzero reading. Runs under a MultiThreaded
+        # executor + reentrant group so the per-step call cannot deadlock.
+        # Default OFF: the GADEN preprocessing vertical-fill makes the served
+        # grid dense at z=0.5, so the anemometer topic already reads real wind
+        # and the per-step service z-snap is redundant. Set OSL_WIND_ZSNAP=1 to
+        # re-enable it (e.g. for maps preprocessed before the fill).
+        self._wind_zsnap: bool = os.environ.get("OSL_WIND_ZSNAP", "0") == "1"
+        self._wind_z_base: float = 0.5
+        self._wind_z_offsets = (0.0, -0.05, 0.30, -0.30, 0.60, 0.15, -0.15)
+        self._wind_cli = None
+        self._wind_cbgroup = None
 
     def _load_occupancy_map(self):
         """Fetch the 2D occupancy grid from GADEN and derive map dimensions.
@@ -332,7 +384,11 @@ class GadenRLNode(Node):
                 origin_y=self._occ_map.origin_y,
             )
         else:
-            self._obs_builder = ObservationBuilder(self._map_width, self._map_height)
+            self._obs_builder = ObservationBuilder(
+                self._map_width, self._map_height, lidar_frame=self._lidar_frame,
+                drive_mode=self._use_nav2,
+            )
+            self.get_logger().info(f'Lidar frame: {self._lidar_frame}')
 
         if self._wind_file:
             self._obs_builder.load_wind_from_file(self._wind_file)
@@ -375,6 +431,43 @@ class GadenRLNode(Node):
             PoseWCS, '/PioneerP3DX/initialpose', 10)
         self._next_action_pub = self.create_publisher(Marker, self._action_marker_topic, 1)
 
+        if self._wind_zsnap:
+            # Reentrant group so the synchronous per-step service call can be
+            # serviced by another executor thread instead of deadlocking the
+            # one running _take_step (single-threaded executor was the bug).
+            self._wind_cbgroup = ReentrantCallbackGroup()
+            self._wind_cli = self.create_client(
+                WindPosition, '/wind_value', callback_group=self._wind_cbgroup)
+            if self._wind_cli.wait_for_service(timeout_sec=5.0):
+                self.get_logger().info(
+                    'Wind z-snap enabled: querying /wind_value at z-offsets '
+                    f'{self._wind_z_offsets} around z={self._wind_z_base}')
+            else:
+                self.get_logger().warn(
+                    'Wind z-snap requested but /wind_value unavailable — '
+                    'falling back to anemometer topic only.')
+                self._wind_cli = None
+
+        # --- Motion mode setup ---
+        if self._use_nav2:
+            # Pre-flight guard: Navigator.__init__ waits on the Nav2 action server
+            # with NO timeout, so confirm it is up here (60 s) and fail fast
+            # instead of hanging forever if the Nav2 stack didn't come up.
+            _pre = ActionClient(self, NavigateToPose, '/PioneerP3DX/navigate_to_pose')
+            if not _pre.wait_for_server(timeout_sec=60.0):
+                self.get_logger().error(
+                    'use_nav2=True but Nav2 action server '
+                    '/PioneerP3DX/navigate_to_pose not available after 60 s — aborting.')
+                os._exit(2)
+            _pre.destroy()
+            self._navigator = Navigator(self, on_complete_callback=self._on_nav_complete)
+            self.get_logger().info(
+                f'Motion mode: DRIVE via Nav2 (stop-go, '
+                f'tolerance={self._nav_goal_tolerance:.2f} m)')
+        else:
+            self.get_logger().info('Motion mode: TELEPORT (instant)')
+
+
     # ------------------------------------------------------------------
     # ROS2 callbacks
     # ------------------------------------------------------------------
@@ -388,6 +481,13 @@ class GadenRLNode(Node):
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self._current_theta = math.atan2(siny_cosp, cosy_cosp)
 
+        # Integrate actual travelled distance (skip teleport jumps with d<1.0).
+        if self._last_pose_xy is not None:
+            d = math.hypot(x - self._last_pose_xy[0], y - self._last_pose_xy[1])
+            if d < 1.0:
+                self._travel_distance_m += d
+        self._last_pose_xy = (x, y)
+
         self._robot_x = x
         self._robot_y = y
         if self._obs_builder is not None:
@@ -396,6 +496,28 @@ class GadenRLNode(Node):
             self._obs_builder.robot_theta = self._current_theta
 
         if self._obs_builder is None or not self._obs_builder.ready:
+            return
+
+        # Stop-go drive gate: while Nav2 is driving the robot to the current
+        # target, don't start another step. _on_nav_complete clears _is_moving
+        # when the goal finishes (success/abort/reject), and the next pose
+        # callback then proceeds. No-op in teleport mode (_use_nav2 False).
+        if self._use_nav2 and self._is_moving:
+            # Per-step drive timeout: if DWB gets wedged (recovery-loop stall),
+            # cancel the goal so the policy re-predicts in ~drive_timeout s instead
+            # of waiting ~150 s for Nav2's behavior tree to give up.
+            if (self._drive_timeout > 0.0 and self._drive_goal_time is not None
+                    and not self._drive_canceling):
+                elapsed = (self.get_clock().now()
+                           - self._drive_goal_time).nanoseconds * 1e-9
+                if elapsed > self._drive_timeout:
+                    self._drive_canceling = True
+                    self.get_logger().warn(
+                        f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
+                        f'DRIVE TIMEOUT — goal not reached in {elapsed:.1f}s '
+                        f'(> {self._drive_timeout:.1f}s); canceling, re-predicting.')
+                    if self._navigator is not None:
+                        self._navigator.cancel_current_goal()
             return
 
         # Initial: teleport to start position once
@@ -441,9 +563,52 @@ class GadenRLNode(Node):
         self._obs_builder.update_lidar(msg)
 
     def _wind_callback(self, msg: Anemometer):
-        # Wind is loaded from the CFD file at startup — live readings unused
-        self._latest_wind_speed = float(msg.wind_speed)
+        # Mean wind is loaded from the CFD file at startup (used by mean-wind
+        # policies). For local point-wind policies (OSL_LOCAL_WIND_OBS=1) the
+        # obs builder uses these LIVE anemometer readings at the robot cell.
+        #
+        # BUG WORKAROUND: simulated_anemometer publishes wind_speed = u*u + v*v
+        # (squared magnitude — it never takes the sqrt; fake_anemometer.cpp:138).
+        # Training/Python eval feed the TRUE magnitude sqrt(u^2+v^2), so without
+        # correcting here the local-wind policy sees systematically crushed wind
+        # (e.g. 0.7 m/s -> 0.49, 0.1 -> 0.01), which nullifies the local-wind
+        # signal — observed as many_rooms collapsing 0% on ROS2 vs 90% in Python.
+        speed = float(np.sqrt(max(0.0, msg.wind_speed)))
+        self._latest_wind_speed = speed
         self._latest_wind_dir = float(msg.wind_direction)
+        if self._obs_builder is not None:
+            self._obs_builder.update_live_wind(speed, msg.wind_direction)
+
+    def _query_wind_zsnap(self, x: float, y: float):
+        """Query /wind_value at several z-offsets in ONE call; return the first
+        nonzero (u,v) as (speed, direction_rad), or None.
+
+        Works around the CFD z-banding: the anemometer's fixed z=0.5 often lands
+        in an empty layer (0 m/s). Probing a few heights recovers the real wind
+        for that (x,y) column. Safe to call from _take_step because the client
+        sits on a reentrant callback group under a MultiThreadedExecutor.
+        """
+        if self._wind_cli is None:
+            return None
+        req = WindPosition.Request()
+        n = len(self._wind_z_offsets)
+        req.x = [float(x)] * n
+        req.y = [float(y)] * n
+        req.z = [self._wind_z_base + dz for dz in self._wind_z_offsets]
+        fut = self._wind_cli.call_async(req)
+        # Bounded wait; the reentrant group lets another executor thread fill
+        # the future. time.sleep yields the GIL so that thread can run.
+        end = self.get_clock().now().nanoseconds + int(0.5e9)
+        while not fut.done() and self.get_clock().now().nanoseconds < end:
+            time.sleep(0.001)
+        if not fut.done() or fut.result() is None:
+            return None
+        res = fut.result()
+        for u, v in zip(res.u, res.v):
+            sp = math.hypot(u, v)
+            if sp > 1e-4:
+                return sp, math.atan2(v, u)
+        return None
 
     def _teleport_to(self, x: float, y: float):
         msg = PoseWCS()
@@ -457,6 +622,13 @@ class GadenRLNode(Node):
         # Re-arm fresh-scan gate: next _take_step must wait for a scan whose
         # sim-time stamp is strictly newer than this.
         self._teleport_wait_stamp_ns = self._latest_scan_stamp_ns
+
+    def _on_nav_complete(self):
+        """Nav2 goal finished (success / abort / reject / cancel). Clear the moving
+        flag so the next ground_truth pose callback takes the next step (stop-go)."""
+        self._is_moving = False
+        self._drive_goal_time = None
+        self._drive_canceling = False
 
     # ------------------------------------------------------------------
     # Core control loop
@@ -497,6 +669,19 @@ class GadenRLNode(Node):
         # Flat obs: step 0 is seeded by the first gas callback, so skip.
         # Spatial obs: step 0 must seed the world grids from the first scan,
         # so always call record_step().
+
+        # --- Wind z-snap (local-wind policies) ---
+        # Override the anemometer feed with the first nonzero reading found
+        # across a few z-offsets at the robot column. Must run before build()
+        # so the corrected wind lands in this step's observation.
+        if self._wind_cli is not None:
+            snap = self._query_wind_zsnap(self._robot_x, self._robot_y)
+            if snap is not None:
+                sp, dir_rad = snap
+                self._latest_wind_speed = sp
+                self._latest_wind_dir = dir_rad
+                self._obs_builder.update_live_wind(sp, dir_rad)
+
         if self._arch == 'spatial':
             self._obs_builder.record_step()
         elif self._step_in_episode > 0:
@@ -548,11 +733,33 @@ class GadenRLNode(Node):
                     action, _, _, _ = self._agent.get_action_and_value(obs_t)
             action_np = action.cpu().numpy().flatten()  # (1,) or (2,)
 
+        # --- Optional debug dump (dual/flat arch): full obs vector + raw action
+        # per step, so an offline proxy can be checked against the EXACT inputs the
+        # deployed policy saw (open-loop action comparison). Writes one .npz/step. ---
+        if self._arch != 'spatial' and self._debug_dump_dir \
+                and self._debug_dump_every > 0 \
+                and (self._step_in_episode % self._debug_dump_every == 0):
+            os.makedirs(self._debug_dump_dir, exist_ok=True)
+            np.savez(
+                os.path.join(self._debug_dump_dir,
+                             f'obs_{self._step_in_episode:04d}.npz'),
+                step=self._step_in_episode,
+                obs=obs.astype(np.float32),
+                action=action_np.astype(np.float32),
+                robot_xy=np.array([self._robot_x, self._robot_y], dtype=np.float32),
+            )
+
         # --- Compute target position ---
         target_x, target_y, theta = _action_to_target(
             self._robot_x, self._robot_y,
             action_np, self._arch, cfg.STEP_SIZE
         )
+
+        # Heading-frame agents need ray 0 of next obs to align with the direction
+        # they just commanded — track it here so the next obs is built correctly.
+        # (Physical yaw is always 0 due to identity-quaternion teleport.)
+        if self._obs_builder is not None and hasattr(self._obs_builder, 'last_action_theta'):
+            self._obs_builder.last_action_theta = float(theta)
 
         if self._step_log_every <= 1 or (self._step_in_episode % self._step_log_every == 0):
             action_text = np.array2string(action_np, precision=3, separator=',')
@@ -585,18 +792,29 @@ class GadenRLNode(Node):
         if self._publish_action_marker:
             self._publish_next_action_marker(target_x, target_y)
 
-        # --- Teleport robot ---
-        msg = PoseWCS()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'map'
-        msg.pose.pose.position.x = float(target_x)
-        msg.pose.pose.position.y = float(target_y)
-        # Face the direction of movement so the LiDAR scan is in the same
-        # sensor frame as training (slot 0 = robot's forward = action direction).
-        msg.pose.pose.orientation.z = math.sin(theta / 2.0)
-        msg.pose.pose.orientation.w = math.cos(theta / 2.0)
-        msg.pose.covariance = [0.0] * 36
-        self._teleport_pub.publish(msg)
+        # --- Move robot: drive via Nav2 (stop-go) or teleport ---
+        if self._use_nav2 and self._navigator is not None:
+            # Drive to the (collision-clamped) target. yaw=theta + use_orientation
+            # makes the robot arrive facing the commanded direction so the next
+            # step's heading-frame obs aligns; the drive_mode roll corrects any
+            # residual yaw error. _is_moving gates further steps until arrival.
+            self._is_moving = True
+            self._drive_canceling = False
+            self._drive_goal_time = self.get_clock().now()  # for per-step timeout
+            self._navigator.send_goal(
+                target_x, target_y, yaw=theta,
+                use_orientation=True, tolerance=self._nav_goal_tolerance,
+            )
+        else:
+            # --- Teleport robot ---
+            msg = PoseWCS()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'map'
+            msg.pose.pose.position.x = float(target_x)
+            msg.pose.pose.position.y = float(target_y)
+            msg.pose.pose.orientation.w = 1.0
+            msg.pose.covariance = [0.0] * 36
+            self._teleport_pub.publish(msg)
 
         self._step_in_episode += 1
 
@@ -667,6 +885,7 @@ class GadenRLNode(Node):
         # guarantees the observation builder sees the new pose before any
         # step is taken.
         self._step_in_episode = 0
+        self._is_moving = False  # clear any lingering drive flag before next episode
         self._obs_builder.reset()
         self._obs_builder.robot_x = self._robot_x
         self._obs_builder.robot_y = self._robot_y
@@ -777,7 +996,12 @@ def main(args=None):
     node = None
     try:
         node = GadenRLNode()
-        rclpy.spin(node)
+        # MultiThreadedExecutor: lets the /wind_value z-snap call (reentrant
+        # group) be serviced by a second thread instead of deadlocking the
+        # thread running _take_step. Harmless for non-local-wind policies.
+        executor = MultiThreadedExecutor(num_threads=2)
+        executor.add_node(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

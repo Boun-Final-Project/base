@@ -34,7 +34,8 @@ class ObservationBuilder:
     every sensor update to get the latest 107-dim vector.
     """
 
-    def __init__(self, map_width: float, map_height: float):
+    def __init__(self, map_width: float, map_height: float, lidar_frame: str = "world",
+                 drive_mode: bool = False):
         """
         Parameters
         ----------
@@ -42,9 +43,22 @@ class ObservationBuilder:
             Real-world dimensions of the map in metres.  Used to normalise
             robot position and gas-history relative positions.  Obtained
             from the occupancy grid service at startup.
+        lidar_frame : "world" | "heading"
+            Frame the policy was trained against. "world" → roll sensor-frame
+            scan so ray 0 = world +x (current branch's training). "heading" →
+            no roll, sensor-frame == heading-frame == ray 0 forward (older
+            feature/rl* training).
         """
         self.map_width = map_width
         self.map_height = map_height
+        if lidar_frame not in ("world", "heading"):
+            raise ValueError(f"lidar_frame must be 'world' or 'heading', got {lidar_frame!r}")
+        self.lidar_frame = lidar_frame
+        # When True (Nav2 driving) the robot has a real, changing yaw, so the
+        # heading-frame roll must subtract robot_theta to avoid double-rotation.
+        # When False (teleport) physical yaw is pinned to 0 and the roll is
+        # unchanged (byte-for-byte with the original teleport behaviour).
+        self.drive_mode = drive_mode
 
         self._sensor = BinarySensorModel(
             alpha=cfg.SENSOR_ALPHA,
@@ -61,7 +75,12 @@ class ObservationBuilder:
         # Latest sensor readings (set by the node's callbacks)
         self.robot_x: Optional[float] = None
         self.robot_y: Optional[float] = None
-        self.robot_theta: float = 0.0  # radians, world-frame heading; set by node but not consumed by build()
+        self.robot_theta: float = 0.0  # radians, world-frame heading
+        # θ of the last commanded action — used by heading-frame agents to align lidar.
+        # Deploy teleports with identity quaternion, so physical yaw is always 0;
+        # heading-trained policies need ray 0 rolled to point in the direction they
+        # just commanded, not the physical forward.
+        self.last_action_theta: float = 0.0
         self.lidar_norm: Optional[np.ndarray] = None   # shape (72,), already [0,1], SENSOR frame
         self.wind_speed: Optional[float] = None
         self.wind_direction: Optional[float] = None    # radians from +x
@@ -76,6 +95,16 @@ class ObservationBuilder:
         self._wind_locked: bool = False
         self._locked_wind_speed: float = 0.0
         self._locked_wind_dir: float = 0.0
+
+        # Local point-wind observation (OSL_LOCAL_WIND_OBS=1). Policies finetuned
+        # with local wind (e.g. local2 CFD) observe the LIVE wind at the robot's
+        # cell, encoded as Cartesian components, NOT the episode-mean polar wind.
+        # Must match training's WindModel.get_local_wind exactly:
+        #   slot = clip((component / WIND_MAX_SPEED + 1) / 2, 0, 1)
+        # else it's a train/eval mismatch. Default off → mean-polar (champ etc.).
+        self._local_wind_obs: bool = os.environ.get("OSL_LOCAL_WIND_OBS", "0") == "1"
+        self._live_wind_speed: float = 0.0   # latest anemometer reading at robot
+        self._live_wind_dir: float = 0.0
 
     # ------------------------------------------------------------------
     # Episode management
@@ -140,6 +169,12 @@ class ObservationBuilder:
         self._locked_wind_dir = float(np.arctan2(mean_uy, mean_ux)) % (2.0 * np.pi)
         self._wind_locked = True
 
+    def update_live_wind(self, speed: float, direction: float):
+        """Feed the latest anemometer reading (robot-cell wind). Used by the
+        local point-wind obs path (OSL_LOCAL_WIND_OBS=1)."""
+        self._live_wind_speed = float(speed)
+        self._live_wind_dir = float(direction)
+
     def record_step(self):
         """Append latest gas reading + increment step counter.
 
@@ -184,10 +219,33 @@ class ObservationBuilder:
                 ])
         gas = np.array(gas_entries, dtype=np.float32)  # (30,)
 
-        # --- LiDAR (72 dims) — sensor-frame, matches training convention ---
-        # lidar_norm slot-0 = robot forward, matching gas_source_env's
-        # LidarSim.scan(heading=robot_heading) convention.
-        lidar = self.lidar_norm.astype(np.float32)
+        # --- LiDAR (72 dims) ---
+        # Live LaserScan from basic_sim: ray 0 = robot's forward direction.
+        # Deploy teleports with identity quaternion, so physical yaw is always 0
+        # → live ray 0 is effectively world +x at all times.
+        #
+        #   "world"   → policy expects ray 0 = world +x. Already aligned, no roll.
+        #               (Agents trained on the current branch's world-frame lidar.)
+        #   "heading" → policy expects ray 0 = direction of last commanded action.
+        #               Roll by -last_action_theta so that slot 0 reads the ray
+        #               in that direction. (feature/rl* training:
+        #               lidar.scan(pos, heading) with rotated_angles = ray_angles + heading.)
+        n_rays = self.lidar_norm.shape[0]
+        if self.lidar_frame == "world":
+            shift = int(round(-self.robot_theta * n_rays / (2.0 * np.pi))) % n_rays
+        else:  # "heading"
+            # Teleport: physical yaw is pinned to 0, so the live sensor ray 0 is
+            # world +x and we roll by -last_action_theta to put the commanded
+            # direction at slot 0. Driving: the robot physically faces its real
+            # yaw (robot_theta), so subtract it — otherwise the body rotation and
+            # the last_action_theta roll compound into a double rotation, leaving
+            # ray 0 at (robot_theta - last_action_theta) instead of the commanded
+            # direction. base = last_action_theta - robot_theta cancels the body
+            # rotation; under teleport robot_theta≈0 so this reduces to the
+            # original -last_action_theta roll exactly.
+            base = self.last_action_theta - (self.robot_theta if self.drive_mode else 0.0)
+            shift = int(round(-base * n_rays / (2.0 * np.pi))) % n_rays
+        lidar = np.roll(self.lidar_norm, shift).astype(np.float32)
 
         # --- Position (2 dims) ---
         pos = np.array([
@@ -195,11 +253,23 @@ class ObservationBuilder:
             self.robot_y / self.map_height,
         ], dtype=np.float32)
 
-        # --- Wind (2 dims) — use locked mean from episode start ---
-        wind = np.array([
-            self._locked_wind_speed / cfg.WIND_MAX_SPEED,
-            self._locked_wind_dir / (2.0 * np.pi),
-        ], dtype=np.float32)
+        # --- Wind (2 dims) ---
+        if self._local_wind_obs:
+            # Local point-wind at the robot, Cartesian components, encoded
+            # exactly as training's WindModel.get_local_wind:
+            #   (component / WIND_MAX_SPEED + 1) / 2, clipped [0,1]; 0.5 = no wind.
+            ux = self._live_wind_speed * np.cos(self._live_wind_dir)
+            uy = self._live_wind_speed * np.sin(self._live_wind_dir)
+            ms = cfg.WIND_MAX_SPEED if cfg.WIND_MAX_SPEED > 0 else 1.0
+            wind = np.clip(
+                (np.array([ux, uy], dtype=np.float32) / ms + 1.0) / 2.0, 0.0, 1.0
+            )
+        else:
+            # Mean-polar wind locked from episode start (champ / deployment).
+            wind = np.array([
+                self._locked_wind_speed / cfg.WIND_MAX_SPEED,
+                self._locked_wind_dir / (2.0 * np.pi),
+            ], dtype=np.float32)
 
         # --- Time (1 dim) ---
         time_frac = np.array(
