@@ -108,22 +108,22 @@ env_b:
   sim1:
     source: [22.5, 10.5]
     robot_start: [2.5, 14.75]
-    start_time: 200
+    start_time: 800
     notes: ""
   sim2:
     source: [18.0, 10.5]
     robot_start: [2.5, 14.75]
-    start_time: 200
+    start_time: 800
     notes: ""
   sim3:
     source: [14.0, 12.0]
     robot_start: [2.5, 14.75]
-    start_time: 200
+    start_time: 1200
     notes: ""
   sim4:
     source: [6.5, 5.5]
     robot_start: [2.5, 14.75]
-    start_time: 200
+    start_time: 800
     notes: ""
 
 env_c:
@@ -137,7 +137,7 @@ env_c_nowind:
   sim1:
     source: [18.0, 7.5]
     robot_start: [2.5, 4.5]
-    start_time: 200
+    start_time: 800
     notes: "No wind variant — slower gas dispersal, longer warmup."
 
 env_c_slow:

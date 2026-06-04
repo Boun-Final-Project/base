@@ -214,7 +214,7 @@ for sim in "${sim_list[@]}"; do
 
     # Step 2: Simulation
     echo -e "\n  ${YELLOW}[2/2]${RESET} Simulating..."
-    ros2 launch test_env gaden_sim_launch.py scenario:="$scenario" configuration:="$config" simulation:="$sim"
+    ros2 launch test_env gaden_sim_launch.py scenario:="$scenario" configuration:="$config" simulation:="$sim" sim_time:=1500
     sim_status=$?
 
     if [ $sim_status -ne 0 ]; then

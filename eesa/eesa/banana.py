@@ -497,7 +497,18 @@ class Banana:
 
     # ------------------------------------------------------------------
     def navigate(self):
-        self.rc.send_goal(self.goal.x, self.goal.y, self.goal.yaw)
+        # Validate the goal against the map: snap it to the nearest known-free
+        # cell with clearance, so we never hand Nav2 a goal inside / against a
+        # wall (which makes the planner fail and the robot wedge -> ROBOT_STUCK).
+        gx, gy = self.goal.x, self.goal.y
+        snapped = self.mc.nearest_free_world(gx, gy)
+        if snapped is None:
+            snapped = (gx, gy)
+        elif abs(snapped[0] - gx) > 1e-3 or abs(snapped[1] - gy) > 1e-3:
+            self.node.get_logger().info(
+                f'Goal clamped to free cell: ({gx:.2f},{gy:.2f}) -> '
+                f'({snapped[0]:.2f},{snapped[1]:.2f})')
+        self.rc.send_goal(snapped[0], snapped[1], self.goal.yaw)
         self.cal_end_time = timer()
 
     def in_motion(self):
