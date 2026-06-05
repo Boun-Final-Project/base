@@ -75,6 +75,8 @@ from rclpy.action import ActionClient
 from nav2_msgs.action import NavigateToPose
 from efe_igdm.planning.navigator import Navigator
 
+from .escape_planner import CirclingEscape
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -182,6 +184,7 @@ class GadenRLNode(Node):
         self._init_state()
         self._load_occupancy_map()
         self._load_agent()
+        self._setup_escape()
         self._init_ros_interfaces()
 
         self.get_logger().info(f'GadenRLNode ready. Checkpoint: {self._checkpoint_path}')
@@ -405,6 +408,43 @@ class GadenRLNode(Node):
                 f'Debug dumps every {self._debug_dump_every} steps → {self._debug_dump_dir}'
             )
 
+    def _setup_escape(self):
+        """Optionally enable the SLAM-based circling-escape (OSL_ESCAPE=1).
+
+        Builds an online occupancy map from LiDAR and, when the policy is stuck
+        circling, drives to the largest unexplored frontier. Default OFF so the
+        baseline behaviour is unchanged unless explicitly enabled.
+        """
+        self._escape = None
+        if os.environ.get('OSL_ESCAPE', '0') != '1':
+            return
+        try:
+            self._escape = CirclingEscape(
+                self._occ_map,
+                robot_radius=cfg.ROBOT_RADIUS,
+                logger=self.get_logger(),
+                win=int(os.environ.get('OSL_ESCAPE_WIN', '25')),
+                ratio=float(os.environ.get('OSL_ESCAPE_RATIO', '0.2')),
+                streak=int(os.environ.get('OSL_ESCAPE_STREAK', '35')),
+                cooldown=int(os.environ.get('OSL_ESCAPE_COOLDOWN', '40')),
+                min_dist=float(os.environ.get('OSL_ESCAPE_MINDIST', '3.0')),
+                cov_res=float(os.environ.get('OSL_ESCAPE_COV_RES', '0.5')),
+                cov_win=int(os.environ.get('OSL_ESCAPE_COV_WIN', '40')),
+                cov_k=int(os.environ.get('OSL_ESCAPE_COV_K', '3')),
+                cov_streak=int(os.environ.get('OSL_ESCAPE_COV_STREAK', '25')),
+            )
+            self.get_logger().info(
+                'SLAM stuck-escape ENABLED — trigger on EITHER signal: '
+                f'circling (eff-streak>={self._escape.streak_thr}, win={self._escape.win}, '
+                f'ratio={self._escape.ratio}) OR loitering (coverage-stagnation>='
+                f'{self._escape.cov_streak_thr}: <{self._escape.cov_k} new '
+                f'{self._escape.cov_res}m-cells in {self._escape.cov_win} steps); '
+                f'cooldown={self._escape.cooldown}, min_dist={self._escape.min_dist}m'
+            )
+        except Exception as exc:
+            self.get_logger().error(f'Failed to init circling-escape: {exc} — disabled.')
+            self._escape = None
+
     def _init_ros_interfaces(self):
         """Set up subscribers and the Navigator (reused from efe_igdm)."""
         self._pose_sub = self.create_subscription(
@@ -562,6 +602,11 @@ class GadenRLNode(Node):
         self._latest_lidar_min = min(finite_ranges) if finite_ranges else None
         self._obs_builder.update_lidar(msg)
 
+        # Fold the same scan into the online SLAM map for the circling-escape.
+        if self._escape is not None:
+            self._escape.update_scan(
+                msg, self._robot_x, self._robot_y, self._current_theta)
+
     def _wind_callback(self, msg: Anemometer):
         # Mean wind is loaded from the CFD file at startup (used by mean-wind
         # policies). For local point-wind policies (OSL_LOCAL_WIND_OBS=1) the
@@ -664,6 +709,34 @@ class GadenRLNode(Node):
             )
             self._end_episode(success=True)
             return
+
+        # --- SLAM circling detection + frontier-exploration escape (opt-in) ---
+        # When the policy is stuck circling (sustained low displacement-efficiency),
+        # drive to the largest unexplored frontier of the online SLAM map instead
+        # of issuing another policy step, then resume the policy from there.
+        if self._escape is not None:
+            self._escape.record_step(self._robot_x, self._robot_y)
+            tgt = self._escape.maybe_escape_target(
+                self._robot_x, self._robot_y, self._step_in_episode)
+            if tgt is not None:
+                tx, ty, fsize, fdist = tgt
+                self.get_logger().warn(
+                    f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
+                    f'STUCK ({self._escape.stuck_reason}) → frontier escape '
+                    f'#{self._escape.n_escapes} to ({tx:.2f},{ty:.2f}) '
+                    f'[frontier {fsize} cells, {fdist:.1f}m away, '
+                    f'mapped={self._escape.mapped_fraction()*100:.0f}%]')
+                if self._use_nav2 and self._navigator is not None:
+                    self._is_moving = True
+                    self._drive_canceling = False
+                    self._drive_goal_time = self.get_clock().now()
+                    self._navigator.send_goal(
+                        tx, ty, use_orientation=False,
+                        tolerance=self._nav_goal_tolerance)
+                else:
+                    self._teleport_to(tx, ty)
+                self._step_in_episode += 1
+                return
 
         # --- Per-step state update ---
         # Flat obs: step 0 is seeded by the first gas callback, so skip.
