@@ -28,8 +28,10 @@ model-based baselines (ADSM/EESA) build.
 """
 
 import math
+import os
 from collections import deque
 
+import numpy as np
 from efe_igdm.mapping.occupancy_grid import create_empty_occupancy_map
 from efe_igdm.mapping.lidar_mapper import LidarMapper
 from efe_igdm.planning.global_planner import GlobalPlanner
@@ -62,11 +64,19 @@ class CirclingEscape:
     min_dist : float
         Prefer frontier targets at least this far away (to actually leave the
         stuck region); relaxed if no far frontier exists.
+    target_mode : "largest" | "nearest"
+        How to choose among frontier candidates (all >= min_dist):
+        - "largest": biggest unexplored region (size - 0.5*dist). Big jumps that
+          can land directly on a far source region (helps many_rooms) but waste
+          budget on huge maps (hurts ultimate).
+        - "nearest": closest frontier >= min_dist. Incremental local exploration;
+          less wasted travel on big maps, reaches far sources via several hops.
     """
 
     def __init__(self, reference_map, robot_radius=0.25, logger=None,
                  win=25, ratio=0.2, streak=35, cooldown=40, min_dist=3.0,
-                 cov_res=0.5, cov_win=40, cov_k=3, cov_streak=25):
+                 cov_res=0.5, cov_win=40, cov_k=3, cov_streak=25,
+                 target_mode='largest'):
         self.slam_map = create_empty_occupancy_map(reference_map)
         self.mapper = LidarMapper(self.slam_map)
         self.gp = GlobalPlanner(self.slam_map, robot_radius=robot_radius,
@@ -85,6 +95,8 @@ class CirclingEscape:
 
         self.cooldown = int(cooldown)
         self.min_dist = float(min_dist)
+        self.target_mode = str(target_mode)
+        self.dump_dir = os.environ.get('OSL_ESCAPE_DUMP', '').strip()  # debug: dump SLAM grid per escape
 
         self._pos = deque(maxlen=self.win + 1)
         self.streak = 0                       # efficiency streak counter
@@ -171,17 +183,54 @@ class CirclingEscape:
             d = math.hypot(cx - x, cy - y)
             cands.append((c.size, d, cx, cy))
 
-        # Prefer frontiers far enough to leave the basin; among those pick the
-        # LARGEST unexplored region (most coverage value), mild distance penalty.
+        # Among frontiers far enough to leave the basin, choose by target_mode:
+        #   nearest -> closest one (incremental exploration, less wasted travel)
+        #   largest -> biggest unexplored region (size - 0.5*dist; big jumps)
         far = [c for c in cands if c[1] >= self.min_dist] or cands
-        best = max(far, key=lambda c: c[0] - 0.5 * c[1])
+        if self.target_mode == 'nearest':
+            best = min(far, key=lambda c: c[1])
+        else:
+            best = max(far, key=lambda c: c[0] - 0.5 * c[1])
 
         self.streak = 0          # consumed; re-arm both signals after relocation
         self.cov_streak = 0
         self.n_escapes += 1
+
+        if self.dump_dir:        # debug snapshot: the actual SLAM grid + chosen target
+            try:
+                os.makedirs(self.dump_dir, exist_ok=True)
+                fc = np.array(self.gp.frontier_cells, dtype=np.int32) if self.gp.frontier_cells else np.zeros((0, 2), np.int32)
+                np.savez(os.path.join(self.dump_dir, f'escape_{self.n_escapes:02d}_step{step}.npz'),
+                         grid=self.slam_map.grid.astype(np.int8),
+                         origin_x=self.slam_map.origin_x, origin_y=self.slam_map.origin_y,
+                         res=self.slam_map.resolution,
+                         robot=np.array([x, y]), target=np.array([best[2], best[3]]),
+                         frontier_cells=fc)
+            except Exception as exc:
+                if self.log is not None:
+                    self.log.warn(f'[escape] dump failed: {exc}')
+
         return (best[2], best[3], int(best[0]), round(best[1], 1))
 
     # --------------------------------------------------------------- helpers
+    def dump_map(self, step, x, y):
+        """Debug: snapshot the current SLAM grid + frontiers + robot pose."""
+        if not self.dump_dir:
+            return
+        try:
+            os.makedirs(self.dump_dir, exist_ok=True)
+            self.gp.detect_frontiers()
+            fc = (np.array(self.gp.frontier_cells, dtype=np.int32)
+                  if self.gp.frontier_cells else np.zeros((0, 2), np.int32))
+            np.savez(os.path.join(self.dump_dir, f'step_{step:04d}.npz'),
+                     grid=self.slam_map.grid.astype(np.int8),
+                     origin_x=self.slam_map.origin_x, origin_y=self.slam_map.origin_y,
+                     res=self.slam_map.resolution,
+                     robot=np.array([float(x), float(y)]), frontier_cells=fc)
+        except Exception as exc:
+            if self.log is not None:
+                self.log.warn(f'[escape] map dump failed: {exc}')
+
     def mapped_fraction(self):
         """Fraction of grid cells that are no longer unknown (for logging)."""
         try:

@@ -290,6 +290,7 @@ class GadenRLNode(Node):
         self._drive_canceling: bool = False  # cancel issued, awaiting completion
         self._search_complete: bool = False
         self._start_teleport_done: bool = False
+        self._slam_enabled: bool = False   # gate SLAM updates to post-teleport (set in _take_step)
         self._last_step_time_ns: int = 0
         self._latest_gas_raw: Optional[float] = None
         self._latest_wind_speed: Optional[float] = None
@@ -416,6 +417,7 @@ class GadenRLNode(Node):
         baseline behaviour is unchanged unless explicitly enabled.
         """
         self._escape = None
+        self._escape_dump_every = int(os.environ.get('OSL_ESCAPE_DUMP_EVERY', '0'))
         if os.environ.get('OSL_ESCAPE', '0') != '1':
             return
         try:
@@ -432,6 +434,7 @@ class GadenRLNode(Node):
                 cov_win=int(os.environ.get('OSL_ESCAPE_COV_WIN', '40')),
                 cov_k=int(os.environ.get('OSL_ESCAPE_COV_K', '3')),
                 cov_streak=int(os.environ.get('OSL_ESCAPE_COV_STREAK', '25')),
+                target_mode=os.environ.get('OSL_ESCAPE_TARGET', 'largest'),
             )
             self.get_logger().info(
                 'SLAM stuck-escape ENABLED — trigger on EITHER signal: '
@@ -439,7 +442,8 @@ class GadenRLNode(Node):
                 f'ratio={self._escape.ratio}) OR loitering (coverage-stagnation>='
                 f'{self._escape.cov_streak_thr}: <{self._escape.cov_k} new '
                 f'{self._escape.cov_res}m-cells in {self._escape.cov_win} steps); '
-                f'cooldown={self._escape.cooldown}, min_dist={self._escape.min_dist}m'
+                f'cooldown={self._escape.cooldown}, min_dist={self._escape.min_dist}m, '
+                f'target={self._escape.target_mode}'
             )
         except Exception as exc:
             self.get_logger().error(f'Failed to init circling-escape: {exc} — disabled.')
@@ -602,8 +606,15 @@ class GadenRLNode(Node):
         self._latest_lidar_min = min(finite_ranges) if finite_ranges else None
         self._obs_builder.update_lidar(msg)
 
-        # Fold the same scan into the online SLAM map for the circling-escape.
-        if self._escape is not None:
+        # Fold the same scan into the online SLAM map for the circling-escape —
+        # but ONLY once the episode is actually running (_slam_enabled, set in the
+        # first _take_step). The robot's GADEN spawn pose is often near the source
+        # (e.g. many_rooms spawns at [1.35,2.05], ~1 m from it). Gating on scan
+        # stamps alone is NOT enough: the first post-teleport scan can arrive while
+        # self._robot_x/y is still the stale spawn pose, mapping a phantom region
+        # onto the source. _take_step only runs once the pose is confirmed at the
+        # start, so keying off it guarantees every integrated scan uses a real pose.
+        if self._escape is not None and self._slam_enabled:
             self._escape.update_scan(
                 msg, self._robot_x, self._robot_y, self._current_theta)
 
@@ -715,7 +726,12 @@ class GadenRLNode(Node):
         # drive to the largest unexplored frontier of the online SLAM map instead
         # of issuing another policy step, then resume the policy from there.
         if self._escape is not None:
+            self._slam_enabled = True   # pose is now confirmed post-teleport
             self._escape.record_step(self._robot_x, self._robot_y)
+            if self._escape_dump_every and \
+                    self._step_in_episode % self._escape_dump_every == 0:
+                self._escape.dump_map(self._step_in_episode,
+                                      self._robot_x, self._robot_y)
             tgt = self._escape.maybe_escape_target(
                 self._robot_x, self._robot_y, self._step_in_episode)
             if tgt is not None:
