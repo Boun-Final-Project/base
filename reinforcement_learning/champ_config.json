@@ -1,0 +1,117 @@
+{
+  "ACTOR_HEAD_DIM": 128,
+  "BACKBONE_LAYERS": 2,
+  "CLIP_EPSILON": 0.3,
+  "COARSE_RESOLUTION": 0.5,
+  "CRITIC_HEAD_DIM": 128,
+  "CURRICULUM_FRACTION": 0.5,
+  "CURRICULUM_HEIGHT_START": [
+    6.0,
+    8.0
+  ],
+  "CURRICULUM_WIDTH_START": [
+    8.0,
+    10.0
+  ],
+  "DISPERSION_RATE": 0.12,
+  "D_SUCCESS": 0.5,
+  "ENTROPY_COEFF": 0.02,
+  "FILAMENTS_PER_STEP": 2,
+  "FILAMENT_DT": 0.5,
+  "FILAMENT_INITIAL_SIGMA": 0.05,
+  "FILAMENT_K": 0.02,
+  "FILAMENT_MASS": 1.0,
+  "FILAMENT_MAX_AGE": 120,
+  "FILAMENT_MIN_SIGMA": 0.01,
+  "FILAMENT_REFLECTION_ENERGY": 0.8,
+  "FILAMENT_TURBULENCE_SCALE": 0.2,
+  "FILAMENT_WALL_OCCLUSION": true,
+  "FILAMENT_WARMUP_STEPS": 15,
+  "GAE_LAMBDA": 0.95,
+  "GAMMA": 0.99,
+  "GAS_FEATURES_PER_STEP": 3,
+  "GAS_GRU_HIDDEN": 64,
+  "GAS_HISTORY_LENGTH": 10,
+  "GAS_MODEL": "filament",
+  "GRID_RESOLUTION": 0.1,
+  "HIDDEN_DIM": 256,
+  "LEARNING_RATE": 0.0003,
+  "LIDAR_CONV_CHANNELS": 2,
+  "LIDAR_CONV_KERNEL": 5,
+  "LIDAR_MAX_RANGE": 3.0,
+  "LIDAR_NOISE_STD": 0.005,
+  "LIDAR_NUM_RAYS": 72,
+  "MAX_GRAD_NORM": 0.5,
+  "MAX_STEPS": 600,
+  "MIN_GAP_SIZE": 1.2,
+  "MIN_SOURCE_ROBOT_DIST": 3.0,
+  "NUM_ENVS": 256,
+  "NUM_MINIBATCHES": 32,
+  "ROBOT_RADIUS": 0.25,
+  "ROLLOUT_LENGTH": 1024,
+  "ROOM_HEIGHT_RANGE": [
+    6.0,
+    15.0
+  ],
+  "ROOM_WIDTH_RANGE": [
+    8.0,
+    20.0
+  ],
+  "R_COLLISION": -5.0,
+  "R_DETECTION": 0.75,
+  "R_STEP": -1.0,
+  "R_SUCCESS": 200.0,
+  "SENSOR_ALPHA": 0.1,
+  "SENSOR_SIGMA_ENV": 0.1,
+  "SENSOR_THRESHOLD_WEIGHT": 0.5,
+  "SIGMA_M_BASE": 1.5,
+  "SOURCE_RELEASE_RATE": 1.0,
+  "SPATIAL_ACTOR_DIM": 128,
+  "SPATIAL_CELL_RES": 0.2,
+  "SPATIAL_CNN_OUT_CH": 48,
+  "SPATIAL_CRITIC_DIM": 256,
+  "SPATIAL_GRID_SIZE": 221,
+  "SPATIAL_GRU_HIDDEN": 256,
+  "SPATIAL_LAMBDA": 0.015,
+  "SPATIAL_PROJ_DIM": 512,
+  "SPATIAL_RES_BLOCKS": 3,
+  "SPATIAL_SEQ_LEN": 16,
+  "SPATIAL_SHARED_HIDDEN": [
+    512,
+    256
+  ],
+  "STATE_DIM": 107,
+  "STEP_SIZE": 0.5,
+  "TEMPLATE_CURRICULUM_STAGES": [
+    [
+      0.0,
+      1
+    ],
+    [
+      0.25,
+      3
+    ],
+    [
+      0.5,
+      5
+    ]
+  ],
+  "TOTAL_TIMESTEPS": 200000000,
+  "UPDATE_EPOCHS": 10,
+  "VALUE_LOSS_COEFF": 0.5,
+  "WALL_THICKNESS": 0.2,
+  "WIND_DISPERSION_FACTOR": 2.0,
+  "WIND_MAX_SPEED": 2.0,
+  "WIND_SPEED_RANGE": [
+    0.1,
+    1.5
+  ],
+  "seed": 1,
+  "template": -1,
+  "arch": "dual",
+  "curriculum": true,
+  "anneal_lr": true,
+  "anneal_start": 0.5,
+  "target_kl": 0.05,
+  "output_dir": "runs/lidar-007"
+}
