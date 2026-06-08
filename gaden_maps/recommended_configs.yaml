@@ -80,10 +80,10 @@ curved_labrinth_right:
 
 many_rooms:
   sim1:
-    source: [1.45, 3.0]
+    source: [2.8, 4.2]
     robot_start: [15.0, 8.0]
     start_time: 250
-    notes: "Multiple rooms. Source in first room, robot starts last room."
+    notes: "Multiple rooms. Scoring source MATCHED to the GADEN gas source (sim.yaml 2.8,4.2) so success = reaching where the gas is actually emitted."
   sim2:
     source: [2.0, 8.0]
     robot_start: [15.0, 8.0]
