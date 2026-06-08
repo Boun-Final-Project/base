@@ -49,8 +49,9 @@ from rclpy.executors import MultiThreadedExecutor
 
 from olfaction_msgs.msg import GasSensor, Anemometer
 from gaden_msgs.srv import WindPosition
-from geometry_msgs.msg import PoseWithCovarianceStamped, Point
+from geometry_msgs.msg import PoseWithCovarianceStamped, Point, Twist
 from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Path as NavPath
 from visualization_msgs.msg import Marker
 
 # RL package imports: add src/base/ to sys.path so both the installed entry
@@ -291,6 +292,9 @@ class GadenRLNode(Node):
         self._search_complete: bool = False
         self._start_teleport_done: bool = False
         self._slam_enabled: bool = False   # gate SLAM updates to post-teleport (set in _take_step)
+        self._latest_plan = []             # latest Nav2 global plan (debug)
+        self._capture_plan_for = None      # step# to save the next plan for (debug)
+        self._escape_last_target = (0.0, 0.0)
         self._last_step_time_ns: int = 0
         self._latest_gas_raw: Optional[float] = None
         self._latest_wind_speed: Optional[float] = None
@@ -312,6 +316,26 @@ class GadenRLNode(Node):
         # d<1.0 guard skips teleport jumps so it is meaningful in both modes.
         self._last_pose_xy: Optional[tuple] = None
         self._travel_distance_m: float = 0.0
+
+        # Deterministic cmd_vel drive (OSL_DET_DRIVE=1): bypass Nav2/DWB and drive
+        # each target via a proportional rotate-then-go controller publishing
+        # /PioneerP3DX/cmd_vel directly. DWB skims walls (robot modelled 5 cm) and
+        # wedges on near-wall 0.5 m steps; this drives a straight line and lands ON
+        # the commanded point. Same mechanism a sibling RL node uses successfully.
+        self._det_drive: bool = os.environ.get('OSL_DET_DRIVE', '0') == '1'
+        self._det_linear: float = float(os.environ.get('OSL_DET_LINEAR', '0.3'))
+        self._det_gain: float = float(os.environ.get('OSL_DET_GAIN', '2.0'))
+        self._det_arrive_tol: float = float(os.environ.get('OSL_DET_ARRIVE_TOL', '0.15'))
+        self._det_timeout: float = float(os.environ.get('OSL_DET_TIMEOUT', '12.0'))
+        self._cmd_vel_pub = None
+        self._waypoint_x: Optional[float] = None
+        self._waypoint_y: Optional[float] = None
+        self._waypoint_start_ns: int = 0
+        # HYBRID: det-drive (cmd_vel) drives ONLY escape hops; policy steps stay on
+        # Nav2/DWB (which avoids obstacles — det-drive has none and collides in tight
+        # maps). _cmdvel_active is True only while a cmd_vel escape hop is executing,
+        # so _cmd_vel_tick never publishes during a Nav2 policy drive.
+        self._cmdvel_active: bool = False
 
         # Wind z-snap (local-wind policies only). The anemometer reads wind at a
         # fixed TF height z=0.5, but the CFD wind field has irregular z-banding:
@@ -430,18 +454,17 @@ class GadenRLNode(Node):
                 streak=int(os.environ.get('OSL_ESCAPE_STREAK', '35')),
                 cooldown=int(os.environ.get('OSL_ESCAPE_COOLDOWN', '40')),
                 min_dist=float(os.environ.get('OSL_ESCAPE_MINDIST', '3.0')),
-                cov_res=float(os.environ.get('OSL_ESCAPE_COV_RES', '0.5')),
-                cov_win=int(os.environ.get('OSL_ESCAPE_COV_WIN', '40')),
-                cov_k=int(os.environ.get('OSL_ESCAPE_COV_K', '3')),
-                cov_streak=int(os.environ.get('OSL_ESCAPE_COV_STREAK', '25')),
+                grow_win=int(os.environ.get('OSL_ESCAPE_GROW_WIN', '120')),
+                grow_min=int(os.environ.get('OSL_ESCAPE_GROW_MIN', '250')),
+                frontier_min_cells=int(os.environ.get('OSL_ESCAPE_FRONTIER_MIN', '12')),
                 target_mode=os.environ.get('OSL_ESCAPE_TARGET', 'largest'),
             )
             self.get_logger().info(
                 'SLAM stuck-escape ENABLED — trigger on EITHER signal: '
                 f'circling (eff-streak>={self._escape.streak_thr}, win={self._escape.win}, '
-                f'ratio={self._escape.ratio}) OR loitering (coverage-stagnation>='
-                f'{self._escape.cov_streak_thr}: <{self._escape.cov_k} new '
-                f'{self._escape.cov_res}m-cells in {self._escape.cov_win} steps); '
+                f'ratio={self._escape.ratio}) OR map-growth stall '
+                f'(<{self._escape.grow_min} new cells in {self._escape.grow_win} steps); '
+                f'frontier gate >= {self._escape.frontier_min_cells} cells; '
                 f'cooldown={self._escape.cooldown}, min_dist={self._escape.min_dist}m, '
                 f'target={self._escape.target_mode}'
             )
@@ -465,6 +488,10 @@ class GadenRLNode(Node):
             LaserScan,
             '/PioneerP3DX/laser_scanner',
             self._lidar_callback, 10)
+
+        # Debug: Nav2 global plan (to inspect the path an escape goal produces).
+        self._plan_sub = self.create_subscription(
+            NavPath, '/PioneerP3DX/plan', self._plan_callback, 10)
 
         self._wind_sub = self.create_subscription(
             Anemometer,
@@ -511,6 +538,15 @@ class GadenRLNode(Node):
         else:
             self.get_logger().info('Motion mode: TELEPORT (instant)')
 
+        if self._det_drive:
+            self._cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
+            self._cmd_vel_timer = self.create_timer(0.05, self._cmd_vel_tick)
+            self.get_logger().info(
+                'HYBRID drive: ESCAPE HOPS via deterministic cmd_vel '
+                f'(linear={self._det_linear} m/s, gain={self._det_gain}, '
+                f'arrive_tol={self._det_arrive_tol} m, timeout={self._det_timeout}s); '
+                'POLICY steps stay on Nav2/DWB (obstacle-avoiding)')
+
 
     # ------------------------------------------------------------------
     # ROS2 callbacks
@@ -550,16 +586,21 @@ class GadenRLNode(Node):
             # Per-step drive timeout: if DWB gets wedged (recovery-loop stall),
             # cancel the goal so the policy re-predicts in ~drive_timeout s instead
             # of waiting ~150 s for Nav2's behavior tree to give up.
-            if (self._drive_timeout > 0.0 and self._drive_goal_time is not None
+            # Escape hops are short (~0.5 m line-of-sight); fail them fast (10 s)
+            # so a wedged hop is skipped quickly instead of burning 30 s.
+            eff_timeout = self._drive_timeout
+            if self._escape is not None and self._escape.escaping:
+                eff_timeout = min(self._drive_timeout, 10.0)
+            if (eff_timeout > 0.0 and self._drive_goal_time is not None
                     and not self._drive_canceling):
                 elapsed = (self.get_clock().now()
                            - self._drive_goal_time).nanoseconds * 1e-9
-                if elapsed > self._drive_timeout:
+                if elapsed > eff_timeout:
                     self._drive_canceling = True
                     self.get_logger().warn(
                         f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
                         f'DRIVE TIMEOUT — goal not reached in {elapsed:.1f}s '
-                        f'(> {self._drive_timeout:.1f}s); canceling, re-predicting.')
+                        f'(> {eff_timeout:.1f}s); canceling, re-predicting.')
                     if self._navigator is not None:
                         self._navigator.cancel_current_goal()
             return
@@ -617,6 +658,24 @@ class GadenRLNode(Node):
         if self._escape is not None and self._slam_enabled:
             self._escape.update_scan(
                 msg, self._robot_x, self._robot_y, self._current_theta)
+
+    def _plan_callback(self, msg: NavPath):
+        """Store Nav2's latest global plan; save it if an escape just requested capture."""
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        self._latest_plan = pts
+        if self._capture_plan_for is not None and self._escape is not None \
+                and self._escape.dump_dir and pts:
+            try:
+                np.savez(os.path.join(self._escape.dump_dir,
+                                      f'plan_step{self._capture_plan_for}.npz'),
+                         path=np.array(pts, dtype=np.float32),
+                         target=np.array(self._escape_last_target, dtype=np.float32))
+                self.get_logger().warn(
+                    f'[escape] captured Nav2 plan ({len(pts)} pts, '
+                    f'end=({pts[-1][0]:.2f},{pts[-1][1]:.2f})) for escape@{self._capture_plan_for}')
+            except Exception as exc:
+                self.get_logger().warn(f'[escape] plan capture failed: {exc}')
+            self._capture_plan_for = None
 
     def _wind_callback(self, msg: Anemometer):
         # Mean wind is loaded from the CFD file at startup (used by mean-wind
@@ -679,6 +738,58 @@ class GadenRLNode(Node):
         # sim-time stamp is strictly newer than this.
         self._teleport_wait_stamp_ns = self._latest_scan_stamp_ns
 
+    def _start_cmdvel_move(self, x, y):
+        """Begin a deterministic cmd_vel drive to (x,y). _cmd_vel_tick drives it
+        and clears _is_moving on arrival/timeout (mirrors _on_nav_complete).
+        Leaves _drive_goal_time None so the Nav2 per-step timeout path stays inert."""
+        self._waypoint_x = float(x)
+        self._waypoint_y = float(y)
+        self._waypoint_start_ns = self.get_clock().now().nanoseconds
+        self._is_moving = True
+        self._cmdvel_active = True
+        self._drive_goal_time = None
+
+    def _cmd_vel_tick(self):
+        """Proportional rotate-then-go controller: turn to face the target, then
+        drive straight to it. Bypasses Nav2/DWB so it never wedges on near-wall
+        hops and lands ON the commanded point. Stops on arrival or timeout."""
+        if not self._cmdvel_active or self._waypoint_x is None:
+            return                                  # only drive during an escape hop
+        if self._robot_x is None or self._current_theta is None:
+            return
+        dx = self._waypoint_x - self._robot_x
+        dy = self._waypoint_y - self._robot_y
+        dist = math.hypot(dx, dy)
+        timed_out = ((self.get_clock().now().nanoseconds - self._waypoint_start_ns)
+                     > self._det_timeout * 1e9)
+        if dist < self._det_arrive_tol or timed_out:
+            self._cmd_vel_pub.publish(Twist())        # stop
+            self._cmdvel_active = False
+            self._is_moving = False                   # -> next pose cb takes a step
+            return
+        heading_error = math.atan2(dy, dx) - self._current_theta
+        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
+        tw = Twist()
+        # rotate in place when badly misaligned, else drive forward while steering
+        tw.linear.x = 0.0 if abs(heading_error) > 0.8 else self._det_linear
+        tw.angular.z = self._det_gain * heading_error
+        self._cmd_vel_pub.publish(tw)
+
+    def _drive_escape_waypoint(self, wp):
+        """Drive one short escape-path waypoint (Nav2 stop-go, cmd_vel, or teleport)."""
+        wx, wy = float(wp[0]), float(wp[1])
+        if self._det_drive:
+            self._start_cmdvel_move(wx, wy)
+            return
+        if self._use_nav2 and self._navigator is not None:
+            self._is_moving = True
+            self._drive_canceling = False
+            self._drive_goal_time = self.get_clock().now()
+            self._navigator.send_goal(
+                wx, wy, use_orientation=False, tolerance=self._nav_goal_tolerance)
+        else:
+            self._teleport_to(wx, wy)
+
     def _on_nav_complete(self):
         """Nav2 goal finished (success / abort / reject / cancel). Clear the moving
         flag so the next ground_truth pose callback takes the next step (stop-go)."""
@@ -722,37 +833,46 @@ class GadenRLNode(Node):
             return
 
         # --- SLAM circling detection + frontier-exploration escape (opt-in) ---
-        # When the policy is stuck circling (sustained low displacement-efficiency),
-        # drive to the largest unexplored frontier of the online SLAM map instead
-        # of issuing another policy step, then resume the policy from there.
+        # When the policy is stuck (circling or loitering), plan a free-space path
+        # to a reachable unexplored frontier and DRIVE IT IN SHORT ~0.5 m HOPS.
+        # Short line-of-sight hops are what the DWB controller handles reliably;
+        # one long cross-doorway goal makes it wedge on the wall.
         if self._escape is not None:
             self._slam_enabled = True   # pose is now confirmed post-teleport
-            self._escape.record_step(self._robot_x, self._robot_y)
+            _og = 1 if (self._latest_gas_raw is not None
+                        and self._latest_gas_raw > self._escape.src_gas_eps) else 0
+            _v = self._latest_wind_speed if self._latest_wind_speed is not None else 0.0
+            _phi = self._latest_wind_dir if self._latest_wind_dir is not None else 0.0
+            self._escape.record_step(self._robot_x, self._robot_y, _og, _v, _phi)
             if self._escape_dump_every and \
                     self._step_in_episode % self._escape_dump_every == 0:
                 self._escape.dump_map(self._step_in_episode,
                                       self._robot_x, self._robot_y)
-            tgt = self._escape.maybe_escape_target(
-                self._robot_x, self._robot_y, self._step_in_episode)
-            if tgt is not None:
-                tx, ty, fsize, fdist = tgt
-                self.get_logger().warn(
-                    f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
-                    f'STUCK ({self._escape.stuck_reason}) → frontier escape '
-                    f'#{self._escape.n_escapes} to ({tx:.2f},{ty:.2f}) '
-                    f'[frontier {fsize} cells, {fdist:.1f}m away, '
-                    f'mapped={self._escape.mapped_fraction()*100:.0f}%]')
-                if self._use_nav2 and self._navigator is not None:
-                    self._is_moving = True
-                    self._drive_canceling = False
-                    self._drive_goal_time = self.get_clock().now()
-                    self._navigator.send_goal(
-                        tx, ty, use_orientation=False,
-                        tolerance=self._nav_goal_tolerance)
-                else:
-                    self._teleport_to(tx, ty)
-                self._step_in_episode += 1
-                return
+            # (a) continue an in-progress escape: drive the next path waypoint
+            if self._escape.escaping:
+                wp = self._escape.next_waypoint(self._robot_x, self._robot_y)
+                if wp is not None:
+                    self._drive_escape_waypoint(wp)
+                    self._step_in_episode += 1
+                    return
+                # path exhausted → fall through to resume the policy
+            else:
+                # (b) start an escape if stuck (plans the path, enters escaping)
+                info = self._escape.start_escape_if_stuck(
+                    self._robot_x, self._robot_y, self._step_in_episode)
+                if info is not None:
+                    tx, ty, fsize, fdist, nwp = info
+                    self.get_logger().warn(
+                        f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
+                        f'STUCK ({self._escape.stuck_reason}) → escape to '
+                        f'({tx:.2f},{ty:.2f}) via {nwp} hops '
+                        f'[frontier {fsize} cells, {fdist:.1f}m away, '
+                        f'mapped={self._escape.mapped_fraction()*100:.0f}%]')
+                    wp = self._escape.next_waypoint(self._robot_x, self._robot_y)
+                    if wp is not None:
+                        self._drive_escape_waypoint(wp)
+                        self._step_in_episode += 1
+                        return
 
         # --- Per-step state update ---
         # Flat obs: step 0 is seeded by the first gas callback, so skip.
@@ -856,13 +976,15 @@ class GadenRLNode(Node):
             wind_s_text = f'{self._latest_wind_speed:.2f}' if self._latest_wind_speed is not None else 'n/a'
             wind_d_text = f'{math.degrees(self._latest_wind_dir):.1f}' if self._latest_wind_dir is not None else 'n/a'
             lidar_text = f'{self._latest_lidar_min:.2f}' if self._latest_lidar_min is not None else 'n/a'
+            slam_text = (f' slam_grow={self._escape.slam_growth} mapped={self._escape.mapped_now}'
+                         if self._escape is not None else '')
             self.get_logger().info(
                 f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
                 f'Pos ({self._robot_x:.2f},{self._robot_y:.2f}) '
                 f'Action {action_text} θ={math.degrees(theta):.1f}deg → '
                 f'Target ({target_x:.2f},{target_y:.2f}) | '
                 f'd2src={dist_to_source:.2f}m gas={gas_text} wind=({wind_s_text}m/s,{wind_d_text}deg) '
-                f'lidar_min={lidar_text}m'
+                f'lidar_min={lidar_text}m{slam_text}'
             )
 
         # --- Collision check + clamp to free cell ---
@@ -881,7 +1003,8 @@ class GadenRLNode(Node):
         if self._publish_action_marker:
             self._publish_next_action_marker(target_x, target_y)
 
-        # --- Move robot: drive via Nav2 (stop-go) or teleport ---
+        # --- Move robot: Nav2 (stop-go) or teleport. Policy steps stay on Nav2/DWB
+        # (obstacle-avoiding); det-drive is reserved for escape hops only. ---
         if self._use_nav2 and self._navigator is not None:
             # Drive to the (collision-clamped) target. yaw=theta + use_orientation
             # makes the robot arrive facing the commanded direction so the next
