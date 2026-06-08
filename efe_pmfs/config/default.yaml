@@ -1,0 +1,88 @@
+efe_pmfs_node:
+  ros__parameters:
+    # --- Scenario auto-load (optional) ---
+    # If non-empty, reads install/test_env/share/test_env/scenarios/<scenario>/
+    # to populate map dimensions, mean wind vector, and true source position.
+    # Format: "<scenario>" (defaults to config1/sim1) or "<scenario>/<sim>".
+    # Examples: "env_b", "env_b/sim3", "env_c/sim1".
+    # When set, the map_*/wind_*/true_source_* params below are IGNORED.
+    scenario: ""
+
+    # --- Map (known bounding box; obstacles discovered via SLAM) ---
+    map_width_m: 24.0
+    map_height_m: 16.0
+    map_origin_x: 0.0
+    map_origin_y: 0.0
+    cell_size_m: 0.2
+
+    # --- Known mean wind (world frame, m/s) ---
+    # Set both to 0 for no-airflow regime. Otherwise, this is the prevailing
+    # downwind vector used by both the hit-propagation kernel and filament drift.
+    wind_u_mean: 0.0
+    wind_v_mean: 0.0
+
+    # --- Hit map ---
+    # Concentration above which a sample is a "hit". Matches MAPIR PMFS's
+    # `th_gas_present` (0.1–0.5 ppm in their GADEN scenarios). Units are
+    # whatever the gas sensor publishes — for GADEN's fake_pid this is ppm,
+    # but the absolute scale is arbitrary; tune so that clean-air samples
+    # read as miss and in-plume samples read as hit.
+    hit_threshold_ppm: 0.3
+    hit_prior: 0.3
+    # Kernel radius is in CELLS. With constant wind, σ_major ≈ sigma +
+    # stretch·|wind|, σ_minor ≈ sigma / (1 + stretch·|wind|/sigma). At 0.5 m
+    # cells, a sigma of 3 cells = 1.5 m of real-world influence per sample,
+    # which is appropriate for small arenas; drop to ~1.5 at 0.1 m cells.
+    hit_kernel_sigma: 3.0
+    hit_kernel_stretch: 1.0
+    hit_local_window: 20
+    confidence_sigma_spatial: 2.0
+    confidence_measurement_weight: 1.0
+
+    # --- Filament simulator ---
+    # At coarse cell sizes (≥0.5 m) and weak winds, per-step advection is a
+    # tiny fraction of a cell. Increase `filament_dt` so filaments traverse a
+    # meaningful number of cells during the warmup + recording phases.
+    # Rule of thumb: filament_dt * (|wind| + noise_stddev) ≈ cell_size / 10.
+    filament_noise_stddev: 0.2
+    filament_dt: 0.5
+    filament_min_warmup: 20
+    filament_max_warmup: 300
+    filament_record_steps: 100
+    filament_per_step: 5
+
+    # --- Source belief (fixed candidate lattice over bbox) ---
+    # Lattice spacing in cells. Candidate sources every `candidate_stride`
+    # cells — at 0.5 m cells, stride 2 = candidates every 1 m (good for small
+    # arenas); at 0.1 m cells, stride 5 = candidates every 0.5 m.
+    candidate_stride: 2
+    source_discrimination_power: 0.2
+    source_update_every_n_stops: 3
+    declaration_std_threshold: 0.7 # metres
+
+    # --- RRT-Infotaxis (local planner) ---
+    n_tn: 50
+    delta: 0.7
+    max_depth: 4
+    positive_weight: 0.8           # discount factor γ in Eq. 19
+
+    # --- Dual-mode ---
+    enable_global_planner: true
+    dead_end_epsilon: 0.6
+    dead_end_initial_threshold: 0.1
+    switch_back_threshold: 1.5
+
+    # --- Global planner (frontier + PRM) ---
+    prm_samples: 300
+    prm_connection_radius: 5.0
+    frontier_min_size: 3
+    lambda_p: 0.1
+    lambda_s: 0.05
+
+    # --- Navigation ---
+    xy_goal_tolerance: 0.3
+    robot_radius: 0.25
+
+    # --- Optional ground-truth source for experiment logging ---
+    true_source_x: -999.0
+    true_source_y: -999.0

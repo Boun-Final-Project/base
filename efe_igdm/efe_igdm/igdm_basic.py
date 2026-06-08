@@ -1,3 +1,4 @@
+import os
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
@@ -73,6 +74,7 @@ class RRTInfotaxisBasicNode(Node):
         self.declare_parameter('resample_threshold', 0.5)
         self.declare_parameter('true_source_x', 2.0)
         self.declare_parameter('true_source_y', 4.5)
+        self.declare_parameter('max_steps', 0)  # 0 = unlimited
         self.declare_parameter('sensor_alpha', 0.1)
         self.declare_parameter('sensor_sigma_env', 1.5)
         self.declare_parameter('sensor_num_levels', 10)
@@ -99,6 +101,7 @@ class RRTInfotaxisBasicNode(Node):
             'sensor_sigma_env': self.get_parameter('sensor_sigma_env').value,
             'sensor_num_levels': self.get_parameter('sensor_num_levels').value,
             'max_concentration': self.get_parameter('max_concentration').value,
+            'max_steps': self.get_parameter('max_steps').value,
         }
 
     def _init_state_variables(self):
@@ -111,6 +114,7 @@ class RRTInfotaxisBasicNode(Node):
         self.step_count = 0
         self.search_complete = False
         self.planning_pending = False
+        self.first_close_time: Optional[float] = None   # elapsed seconds when first within 0.5m of source
 
         # Stop-and-measure: wait for a fresh reading after arriving at waypoint
         self._measure_wait_start = None   # clock time when wait began
@@ -243,6 +247,12 @@ class RRTInfotaxisBasicNode(Node):
         if self.search_complete or self.sensor_raw_value is None or self.current_position is None:
             return
 
+        max_steps = self.params.get('max_steps', 0)
+        if max_steps > 0 and self.step_count >= max_steps:
+            self.get_logger().info(f'[MAX STEPS] Reached step limit ({max_steps}). Finishing.')
+            self._save_summary_and_finish()
+            return
+
         step_start_time = time.time()
 
         if not self.sensor_initialized:
@@ -283,6 +293,14 @@ class RRTInfotaxisBasicNode(Node):
             self._measure_wait_start = None
 
         self.get_logger().info(f'[STEP {self.step_count}] Pos: ({self.current_position[0]:.2f}, {self.current_position[1]:.2f}) | Sensor: {self.sensor_raw_value:.4f}')
+
+        # Track first time within 0.5m of true source
+        true_x, true_y = self.params['true_source_x'], self.params['true_source_y']
+        if self.first_close_time is None and true_x != -999.0:
+            dist_to_source = np.hypot(self.current_position[0] - true_x, self.current_position[1] - true_y)
+            if dist_to_source <= 0.5:
+                self.first_close_time = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
+                self.get_logger().info(f'[PROXIMITY] First within 0.5m of source at step {self.step_count}, t={self.first_close_time:.2f}s')
 
         # 4. Update Estimates
         self.particle_filter.update(self.sensor_raw_value, self.current_position)
@@ -490,10 +508,13 @@ class RRTInfotaxisBasicNode(Node):
         # Delegate summary writing to Logger
         summary_text = self.logger.save_summary(
             self.step_count, self.total_travel_distance, elapsed_time,
-            avg_comp_time, est_x, est_y, est_error
+            avg_comp_time, est_x, est_y, est_error,
+            first_close_time=self.first_close_time
         )
         self.get_logger().info('\n' + summary_text)
         self.search_complete = True
+        self.logger.close()
+        os._exit(0)
 
     # =========================================================================
     # CALLBACKS
