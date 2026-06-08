@@ -33,7 +33,11 @@ class BinarySensorModel:
         self.threshold = initial_measurement
 
     def update_threshold(self, current_measurement):
-        """Update threshold (Eq. 27): only increases if measurement > current threshold."""
+        """Update threshold by ratcheting up.
+
+        If measurement exceeds the threshold, pull it upward via an
+        exponential moving average. Otherwise, the threshold remains unchanged.
+        """
         if self.threshold is None:
             self.initialize_threshold(current_measurement)
         elif current_measurement > self.threshold:

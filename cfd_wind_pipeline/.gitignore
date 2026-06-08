@@ -1,0 +1,16 @@
+# Generated case directories and CFD artifacts
+case_*/
+postProcessing/
+constant/polyMesh/
+*.sqsh
+
+# Outputs / data
+*.npz
+*.png
+*.json
+!example_*.json
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

@@ -9,7 +9,7 @@ import numpy as np
 class LidarSim:
     """Simulates a 2D LiDAR sensor by raycasting on an occupancy grid."""
 
-    def __init__(self, num_rays, max_range, occupancy_grid):
+    def __init__(self, num_rays, max_range, occupancy_grid, noise_std=0.0):
         """
         Parameters
         ----------
@@ -19,10 +19,16 @@ class LidarSim:
             Maximum sensing distance in meters.
         occupancy_grid : OccupancyGrid
             The grid to raycast against.
+        noise_std : float, optional
+            Standard deviation of Gaussian noise applied to hit rays (meters).
+            Default 0.0 (no noise).
         """
         self.num_rays = num_rays
         self.max_range = max_range
         self.grid = occupancy_grid
+        self.noise_std = noise_std
+        # Clamp noise-perturbed distances to at least one grid resolution (minimum sensing distance)
+        self._min_range = occupancy_grid.resolution
         self.ray_angles = np.linspace(0, 2 * np.pi, num_rays, endpoint=False)
 
         res = occupancy_grid.resolution
@@ -31,22 +37,19 @@ class LidarSim:
         # distances from origin: res, 2*res, ..., n_steps*res
         t = np.arange(1, n_steps + 1) * res  # (S,)
 
-        cos_a = np.cos(self.ray_angles)  # (R,)
-        sin_a = np.sin(self.ray_angles)  # (R,)
-
-        # Offsets for each (ray, step): shape (R, S)
-        self._dx = cos_a[:, None] * t[None, :]  # (R, S)
-        self._dy = sin_a[:, None] * t[None, :]  # (R, S)
         self._t = t  # (S,)
         self._n_steps = n_steps
 
-    def scan(self, position):
+    def scan(self, position, heading=0.0):
         """Return normalized LiDAR distances from a world-frame position.
 
         Parameters
         ----------
         position : tuple
             (x, y) in meters.
+        heading : float, optional
+            Robot heading in radians. Ray angles are rotated by this amount.
+            Default 0.0.
 
         Returns
         -------
@@ -58,9 +61,18 @@ class LidarSim:
         gh = self.grid.grid_height
         ox, oy = position
 
+        # Compute ray directions rotated by heading
+        rotated_angles = self.ray_angles + heading  # (R,)
+        cos_a = np.cos(rotated_angles)  # (R,)
+        sin_a = np.sin(rotated_angles)  # (R,)
+
+        # Offsets for each (ray, step): shape (R, S)
+        dx = cos_a[:, None] * self._t[None, :]  # (R, S)
+        dy = sin_a[:, None] * self._t[None, :]  # (R, S)
+
         # World coords of all sample points: (R, S)
-        wx = ox + self._dx
-        wy = oy + self._dy
+        wx = ox + dx
+        wy = oy + dy
 
         # Convert to grid indices
         gx = np.floor(wx / res).astype(np.int32)
@@ -86,5 +98,14 @@ class LidarSim:
 
         # Distance: t[first_hit_idx] for rays that hit, else max_range
         distances = np.where(any_hit, self._t[first_hit_idx], self.max_range)
+
+        # Apply Gaussian noise to hit rays only
+        if self.noise_std > 0.0:
+            noise = np.random.normal(0.0, self.noise_std, size=distances.shape)
+            distances = np.where(
+                any_hit,
+                np.clip(distances + noise, self._min_range, self.max_range),
+                self.max_range,
+            )
 
         return distances / self.max_range

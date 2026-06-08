@@ -216,7 +216,7 @@ Reuse from `src/base/rrt_infotaxis/igdm_improved/`:
 ## 4. File Structure
 
 ```
-src/base/reinforcement_learning/
+src/base/rl_5_channel/
 |-- PLAN.md                     # This document
 |-- requirements.txt            # torch, gymnasium, numpy, scipy, numba, matplotlib
 |-- config.py                   # All hyperparameters (single source of truth)

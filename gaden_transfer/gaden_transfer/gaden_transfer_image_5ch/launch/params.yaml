@@ -1,0 +1,22 @@
+/**:
+  ros__parameters:
+    # --- Checkpoint (required) ---
+    # Absolute path to a .pt produced by the rl_new spatial training pipeline.
+    #   torch.save({'model_state_dict': ..., ...}, path)
+    checkpoint: ""
+
+    # PyTorch device: "cpu" or "cuda"
+    device: "cpu"
+
+    # Episode length cap. 600 matches cfg.MAX_STEPS.
+    max_steps: 600
+
+    # How many back-to-back episodes to run before the process exits.
+    num_episodes: 1
+
+    # Collision tolerance
+    xy_goal_tolerance: 0.3
+
+    # GADEN occupancy service
+    occupancy_service: "/gaden_environment/occupancyMap3D"
+    occupancy_z_level: 5

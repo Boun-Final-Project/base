@@ -64,6 +64,7 @@ from pathlib import Path
 import logging
 import sys
 import argparse
+import json
 
 # Suppress matplotlib font warnings
 import warnings
@@ -109,7 +110,7 @@ def setup_logging(log_file):
 class RRTInfotaxisIGDMRoomsDiscreteWeighted:
     """Standalone RRT-Infotaxis with IGDM, discrete sensor, and weighted movement for multi-room building."""
 
-    def __init__(self, sigma_m=1.0, logger=None, threshold_mode='default'):
+    def __init__(self, sigma_m=1.0, logger=None, threshold_mode='default', run_id=0):
         """
         Parameters:
         -----------
@@ -119,7 +120,10 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
             Logger instance for output
         threshold_mode : str
             Threshold adaptation mode: 'default' (monotonic increase) or 'decay' (0.97 decay)
+        run_id : int
+            Replication index used to separate output directories across runs
         """
+        self.run_id = run_id
         self.logger = logger or logging.getLogger()
         self.room_width = 25.0
         self.room_height = 25.0
@@ -133,7 +137,6 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         self.max_steps = 150
 
         # Algorithm parameters
-        self.sigma_threshold = 0.3  # Standard deviation threshold for particles (kept for calculation)
         self.d_success_thr = 0.5   # Success distance from true source location (meters)
 
         # Weighted movement parameters
@@ -197,8 +200,10 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         self.search_complete = False
         self.current_step = 0  # Track current time step for time-dependent gas model
 
-        # Visualization - save to results folder
-        viz_dir = Path(__file__).parent / "results" / "updated_rrt_igdm_improved_rooms_discrete_weighted_steps"
+        # Visualization - save to per-run directory
+        self.run_dir = Path(__file__).parent / "results" / "comparison" / "rooms" / threshold_mode / f"run_{run_id}"
+        viz_dir = self.run_dir / "viz"
+        viz_dir.mkdir(parents=True, exist_ok=True)
         self.visualizer = StepVisualizer(output_dir=str(viz_dir), igdm_model=self.igdm)
 
     def log(self, message, flush=True):
@@ -274,18 +279,6 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         sigma = self.sensor.get_std(true_conc)
         noisy = true_conc + np.random.normal(0, sigma)
         return max(0, noisy)
-
-    def is_estimation_converged(self):
-        """Check if estimation has converged (sigma < threshold).
-
-        Returns:
-        --------
-        converged : bool
-            True if estimation has converged
-        """
-        _, stds = self.particle_filter.get_estimate()
-        sigma_p = max(stds['x'], stds['y'])
-        return sigma_p < self.sigma_threshold
 
     def calculate_weighted_move(self, debug_info, current_pos):
         """Calculate weighted movement position based on top utility paths.
@@ -469,9 +462,8 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         self.measurements.append({'pos': self.robot_pos, 'raw': measurement})
         self.estimates.append((mean, std))
 
-        # ==== CHECK CONVERGENCE (early check before planning) ====
+        # ==== CHECK TERMINATION (early check before planning) ====
         sigma_p = max(std['x'], std['y'])
-        self.log(f"[CONVERGE] sigma_p = {sigma_p:.3f}, sigma_t = {self.sigma_threshold:.3f}")
 
         # Check if robot has reached true source
         dist_to_true = np.sqrt((self.robot_pos[0] - self.true_source[0])**2 + (self.robot_pos[1] - self.true_source[1])**2)
@@ -485,36 +477,6 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
             self.log(f"  Localization error: {np.sqrt((mean['x']-self.true_source[0])**2 + (mean['y']-self.true_source[1])**2):.3f}m")
 
             # Save final visualization (no RRT since we return early)
-            self.visualizer.save_step(
-                robot_pos=self.robot_pos,
-                trajectory=self.trajectory,
-                est_source=(mean['x'], mean['y']),
-                est_std=(std['x'], std['y']),
-                true_source=self.true_source,
-                step_num=step_num,
-                sigma_p=sigma_p,
-                current_step=step_num,
-                particle_filter=self.particle_filter,
-                distance_to_true=dist_to_true,
-                d_success_thr=self.d_success_thr,
-                occupancy_grid=self.grid,
-                rrt_nodes=None,
-                sensor_reading=measurement,
-                threshold_bins=self.sensor.level_thresholds,
-                digital_value=discrete_measurement,
-            penalty_step_count=self.rrt.MAX_PENALTY_STEPS
-)
-
-            self.search_complete = True
-            return False
-
-        if self.is_estimation_converged():
-            self.log(f"\n✓✓✓ ESTIMATION CONVERGED! ✓✓✓")
-            self.log(f"  True source: {self.true_source}")
-            self.log(f"  Estimated: ({mean['x']:.2f}, {mean['y']:.2f})")
-            self.log(f"  Error: {np.sqrt((mean['x']-self.true_source[0])**2 + (mean['y']-self.true_source[1])**2):.3f}m")
-
-            # Save final converged visualization (no RRT since we return early)
             self.visualizer.save_step(
                 robot_pos=self.robot_pos,
                 trajectory=self.trajectory,
@@ -690,6 +652,18 @@ class RRTInfotaxisIGDMRoomsDiscreteWeighted:
         self.log(f"Test completed after {len(self.trajectory)-1} steps")
         self.log(f"{'='*70}")
 
+        summary = {
+            'map': 'rooms',
+            'threshold_mode': self.threshold_mode,
+            'run_id': self.run_id,
+            'success': self.search_complete,
+            'steps': len(self.trajectory) - 1,
+        }
+        summary_path = self.run_dir / "summary.json"
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2)
+        self.log(f"Summary written to {summary_path}")
+
     def visualize_final(self, filename='updated_weighted_rrt_infotaxis_igdm_rooms_discrete_result.png'):
         """Create final summary plot.
 
@@ -826,14 +800,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RRT-Infotaxis with IGDM, discrete sensor, weighted movement (multi-room)")
     parser.add_argument('--threshold-mode', type=str, default='default', choices=['default', 'decay'],
                         help="Threshold adaptation mode: 'default' (monotonic increase) or 'decay' (0.97 decay)")
+    parser.add_argument('--run-id', type=int, default=0,
+                        help="Replication index (used to separate outputs across runs)")
     args = parser.parse_args()
 
-    # Setup logging
-    log_dir = Path(__file__).parent / "results"
-    log_file = log_dir / "updated_weighted_rrt_infotaxis_igdm_rooms_discrete.log"
+    run_dir = Path(__file__).parent / "results" / "comparison" / "rooms" / args.threshold_mode / f"run_{args.run_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_file = run_dir / "run.log"
     logger = setup_logging(str(log_file))
 
-    # Run with sigma_m=1.0 and specified threshold mode
-    infotaxis = RRTInfotaxisIGDMRoomsDiscreteWeighted(sigma_m=1.0, logger=logger, threshold_mode=args.threshold_mode)
+    infotaxis = RRTInfotaxisIGDMRoomsDiscreteWeighted(
+        sigma_m=1.0, logger=logger, threshold_mode=args.threshold_mode, run_id=args.run_id
+    )
     infotaxis.run()
-    infotaxis.visualize_final()
+    infotaxis.visualize_final(str(infotaxis.run_dir / "result.png"))

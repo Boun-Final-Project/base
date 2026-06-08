@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             "start = ali_igdm.igdm:main",
+            "start_basic = ali_igdm.igdm:main",
         ],
     },
 )
