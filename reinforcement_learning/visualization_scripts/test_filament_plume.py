@@ -38,7 +38,8 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_OUTPUT_DIR = os.path.join(_SCRIPT_DIR, "visual_test", "filament")
 
 
-def run_visual_test(seed=42, total_steps=200, output_dir=None):
+def run_visual_test(seed=42, total_steps=200, output_dir=None,
+                    source_pos=None, wind_angle_deg=None):
     if output_dir is None:
         output_dir = _DEFAULT_OUTPUT_DIR
     output_path = Path(output_dir)
@@ -50,11 +51,16 @@ def run_visual_test(seed=42, total_steps=200, output_dir=None):
     # Generate a map with obstacles (template 2 = U-shape is good for testing reflection)
     map_data = map_gen.generate(template_id=2)
     grid = map_data["grid"]
-    source_pos = map_data["source_pos"]
+    if source_pos is None:
+        source_pos = map_data["source_pos"]
+    else:
+        source_pos = np.array(source_pos, dtype=np.float64)
 
     # Sample wind
     wind_speed = rng.uniform(*cfg.WIND_SPEED_RANGE)
     wind_angle = rng.uniform(0, 2 * np.pi)
+    if wind_angle_deg is not None:
+        wind_angle = np.radians(wind_angle_deg)
     wind_vx = wind_speed * np.cos(wind_angle)
     wind_vy = wind_speed * np.sin(wind_angle)
 
@@ -283,7 +289,8 @@ def run_visual_test(seed=42, total_steps=200, output_dir=None):
 
 
 def run_animation(seed=42, total_steps=300, output_dir=None,
-                  fps=15, every_n=1):
+                  fps=15, every_n=1, source_pos=None, sensor_pos=None,
+                  wind_angle_deg=None):
     """Animate the plume evolving step by step and save as a GIF.
 
     Parameters
@@ -298,6 +305,12 @@ def run_animation(seed=42, total_steps=300, output_dir=None,
         Frames per second in the output GIF.
     every_n : int
         Capture one frame every *every_n* simulation steps (thins the GIF).
+    source_pos : array-like, optional
+        (x, y) of the gas source. Defaults to map-generated position.
+    sensor_pos : array-like, optional
+        (x, y) of the sensor marker. Defaults to 3 m downwind of source.
+    wind_angle_deg : float, optional
+        Wind direction in degrees (0=+x, CCW). Overrides random wind angle.
     """
     if output_dir is None:
         output_dir = _DEFAULT_OUTPUT_DIR
@@ -308,20 +321,27 @@ def run_animation(seed=42, total_steps=300, output_dir=None,
     map_gen = MapGenerator(rng=rng)
     map_data = map_gen.generate(template_id=2)
     grid = map_data["grid"]
-    source_pos = map_data["source_pos"]
+    if source_pos is None:
+        source_pos = np.array(map_data["source_pos"], dtype=np.float64)
+    else:
+        source_pos = np.array(source_pos, dtype=np.float64)
 
     wind_speed = rng.uniform(*cfg.WIND_SPEED_RANGE)
     wind_angle = rng.uniform(0, 2 * np.pi)
-    wind_vx = wind_speed * np.cos(wind_angle)
-    wind_vy = wind_speed * np.sin(wind_angle)
+    if wind_angle_deg is not None:
+        wind_angle = np.radians(wind_angle_deg)
 
-    # Fixed sensor 3 m downwind of source
+    # Fixed sensor: CLI override, or 3 m downwind of source
     wind_unit = np.array([np.cos(wind_angle), np.sin(wind_angle)])
-    sensor_pos = source_pos + 3.0 * wind_unit
+    if sensor_pos is None:
+        sensor_pos = source_pos + 3.0 * wind_unit
+    else:
+        sensor_pos = np.array(sensor_pos, dtype=np.float64)
 
     print(f"Seed:      {seed}")
     print(f"Room:      {map_data['width']:.1f} x {map_data['height']:.1f} m")
     print(f"Source:    ({source_pos[0]:.1f}, {source_pos[1]:.1f})")
+    print(f"Sensor:    ({sensor_pos[0]:.1f}, {sensor_pos[1]:.1f})")
     print(f"Wind:      {wind_speed:.2f} m/s @ {np.degrees(wind_angle):.1f}°")
     print(f"Steps:     {total_steps}  (every_n={every_n}, fps={fps})")
 
@@ -495,6 +515,18 @@ def main():
         "--every-n", type=int, default=1,
         help="Capture one frame every N simulation steps (default: 1).",
     )
+    parser.add_argument(
+        "--source-pos", type=float, nargs=2, metavar=("X", "Y"), default=None,
+        help="Fixed source position in meters, e.g. --source-pos 2.0 12.0",
+    )
+    parser.add_argument(
+        "--sensor-pos", type=float, nargs=2, metavar=("X", "Y"), default=None,
+        help="Fixed sensor position in meters (animate only), e.g. --sensor-pos 14.0 2.0",
+    )
+    parser.add_argument(
+        "--wind-angle", type=float, default=None,
+        help="Wind direction in degrees (0=+x, CCW). E.g. -45 = southeast.",
+    )
     args = parser.parse_args()
 
     if args.animate:
@@ -504,9 +536,18 @@ def main():
             output_dir=args.output_dir,
             fps=args.fps,
             every_n=args.every_n,
+            source_pos=args.source_pos,
+            sensor_pos=args.sensor_pos,
+            wind_angle_deg=args.wind_angle,
         )
     else:
-        run_visual_test(seed=args.seed, total_steps=args.steps, output_dir=args.output_dir)
+        run_visual_test(
+            seed=args.seed,
+            total_steps=args.steps,
+            output_dir=args.output_dir,
+            source_pos=args.source_pos,
+            wind_angle_deg=args.wind_angle,
+        )
 
 
 if __name__ == "__main__":

@@ -131,6 +131,13 @@ class GasSourceEnv(gymnasium.Env):
         self._map_width = map_data["width"]
         self._map_height = map_data["height"]
 
+        # Override positions from options if provided
+        if options is not None:
+            if "source_pos" in options:
+                self._source_pos = np.array(options["source_pos"], dtype=np.float64)
+            if "robot_pos" in options:
+                self._robot_pos = np.array(options["robot_pos"], dtype=np.float64)
+
         # Wind: spatial mean of the field for the policy ctx vector when a
         # wind_field is provided; otherwise random per-episode uniform wind.
         if wind_field is not None:
@@ -140,6 +147,10 @@ class GasSourceEnv(gymnasium.Env):
             self._wind = make_training_wind_field(
                 self._grid, self._rng, cfg.WIND_SPEED_RANGE, cfg.WIND_MAX_SPEED
             )
+
+        # Override wind angle from options if provided
+        if options is not None and "wind_angle" in options:
+            self._wind.direction = float(options["wind_angle"])
 
         # Gas model selection
         if cfg.GAS_MODEL == "filament":
