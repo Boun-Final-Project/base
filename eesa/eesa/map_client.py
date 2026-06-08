@@ -92,3 +92,38 @@ class MapClient:
 
     def is_in_gridmap(self, x, y):
         return 0 <= x < self.width and 0 <= y < self.height
+
+    def nearest_free_world(self, wx, wy, clearance_m=0.25, max_radius_cells=40):
+        """Snap a world goal to the nearest known-free cell that has
+        ``clearance_m`` of free space around it (no occupied cell within).
+        Prevents handing Nav2 a goal inside / right against a wall, which
+        makes the planner fail and the robot wedge. Returns (wx, wy)
+        unchanged if no map yet, or None if nothing navigable was found."""
+        if self.grid_data is None:
+            return wx, wy
+        cr = max(1, int(round(clearance_m / self.resolution)))
+        cx, cy = self.get_costmap_x_y(wx, wy)
+
+        def navigable(x, y):
+            if not self.is_in_gridmap(x, y):
+                return False
+            v = self.grid_data[y][x]
+            if not (0 <= v < 50):          # exclude unknown (-1) and occupied (>=50)
+                return False
+            for dx in range(-cr, cr + 1):  # clearance: no occupied cell nearby
+                for dy in range(-cr, cr + 1):
+                    xx, yy = x + dx, y + dy
+                    if self.is_in_gridmap(xx, yy) and self.grid_data[yy][xx] >= 50:
+                        return False
+            return True
+
+        if navigable(cx, cy):
+            return wx, wy
+        for r in range(1, max_radius_cells + 1):
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    if max(abs(dx), abs(dy)) != r:   # only the ring at radius r
+                        continue
+                    if navigable(cx + dx, cy + dy):
+                        return self.get_world_x_y(cx + dx, cy + dy)
+        return None

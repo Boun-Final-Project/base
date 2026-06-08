@@ -5,6 +5,7 @@ and then the EESA search agent.
 """
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 
@@ -68,7 +69,7 @@ def generate_launch_description():
                 'source_y': LaunchConfiguration('source_y'),
                 'find_source_th': LaunchConfiguration('find_source_th'),
                 'iter_rate': LaunchConfiguration('iter_rate'),
-                'max_iter': 200,
+                'max_iter': ParameterValue(LaunchConfiguration('max_iter'), value_type=int),
                 'max_stuck_time': LaunchConfiguration('max_stuck_time'),
                 'data_path': LaunchConfiguration('data_path'),
                 'visual': True,
