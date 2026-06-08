@@ -72,18 +72,43 @@ def greedy_action_dual(agent, obs_t):
         return dist.mean.cpu().numpy()  # (1, 2): (cos θ, sin θ)
 
 
-def run_episode(agent, full_map, episode_seed, device, arch="spatial"):
+def _make_replay_gas(full_map, result_dir):
+    """Build a ReplayGasSource for this map from stored GADEN snapshots, or None."""
+    if result_dir is None:
+        return None
+    from reinforcement_learning.test.gaden_result_loader import ReplayGasSource
+    start_time = full_map.get("spec", {}).get("start_time", 0)
+    save_dt = 0.5  # GADEN saveDeltaTime; one env step ~ one snapshot
+    start_iter = int(round(start_time / save_dt))
+    return ReplayGasSource(result_dir, full_map["origin_xy"], start_iter)
+
+
+def run_episode(agent, full_map, episode_seed, device, arch="spatial",
+                result_dir=None):
     map_data = {k: full_map[k] for k in ("grid", "source_pos", "robot_pos",
                                           "width", "height")}
+    # Forward the GADEN scenario's playback start_time so the env can warm the
+    # plume to match how far the real plume has dispersed at that wall-clock
+    # time (real GADEN starts playback at start_time s, not t=0). Without this
+    # the plume only gets FILAMENT_WARMUP_STEPS of dispersion regardless of map
+    # size, starving big maps (ultimate/many_rooms) of gas at the start region.
+    map_data["start_time"] = full_map.get("spec", {}).get("start_time", 0)
     total_return = 0.0
     success = False
 
+    # If a GADEN result/ dir is supplied, replay the REAL stored concentration
+    # field instead of the surrogate plume (highest fidelity; built fresh per
+    # episode since the replay source advances a snapshot index statefully).
+    gas_field = _make_replay_gas(full_map, result_dir)
+
     if arch == "dual":
         env = GasSourceEnv()
-        obs, _ = env.reset(
-            seed=episode_seed,
-            options={"map_data": map_data, "wind_field": full_map["wind_field"]},
-        )
+        opts = {"map_data": map_data, "wind_field": full_map["wind_field"],
+                "deploy_motion": True,   # eval matches the deployment walk-back motion
+                "sensor_noise": False}   # match real ROS2 deploy: raw (noiseless) PID concentration
+        if gas_field is not None:
+            opts["gas_field"] = gas_field
+        obs, _ = env.reset(seed=episode_seed, options=opts)
         while True:
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             action = greedy_action_dual(agent, obs_t)[0]
@@ -96,10 +121,12 @@ def run_episode(agent, full_map, episode_seed, device, arch="spatial"):
                 break
     else:
         env = SpatialObsWrapper(GasSourceEnv())
-        (spatial, wind), _ = env.reset(
-            seed=episode_seed,
-            options={"map_data": map_data, "wind_field": full_map["wind_field"]},
-        )
+        opts = {"map_data": map_data, "wind_field": full_map["wind_field"],
+                "deploy_motion": True,   # eval matches the deployment walk-back motion
+                "sensor_noise": False}   # match real ROS2 deploy: raw (noiseless) PID concentration
+        if gas_field is not None:
+            opts["gas_field"] = gas_field
+        (spatial, wind), _ = env.reset(seed=episode_seed, options=opts)
         while True:
             spatial_t = torch.as_tensor(spatial, dtype=torch.float32, device=device).unsqueeze(0)
             wind_t    = torch.as_tensor(wind,    dtype=torch.float32, device=device).unsqueeze(0)
@@ -131,7 +158,7 @@ def load_maps(gaden_root: Path, map_keys):
 
 
 def eval_run(run_dir, full_maps, map_keys, episodes_per_map, device,
-             output_dir, latest_only=False, incremental=False):
+             output_dir, latest_only=False, incremental=False, real_gas=False):
     run_dir  = Path(run_dir)
     ckpt_dir = run_dir / "checkpoints"
     run_cfg  = load_run_config(run_dir)
@@ -174,6 +201,14 @@ def eval_run(run_dir, full_maps, map_keys, episodes_per_map, device,
     arch = run_cfg.get("arch", "spatial")
     print(f"  arch={arch}")
 
+    # Resolve real-GADEN gas snapshot dirs per map (None where unavailable →
+    # that map falls back to the surrogate plume).
+    from reinforcement_learning.test.gaden_loader import resolve_result_dir
+    result_dirs = [resolve_result_dir(k) if real_gas else None for k in map_keys]
+    if real_gas:
+        n_real = sum(d is not None for d in result_dirs)
+        print(f"  real-gas: replaying stored GADEN fields for {n_real}/{n_maps} maps")
+
     orig = {k: getattr(cfg, k) for k in ("LIDAR_NUM_RAYS", "STATE_DIM")}
     cfg.LIDAR_NUM_RAYS = run_cfg.get("LIDAR_NUM_RAYS", cfg.LIDAR_NUM_RAYS)
     cfg.STATE_DIM      = run_cfg.get("STATE_DIM",      cfg.STATE_DIM)
@@ -186,7 +221,8 @@ def eval_run(run_dir, full_maps, map_keys, episodes_per_map, device,
             for mi, fm in enumerate(full_maps):
                 for ei in range(n_eps):
                     seed = 1000 * mi + ei
-                    ret, succ = run_episode(agent, fm, seed, device, arch=arch)
+                    ret, succ = run_episode(agent, fm, seed, device, arch=arch,
+                                            result_dir=result_dirs[mi])
                     returns[ci, mi, ei]   = ret
                     successes[ci, mi, ei] = succ
 
@@ -238,6 +274,11 @@ def main():
     parser.add_argument("--incremental",      action="store_true", default=False,
                         help="Skip checkpoints already in the saved npz and "
                              "merge new results (for a live training-curve watcher)")
+    parser.add_argument("--real-gas",         action="store_true", default=False,
+                        help="Replay the REAL stored GADEN concentration field "
+                             "(result/iteration_<N>) instead of the surrogate "
+                             "plume. Highest fidelity; falls back to surrogate "
+                             "for maps without stored snapshots.")
     args = parser.parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -248,7 +289,7 @@ def main():
     for run_dir in args.run_dirs:
         eval_run(run_dir, full_maps, args.maps, args.episodes_per_map,
                  device, args.output_dir, latest_only=args.latest_only,
-                 incremental=args.incremental)
+                 incremental=args.incremental, real_gas=args.real_gas)
 
 
 if __name__ == "__main__":
