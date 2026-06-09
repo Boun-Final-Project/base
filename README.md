@@ -221,6 +221,58 @@ python3 src/base/efe_igdm/scripts/plot_search_trajectory.py
 python3 src/base/efe_igdm/scripts/plot_entropy.py
 ```
 
+## RL Policy Deployment (RLaika)
+
+Besides the information-theoretic algorithms above, the platform deploys
+**RLaika** — a PPO policy trained for gas-source localization — inside the same
+GADEN simulator. The deployment node lives in the [`gaden_transfer`](gaden_transfer/)
+package (`gaden_rl_node_lidar`; lidar + wind observation, `arch ∈ {mlp, modular,
+dual, spatial}`) and can optionally engage a SLAM-based frontier-escape stack
+when the policy gets wedged in a room.
+
+### Batch deployment / evaluation
+
+`run_rl_lidar_batch.sh` (at the **workspace root**,
+`~/ros2_ws/`, alongside the other `run_*_batch.sh` runners) deploys a checkpoint
+over the 7 evaluation maps and collects
+per-run summaries. Each run brings up the GADEN world
+(`main_simbot_launch.py method:=none`), runs `gaden_rl_node_lidar`, harvests
+`node.log → summary.txt`, and tears the sim down before the next run.
+
+```bash
+cd ~/ros2_ws
+colcon build --packages-select gaden_transfer test_env --symlink-install
+source install/setup.bash
+
+# 7 maps × 5 runs, dual-backbone checkpoint, SLAM frontier-escape + video, headless
+RL_CHECKPOINT=~/ros2_ws/src/base/agent_188416000.pt RL_ARCH=dual \
+RL_NUM_RUNS=5 RL_ESCAPE=1 RL_RECORD=1 \
+bash ~/ros2_ws/run_rl_lidar_batch.sh
+```
+
+For long sweeps run it under `tmux`:
+`tmux new-session -d -s rl 'RL_CHECKPOINT=… RL_NUM_RUNS=5 bash ~/ros2_ws/run_rl_lidar_batch.sh'`.
+
+### Options (environment variables)
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `RL_CHECKPOINT` | — (**required**) | absolute path to the `.pt` checkpoint |
+| `RL_ARCH` | `mlp` | network arch: `mlp` / `modular` / `dual` / `spatial` (use `dual` for `agent_188416000`) |
+| `RL_NUM_RUNS` | `1` | trials per map (`5` → 7×5 = 35 runs) |
+| `RL_MAX_STEPS` | `600` | episode step cap (800–1000 for `many_rooms`/`ultimate`) |
+| `RL_ESCAPE` | `0` | **slam**: `1` enables the SLAM frontier-escape + hybrid-drive stack |
+| `RL_RECORD` | `0` | **video**: `1` records each run's RViz view to `<run_dir>/capture.mp4` (headless Xvfb + ffmpeg) |
+| `RL_SLAM_VIZ` | `0` | with recording, show the robot's online SLAM map (`/rlaika/slam_map`); needs `RL_ESCAPE=1` |
+| `RL_USE_NAV2` | `false` | motion: `false` teleports each step (default), `true` drives via Nav2 (pair with `RL_SPEED=1.0`) |
+| `RL_SPEED` | `5.0` | GADEN playback speed multiplier |
+| `RL_DEVICE` | `cpu` | `cpu` / `cuda` |
+| `RL_TARGETS` | 7 eval maps | space-separated `scenario::sim` overrides (default: `curved_labrinth_{left,right}`, `10x6_u_{left,right}`, `4_rooms`, `many_rooms`, `ultimate`, all `::sim1`) |
+
+Headless is the default (RViz only opens when `RL_RECORD=1`). Results land in
+`~/ros2_ws/Results/<run_name>/` — a `summary.txt` per run plus an `aggregate.txt`
+scoreboard.
+
 ## References
 
 - Kim, H. et al., "Gas Source Localization in Unknown Indoor Environments Using Dual-Mode Information-Theoretic Search," *IEEE Robotics and Automation Letters*, 2025. [[IEEE Xplore]](https://ieeexplore.ieee.org/document/10777609/)
