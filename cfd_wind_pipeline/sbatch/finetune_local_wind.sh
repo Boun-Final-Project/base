@@ -16,13 +16,11 @@
 #
 # Requirements:
 #   * A CFD wind library built with cfd_wind_pipeline (see its README).
-#   * An RL package whose config.py reads OSL_LOCAL_WIND_OBS
-#     (feature/local-wind-obs lineage). Mean-wind-only packages will silently
-#     ignore the flag and train the wrong observation.
-#   * For the inline real-gas GADEN eval curve (OSL_INLINE_GADEN_* — exported
-#     by train_cfd_library.sh), the RL package's train.py must implement it;
-#     packages without it ignore the flags and you fall back to offline
-#     checkpoint evaluation with reinforcement_learning/eval_gaden.sh.
+#   * An RL package checkout — this repository's root works: its
+#     reinforcement_learning package supports OSL_LOCAL_WIND_OBS and the
+#     inline real-gas GADEN eval (OSL_INLINE_GADEN_*, exported with defaults
+#     by train_cfd_library.sh; needs GADEN_SCENARIOS_ROOT replay data, writes
+#     runs/<name>/gaden_curve.csv with a step-0 baseline row when resuming).
 #   * Optional speed-up: precompute the per-case far-placement cache once with
 #     sbatch cfd_wind_pipeline/sbatch/precompute_far_placement.sh (otherwise
 #     it is computed lazily at first reset).

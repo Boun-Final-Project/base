@@ -275,22 +275,20 @@ VENV_PY=/path/to/python bash reinforcement_learning/train_champ.sh
 
 `train_champ.sh` sets the run-defining values (learning rate, clip ratio,
 target KL, annealing, envs, rollout length, timesteps, curriculum, seed) via
-CLI flags; everything else comes from `config.py` defaults (see the reward
-caveat below). All of them are recorded in the committed snapshot
-`champ_config.json`.
+CLI flags, and pins the recipe values that differ from this branch's
+`config.py` defaults (the reward constants, no loop penalty, and the slower
+T0–T5 template schedule) via `OSL_*` environment overrides that `config.py`
+reads — so the script runs unmodified on this branch and reproduces the
+champion recipe without changing the defaults other code sees. All values are
+recorded in the committed snapshot `champ_config.json`, and each run writes
+its own effective `config.json` for provenance.
 
 Checkpoints and TensorBoard logs land in
 `reinforcement_learning/runs/<run-name>/`.
 
 [`reinforcement_learning/champ_config.json`](reinforcement_learning/champ_config.json)
 is the full hyperparameter snapshot of the original run and is the
-authoritative provenance. **Reward caveat:** the champion was trained with
-`R_STEP = -1.0` and `R_DETECTION = 0.75`; `config.py` on `main` carries
-different values. To reproduce the champion exactly, run the script from the
-`efe/champ-training-script` branch (whose `config.py` matches the snapshot),
-or set those two values in
-[`reinforcement_learning/config.py`](reinforcement_learning/config.py) to the
-snapshot values first.
+authoritative provenance.
 
 ### 2. Selecting a checkpoint
 
@@ -358,11 +356,16 @@ bash cfd_wind_pipeline/sbatch/finetune_local_wind.sh \
 
 Notes:
 
-- The RL package checkout must support `OSL_LOCAL_WIND_OBS` in its `config.py`
-  (`feature/local-wind-obs` lineage). The inline GADEN eval likewise requires
-  RL-package support; without it the `OSL_INLINE_GADEN_*` flags are ignored
-  harmlessly — fall back to offline checkpoint evaluation with
-  `reinforcement_learning/eval_gaden.sh`.
+- `<rl-package-checkout>` can simply be this repository's root — its
+  `reinforcement_learning` package supports `OSL_LOCAL_WIND_OBS`, the inline
+  real-gas GADEN eval (`OSL_INLINE_GADEN_*`, writes
+  `runs/<name>/gaden_curve.csv` including a step-0 baseline row when
+  resuming), and the far-plume spawns.
+- The inline eval needs `GADEN_SCENARIOS_ROOT` to point at the GADEN replay
+  data (scenario folders with stored gas iterations); without it, maps fall
+  back to the surrogate plume, which is known to overestimate. Offline
+  checkpoint evaluation via `reinforcement_learning/eval_gaden.sh` remains
+  available as a fallback (supports `--real-gas`).
 - `--total-timesteps` is **absolute** (resumed step + extra), not additional.
 - Per the checkpoint-selection rule above, the GADEN peak arrives ~15M steps
   into the finetune and drifts down afterwards — early-stop on GADEN eval, not

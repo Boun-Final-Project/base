@@ -45,6 +45,15 @@ D_LOOP = 0.3   # < STEP_SIZE so a clean forward step doesn't self-trigger
 R_LOOP_BASE = -0.05
 LOOP_DECAY = 0.85
 
+# Env-var recipe overrides — used by reproduction scripts (train_champ.sh)
+# to pin a historical recipe without changing this branch's defaults. Unset
+# env vars leave the values above untouched. The champion recipe is
+# R_STEP=-1.0, R_DETECTION=0.75, R_LOOP_BASE=0 (it predates the loop penalty).
+import os as _os
+R_STEP = float(_os.environ.get('OSL_R_STEP', R_STEP))
+R_DETECTION = float(_os.environ.get('OSL_R_DETECTION', R_DETECTION))
+R_LOOP_BASE = float(_os.environ.get('OSL_R_LOOP_BASE', R_LOOP_BASE))
+
 # =============================================================================
 # Wind
 # =============================================================================
@@ -113,6 +122,14 @@ TEMPLATE_CURRICULUM_STAGES = [
     (0.40, 8),    # 40-60%: + dead-ends, serpentine, dense multi-room (T6-T8)
     (0.60, 9),    # 60%+:   + hybrids (T9)
 ]
+
+# Env-var override (recipe pinning, like the reward overrides above):
+# OSL_TEMPLATE_STAGES="progress:max_template,..." replaces the schedule.
+# The champion recipe is "0:1,0.25:3,0.5:5" (T0-T5 only, slower unlocks).
+if _os.environ.get('OSL_TEMPLATE_STAGES'):
+    TEMPLATE_CURRICULUM_STAGES = [
+        (float(s.split(':')[0]), int(s.split(':')[1]))
+        for s in _os.environ['OSL_TEMPLATE_STAGES'].split(',')]
 
 # Per-template sampling weights (used after curriculum unlocks them).
 # Higher weight = more episodes drawn from that template. T6/T7 get 3x
