@@ -303,20 +303,35 @@ sbatch reinforcement_learning/eval_gaden.sh reinforcement_learning/runs/<run-nam
 
 ### 3. Finetuning on CFD wind with local-wind observation
 
-GADEN evaluation maps use spatially-varying CFD wind, while base training uses
-uniform per-episode wind — the largest remaining train/eval distribution gap.
-The [`cfd_wind_pipeline`](cfd_wind_pipeline/) package closes it: it builds an
-offline library of OpenFOAM wind fields on procedural maps and finetunes the
-policy against that library. Combined with switching the wind observation from
-the spatial mean to the **local wind at the robot's cell**
-(`OSL_LOCAL_WIND_OBS=1`), this is our strongest finetune: on the offline
-real-gas evaluation harness the champion went from 57% to 76% overall success
-(20 episodes/map), including the first non-zero result on `many_rooms`
-(0% → 50%).
+Uniform per-episode wind is a useful simplification for base training, but it
+does not capture the recirculation, channelling, and shear that obstacles
+produce — the largest remaining train/eval distribution gap to GADEN. The
+[`cfd_wind_pipeline`](cfd_wind_pipeline/) package closes it: we pre-compute a
+library of **~2,400 maps with CFD-solved wind fields** (OpenFOAM, generated
+once offline because each solve is compute-heavy) and finetune the policy
+against that library.
+
+The finetune resumes from the uniform-wind champion at 91.75M steps with a
+reduced learning rate (5 × 10⁻⁵, annealed to 1 × 10⁻⁵) and switches the wind
+observation from the episode's spatial mean to the **local wind measured at
+the robot's position** (`OSL_LOCAL_WIND_OBS=1`). To expose the policy to
+episodes where it starts outside the plume, **20% of episodes re-place the
+robot 4–14 m away from the plume** (far-plume spawns,
+`cfd_wind_pipeline/far_plume_placement.py`). Every checkpoint is evaluated
+inline on realistic-gas GADEN episodes and the best-scoring checkpoint is
+deployed — typically reached ~15M finetune steps in; longer finetuning
+degrades the policy. On the offline real-gas evaluation harness this recipe
+took the champion from 57% to 76–80% overall success (20 episodes/map),
+including the first non-zero results on `many_rooms`.
 
 **Step 1 — build a CFD wind library** (one-off; needs SLURM + an OpenFOAM
 container). See the [`cfd_wind_pipeline` README](cfd_wind_pipeline/README.md)
-for the full walkthrough.
+for the full walkthrough. Optionally precompute the far-spawn placement cache:
+
+```bash
+sbatch cfd_wind_pipeline/sbatch/precompute_far_placement.sh \
+    /path/to/cfd_library[,/path/to/cfd_library_2] /path/to/rl-package-checkout
+```
 
 **Step 2 — launch the finetune:**
 
@@ -327,15 +342,31 @@ bash cfd_wind_pipeline/sbatch/finetune_local_wind.sh \
     /path/to/checkpoints/agent_91750400.pt
 ```
 
+#### Fine-tuning hyperparameters
+
+| Parameter | Value |
+|---|---|
+| Resume from | champion checkpoint @ 91.75M steps |
+| Learning rate | 5 × 10⁻⁵, annealed linearly to 1 × 10⁻⁵ |
+| Clip ratio ε / target KL | 0.3 / 0.05 |
+| Parallel envs | 96 |
+| Wind observation | local wind at robot cell (`OSL_LOCAL_WIND_OBS=1`) |
+| Training wind | CFD library (~2,400 maps), no synthetic-wind mix |
+| Far-plume spawns | 20% of episodes, 4–14 m plume-hit distance |
+| Step budget | 152M absolute (~60M headroom over the resumed step) |
+| Checkpoint selection | inline real-gas GADEN eval; best ≈ +15M steps |
+
 Notes:
 
 - The RL package checkout must support `OSL_LOCAL_WIND_OBS` in its `config.py`
-  (`feature/local-wind-obs` lineage).
-- `--total-timesteps` is **absolute** (resumed step + extra), not additional;
-  the script defaults to 152M (= champion 91.75M + ~60M headroom).
-- Per the checkpoint-selection rule above, the GADEN peak typically arrives
-  ~15M steps into the finetune and drifts down afterwards — early-stop on
-  GADEN eval.
+  (`feature/local-wind-obs` lineage). The inline GADEN eval likewise requires
+  RL-package support; without it the `OSL_INLINE_GADEN_*` flags are ignored
+  harmlessly — fall back to offline checkpoint evaluation with
+  `reinforcement_learning/eval_gaden.sh`.
+- `--total-timesteps` is **absolute** (resumed step + extra), not additional.
+- Per the checkpoint-selection rule above, the GADEN peak arrives ~15M steps
+  into the finetune and drifts down afterwards — early-stop on GADEN eval, not
+  training reward.
 - The finetuned policy observes local wind, so eval and deployment must also
   run with `OSL_LOCAL_WIND_OBS=1`; mixing the conventions silently degrades it.
 

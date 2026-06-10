@@ -47,6 +47,31 @@ if [ -n "${CFD_TEMPLATE_FILTER:-}" ]; then
     echo "CFD_TEMPLATE_FILTER=${CFD_TEMPLATE_FILTER}"
 fi
 
+# Far-plume-hit re-placement (search scenarios). All launcher-side args, set
+# via env so they land before the `--`. CFD_FAR_PLUME_FRAC=0 => off (default).
+FAR_PLUME_ARG=()
+if [ -n "${CFD_FAR_PLUME_FRAC:-}" ]; then
+    FAR_PLUME_ARG+=(--far-plume-frac "${CFD_FAR_PLUME_FRAC}")
+    [ -n "${CFD_FAR_PLUME_RANGE:-}" ] && FAR_PLUME_ARG+=(--far-plume-range "${CFD_FAR_PLUME_RANGE}")
+    [ -n "${CFD_FAR_PLUME_CLEARANCE:-}" ] && FAR_PLUME_ARG+=(--far-plume-clearance "${CFD_FAR_PLUME_CLEARANCE}")
+    [ -n "${CFD_FAR_PLUME_MIN_SRC:-}" ] && FAR_PLUME_ARG+=(--far-plume-min-src-dist "${CFD_FAR_PLUME_MIN_SRC}")
+    echo "FAR_PLUME: frac=${CFD_FAR_PLUME_FRAC} range=${CFD_FAR_PLUME_RANGE:-4,14} clearance=${CFD_FAR_PLUME_CLEARANCE:-0.6} min_src=${CFD_FAR_PLUME_MIN_SRC:-3.0}"
+fi
+
+# Inline GADEN eval at every checkpoint (writes runs/<name>/gaden_curve.csv).
+# Default ON with REAL-GAS replay (validated proxy; surrogate overestimates ~30pts).
+export OSL_INLINE_GADEN_EVAL=${OSL_INLINE_GADEN_EVAL:-1}
+export OSL_INLINE_GADEN_REALGAS=${OSL_INLINE_GADEN_REALGAS:-1}
+export OSL_INLINE_GADEN_EPS=${OSL_INLINE_GADEN_EPS:-10}
+export GADEN_SCENARIOS_ROOT=${GADEN_SCENARIOS_ROOT:-/comp04-storage/efe-mantaroglu/osl/gaden_scenarios}
+# GADEN_FAITHFUL_WIND=1: inline eval reads the SERVED single-z wind grid +
+# anemometer noise (predicts ROS2). Unset to use the old optimistic EDT+bilinear
+# wind. Default ON because our checkpoint curves should be scored on the
+# ROS2-predictive eval, not the optimistic one.
+export GADEN_FAITHFUL_WIND=${GADEN_FAITHFUL_WIND:-1}
+echo "INLINE_GADEN_EVAL=${OSL_INLINE_GADEN_EVAL} REALGAS=${OSL_INLINE_GADEN_REALGAS} EPS=${OSL_INLINE_GADEN_EPS} FAITHFUL=${GADEN_FAITHFUL_WIND}"
+echo "GADEN_SCENARIOS_ROOT=${GADEN_SCENARIOS_ROOT}"
+
 cd ${RL_PKG}
 
 ${VENV_PY} -u ${CFD_PKG}/train_with_cfd_library.py \
@@ -54,4 +79,5 @@ ${VENV_PY} -u ${CFD_PKG}/train_with_cfd_library.py \
     --rl-package-path ${RL_PKG} \
     --mix-synthetic ${MIX} \
     "${TEMPLATE_FILTER_ARG[@]}" \
+    "${FAR_PLUME_ARG[@]}" \
     -- "$@"

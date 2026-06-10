@@ -43,6 +43,15 @@ def main():
     p.add_argument('--template-filter', type=str, default=None,
                    help='Comma-separated template_ids to keep (e.g. "0,1,2,3,4,5" '
                         'to match the champ and avoid OOD template shock).')
+    p.add_argument('--far-plume-frac', type=float, default=0.0,
+                   help='Fraction of episodes whose robot start is re-placed at '
+                        'a far-plume-hit cell (search scenario). 0 = off.')
+    p.add_argument('--far-plume-range', type=str, default='4,14',
+                   help='Target plume-hit-distance band "lo,hi" in meters.')
+    p.add_argument('--far-plume-clearance', type=float, default=0.6,
+                   help='Wall-clearance margin (m) required at the re-placed start.')
+    p.add_argument('--far-plume-min-src-dist', type=float, default=3.0,
+                   help='Never re-place closer than this (m) to the source.')
     args = p.parse_args(launcher_argv)
 
     rl_pkg = os.path.abspath(args.rl_package_path)
@@ -59,6 +68,8 @@ def main():
     mix = args.mix_synthetic
     tmpl_filter = ([int(x) for x in args.template_filter.split(',')]
                    if args.template_filter else None)
+    far_frac = args.far_plume_frac
+    far_range = tuple(float(x) for x in args.far_plume_range.split(','))
 
     def patched_make_env(seed, rank, template_id=None):
         return make_cfd_env(seed=seed, rank=rank,
@@ -66,11 +77,16 @@ def main():
                             rl_package_path=rl_pkg,
                             mix_synthetic=mix,
                             template_id=template_id,
-                            template_filter=tmpl_filter)
+                            template_filter=tmpl_filter,
+                            far_plume_frac=far_frac,
+                            far_plume_range=far_range,
+                            far_plume_clearance=args.far_plume_clearance,
+                            far_plume_min_src_dist=args.far_plume_min_src_dist)
 
     train_mod.make_env = patched_make_env
     print(f"[train_with_cfd_library] Patched make_env → CFD libraries "
-          f"({library_dirs}, mix_synthetic={mix}, template_filter={tmpl_filter})")
+          f"({library_dirs}, mix_synthetic={mix}, template_filter={tmpl_filter}, "
+          f"far_plume_frac={far_frac}, far_plume_range={far_range})")
 
     # Hand off to train.main() with the remaining argv.
     sys.argv = [sys.argv[0]] + passthrough

@@ -3,17 +3,29 @@
 # finetune_local_wind.sh — finetune a trained checkpoint on a CFD wind library
 # with LOCAL point-wind observation (the "local2" recipe).
 #
-# This is the recipe behind our best finetune so far: resuming the champion
-# (agent_91750400.pt, mean-wind observation) and finetuning ~15M steps on the
-# CFD library with OSL_LOCAL_WIND_OBS=1 took overall success on the offline
-# real-gas eval harness from 57% to 76% (20 eps/map), including the first
-# non-zero result on many_rooms (0% -> 50%).
+# This is the recipe behind our best finetunes: resume the champion
+# (agent_91750400.pt, mean-wind observation) and finetune ~15M steps on the
+# CFD library (~2,400 pre-computed wind fields) with
+#   * OSL_LOCAL_WIND_OBS=1  — observe the local wind at the robot's cell
+#     instead of the episode's spatial mean, and
+#   * 20% far-plume spawns — robot re-placed 4-14 m (plume-hit distance) from
+#     the plume so it must SEARCH before it can track.
+# On the offline real-gas eval harness this took the champion from 57% to
+# 76-80% overall success (20 eps/map), including the first non-zero results
+# on many_rooms.
 #
 # Requirements:
 #   * A CFD wind library built with cfd_wind_pipeline (see its README).
 #   * An RL package whose config.py reads OSL_LOCAL_WIND_OBS
 #     (feature/local-wind-obs lineage). Mean-wind-only packages will silently
 #     ignore the flag and train the wrong observation.
+#   * For the inline real-gas GADEN eval curve (OSL_INLINE_GADEN_* — exported
+#     by train_cfd_library.sh), the RL package's train.py must implement it;
+#     packages without it ignore the flags and you fall back to offline
+#     checkpoint evaluation with reinforcement_learning/eval_gaden.sh.
+#   * Optional speed-up: precompute the per-case far-placement cache once with
+#     sbatch cfd_wind_pipeline/sbatch/precompute_far_placement.sh (otherwise
+#     it is computed lazily at first reset).
 #
 # Usage:
 #   bash cfd_wind_pipeline/sbatch/finetune_local_wind.sh \
@@ -45,8 +57,11 @@ TRAIN_SH="${SCRIPT_DIR}/train_cfd_library.sh"
 
 export OSL_LOCAL_WIND_OBS=1   # the lever: observe wind at the robot cell
 export CFD_MIX_SYNTHETIC=0    # pure CFD library, no synthetic-wind resets
+export CFD_FAR_PLUME_FRAC=${CFD_FAR_PLUME_FRAC:-0.2}   # 20% search-style spawns
+export CFD_FAR_PLUME_RANGE=${CFD_FAR_PLUME_RANGE:-4,14} # plume-hit distance band (m)
 # CFD_TEMPLATE_FILTER (e.g. "0,1,2,3,4,5") passes through to the launcher if
 # set in the submitting shell; default is every template in the library.
+# Inline real-gas GADEN eval defaults are exported by train_cfd_library.sh.
 
 JID=$(sbatch --parsable --mem=24G --job-name=ppo_local_wind_ft \
   "${TRAIN_SH}" "${LIBS}" "${RL_PKG}" \

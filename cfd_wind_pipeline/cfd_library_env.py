@@ -58,7 +58,11 @@ def make_cfd_env(seed: int, rank: int, library_dirs,
                  rl_package_path: str,
                  mix_synthetic: float = 0.0,
                  template_id: Optional[int] = None,
-                 template_filter=None):
+                 template_filter=None,
+                 far_plume_frac: float = 0.0,
+                 far_plume_range=(4.0, 14.0),
+                 far_plume_clearance: float = 0.6,
+                 far_plume_min_src_dist: float = 3.0):
     """Factory replacing train.py's `make_env`. Returns a thunk that
     constructs a CFDLibraryEnv ready for the VecEnv.
 
@@ -79,7 +83,11 @@ def make_cfd_env(seed: int, rank: int, library_dirs,
         rng = np.random.default_rng(seed + rank)
         sampler = CFDLibrarySampler(library_dirs, rng,
                                     rl_package_path=rl_package_path,
-                                    template_filter=template_filter)
+                                    template_filter=template_filter,
+                                    far_plume_frac=far_plume_frac,
+                                    far_plume_range=far_plume_range,
+                                    far_plume_clearance=far_plume_clearance,
+                                    far_plume_min_src_dist=far_plume_min_src_dist)
         wrapped = CFDLibraryEnv(env, sampler, mix_synthetic=mix_synthetic, rng=rng)
         wrapped.reset(seed=seed + rank)
         return wrapped
