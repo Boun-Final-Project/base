@@ -438,10 +438,15 @@ each checkpoint's provenance (`agent_188416000_config.json`,
 
 ### Batch deployment / evaluation
 
-`run_rl_lidar_batch.sh` (at the **workspace root**,
-`~/ros2_ws/`, alongside the other `run_*_batch.sh` runners — currently
-installed on the deployment machine rather than tracked in this repo) deploys
-a checkpoint over the 7 evaluation maps and collects
+[`run_rl_lidar_batch.sh`](run_rl_lidar_batch.sh) (tracked at the repo root)
+runs from the **workspace root** (`~/ros2_ws/`, alongside the other
+`run_*_batch.sh` runners) — install it there first:
+
+```bash
+cp ~/ros2_ws/src/base/run_rl_lidar_batch.sh ~/ros2_ws/
+```
+
+It deploys a checkpoint over the 7 evaluation maps and collects
 per-run summaries. Each run brings up the GADEN world
 (`main_simbot_launch.py method:=none`), runs `gaden_rl_node_lidar`, harvests
 `node.log → summary.txt`, and tears the sim down before the next run.
