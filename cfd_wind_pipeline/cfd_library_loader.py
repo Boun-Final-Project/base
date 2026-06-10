@@ -99,7 +99,12 @@ class CFDLibrarySampler:
                  min_speed: float = 0.05,
                  min_speed_std: float = 0.02,
                  min_circ_std: float = 0.3,
-                 template_filter=None):
+                 max_speed_cap: float = 10.0,
+                 template_filter=None,
+                 far_plume_frac: float = 0.0,
+                 far_plume_range=(4.0, 14.0),
+                 far_plume_clearance: float = 0.6,
+                 far_plume_min_src_dist: float = 3.0):
         """Scan one or more libraries and cache the valid case dirs.
 
         library_dirs : str | Path | list
@@ -109,6 +114,18 @@ class CFDLibrarySampler:
             If given, keep only cases whose template_id is in this set.
             Use to restrict to the champ's known templates (0-5) and avoid
             OOD template shock during finetuning.
+        far_plume_frac : float in [0,1]
+            Fraction of sampled cases whose robot start is RE-PLACED at a
+            far-plume-hit cell (forces explore-to-find-plume search). The
+            rest keep the manifest's original (near) robot_pos so the policy
+            retains its plume-tracking skill. 0 = behave exactly as before.
+        far_plume_range : (lo, hi) meters
+            Target plume-hit-distance band for re-placed starts (see
+            far_plume_placement.FarPlumePlacer).
+        far_plume_clearance : float
+            Wall-clearance margin (m) required at the re-placed start.
+        far_plume_min_src_dist : float
+            Never re-place closer than this to the source.
 
         Degenerate filters mirror library_stats.is_degenerate:
         mean |U| >= min_speed, std |U| >= min_speed_std,
@@ -116,6 +133,27 @@ class CFDLibrarySampler:
         """
         self._rng = rng
         self._rl_pkg = rl_package_path
+        self._far_frac = float(far_plume_frac)
+        self._far_range = tuple(far_plume_range)
+        self._far_clearance = float(far_plume_clearance)
+        self._far_min_src = float(far_plume_min_src_dist)
+        self._placer_cache = {}  # case_dir -> FarPlumePlacer (lazy)
+        # Reverse curriculum (OSL_REVERSE_CURRICULUM=1): the far-plume start band
+        # anneals from NEAR the source to the full far_plume_range over training,
+        # so the policy first learns the (solvable) near-source approach then must
+        # cross progressively farther — matching the measured 2m-solves / 3m-fails
+        # cliff on many_rooms. Progress is approximated by this sampler's own
+        # sample() call count vs OSL_RC_TOTAL_SAMPLES (per-worker). near band is
+        # OSL_RC_NEAR_LO..OSL_RC_NEAR_HI; final band is far_plume_range; the lo/hi
+        # interpolate linearly with progress over the first OSL_RC_FRACTION of run.
+        import os as _os
+        self._rc_on = _os.environ.get("OSL_REVERSE_CURRICULUM", "0") == "1"
+        self._rc_near = (float(_os.environ.get("OSL_RC_NEAR_LO", "1.0")),
+                         float(_os.environ.get("OSL_RC_NEAR_HI", "3.0")))
+        self._rc_total = float(_os.environ.get("OSL_RC_TOTAL_SAMPLES", "0"))
+        self._rc_fraction = float(_os.environ.get("OSL_RC_FRACTION", "0.6"))
+        self._rc_calls = 0
+        self._rc_cur_range = None  # last band the placers were built for
         if isinstance(library_dirs, (str, Path)):
             library_dirs = [library_dirs]
         tmpl_set = set(template_filter) if template_filter is not None else None
@@ -150,6 +188,13 @@ class CFDLibrarySampler:
                     if s.size == 0 or s.mean() < min_speed or s.std() < min_speed_std:
                         n_skipped += 1
                         continue
+                    # Reject CFD solver artifacts: a few cases have a handful of
+                    # blow-up cells (max-speed up to 9e9 m/s) that make the plume
+                    # tunnel-check allocate a 500GB array → OOM. Real wind here is
+                    # <5 m/s (p99 ~4); cap well above that.
+                    if not np.isfinite(speeds).all() or speeds.max() > max_speed_cap:
+                        n_skipped += 1
+                        continue
                     dirs = np.arctan2(field[..., 1], field[..., 0])[free]
                     R = np.sqrt(np.mean(np.sin(dirs))**2 + np.mean(np.cos(dirs))**2)
                     circ = np.sqrt(-2*np.log(R)) if R > 1e-8 else float('inf')
@@ -170,9 +215,55 @@ class CFDLibrarySampler:
     def __len__(self) -> int:
         return len(self._cases)
 
+    def _current_range(self):
+        """The far-plume distance band for the current curriculum progress.
+        Without reverse curriculum, this is just the fixed far_plume_range."""
+        if not self._rc_on or self._rc_total <= 0:
+            return self._far_range
+        # progress in [0,1] over the first rc_fraction of the run, then clamped.
+        prog = self._rc_calls / (self._rc_total * max(self._rc_fraction, 1e-6))
+        prog = min(1.0, max(0.0, prog))
+        lo = self._rc_near[0] + prog * (self._far_range[0] - self._rc_near[0])
+        hi = self._rc_near[1] + prog * (self._far_range[1] - self._rc_near[1])
+        return (lo, hi)
+
+    def _get_placer(self, cd: Path):
+        """Lazily build + cache the FarPlumePlacer for one case (uses the
+        on-disk far_placement.json computed by far_plume_placement). Under the
+        reverse curriculum the band changes over time, so the cache is keyed by
+        (case, rounded-band) and stale-band placers are simply rebuilt."""
+        cur = self._current_range()
+        key = (str(cd), round(cur[0], 2), round(cur[1], 2))
+        placer = self._placer_cache.get(key)
+        if placer is not None:
+            return placer
+        from far_plume_placement import compute_case_placements, FarPlumePlacer
+        placements = compute_case_placements(
+            cd, self._rl_pkg, clearance=self._far_clearance)
+        placer = FarPlumePlacer(
+            placements, self._rng,
+            target_phd_range=cur,
+            min_source_dist=self._far_min_src)
+        self._placer_cache[key] = placer
+        return placer
+
     def sample(self) -> dict:
-        """Return {map_data, wind_field} suitable for env.reset(options=...)."""
+        """Return {map_data, wind_field} suitable for env.reset(options=...).
+
+        If far_plume_frac > 0, that fraction of samples gets its robot start
+        RE-PLACED at a far-plume-hit cell (search scenario); the rest keep the
+        original near placement.
+        """
+        self._rc_calls += 1
         cd = self._cases[self._rng.integers(0, len(self._cases))]
         case = load_cfd_case(cd, self._rl_pkg)
+        map_data = case['map_data']
+        if self._far_frac > 0.0 and self._rng.random() < self._far_frac:
+            placer = self._get_placer(cd)
+            if placer.usable:
+                start = placer.pick()
+                if start is not None:
+                    # Copy so we don't mutate any shared map_data dict.
+                    map_data = {**map_data, 'robot_pos': start}
         # Drop helper fields so it's pure reset-options
-        return {'map_data': case['map_data'], 'wind_field': case['wind_field']}
+        return {'map_data': map_data, 'wind_field': case['wind_field']}

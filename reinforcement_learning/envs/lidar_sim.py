@@ -96,8 +96,36 @@ class LidarSim:
         any_hit = np.any(hit, axis=1)  # (R,)
         first_hit_idx = np.argmax(hit, axis=1)  # (R,)
 
-        # Distance: t[first_hit_idx] for rays that hit, else max_range
-        distances = np.where(any_hit, self._t[first_hit_idx], self.max_range)
+        # Coarse distance: t[first_hit_idx] for rays that hit, else max_range.
+        # This is quantized to the grid step (~resolution), which floors the
+        # measured wall distance at ~one cell. Real BasicSim casts against
+        # continuous geometry and reads sub-cell clearances (e.g. 0.24 m in
+        # tight curves) far more often (45% of steps < 0.4 m vs 11% here).
+        # Refine each hit to a continuous surface distance below so the
+        # near-wall regime matches deployment — otherwise the policy never
+        # experiences sub-resolution clearance in training.
+        coarse = np.where(any_hit, self._t[first_hit_idx], self.max_range)
+
+        # Sub-cell refinement: the wall surface lies between the last free
+        # sample (t = coarse - res) and the first occupied sample (t = coarse).
+        # Bisect within that interval to locate the free→occupied transition at
+        # sub-resolution precision. Vectorised over hit rays.
+        distances = coarse.copy()
+        hit_rays = np.where(any_hit)[0]
+        if hit_rays.size:
+            lo = np.maximum(coarse[hit_rays] - res, 0.0)   # last known-free t
+            hi = coarse[hit_rays].copy()                   # first known-occupied t
+            ca = cos_a[hit_rays]; sa = sin_a[hit_rays]
+            for _ in range(6):  # 2^-6 * res ≈ 1.5 mm precision at res=0.1
+                mid = 0.5 * (lo + hi)
+                mgx = np.floor((ox + ca * mid) / res).astype(np.int32)
+                mgy = np.floor((oy + sa * mid) / res).astype(np.int32)
+                m_oob = (mgx < 0) | (mgx >= gw) | (mgy < 0) | (mgy >= gh)
+                m_occ = m_oob | (self.grid.grid[np.clip(mgy, 0, gh - 1),
+                                                np.clip(mgx, 0, gw - 1)] != 0)
+                hi = np.where(m_occ, mid, hi)   # midpoint occupied → surface closer
+                lo = np.where(m_occ, lo, mid)
+            distances[hit_rays] = hi           # first-occupied boundary = surface distance
 
         # Apply Gaussian noise to hit rays only
         if self.noise_std > 0.0:

@@ -1,19 +1,51 @@
 # Autonomous Gas Source Localization on GADEN
 
-A ROS2 research platform for autonomous gas source localization (GSL) in unknown indoor environments. This repository implements and compares multiple information-theoretic search algorithms using the [GADEN](https://github.com/MAPIRlab/gaden) gas dispersion simulator and a simulated Pioneer P3DX robot.
+A ROS2 research platform for autonomous gas source localization (GSL) in unknown indoor environments. This repository implements and compares information-theoretic baselines and a reinforcement-learning policy, **RLaika**, using the [GADEN](https://github.com/MAPIRlab/gaden) gas dispersion simulator and a simulated Pioneer P3DX robot.
 
 ## Overview
 
-Finding gas leak sources in indoor environments is challenging due to turbulent airflow, obstacles, and the absence of stable concentration gradients. This project implements several algorithms that guide a mobile robot to autonomously locate gas sources by maximizing information gain at each step.
+Finding gas leak sources in indoor environments is challenging due to turbulent airflow, obstacles, and the absence of stable concentration gradients. This project implements information-theoretic baselines and a reinforcement-learning policy, RLaika, that guide a mobile robot to autonomously locate gas sources.
 
 ### Algorithms Implemented
 
 | Algorithm | Package | Based On | Description |
 |-----------|---------|----------|-------------|
+| **RLaika** (ours) | `reinforcement_learning`, `gaden_transfer` | — | PPO policy (lidar + gas + wind observations, dual-backbone network) trained in a fast Python simulator and deployed on GADEN — see [Training](#rl-policy-training-rlaika) and [Deployment](#rl-policy-deployment-rlaika) |
 | **Dual-Mode IGDM** | `efe_igdm` | [Kim et al., 2025](https://ieeexplore.ieee.org/document/10777609/) | Indoor Gaussian Dispersion Model with dual-mode planning (local RRT-Infotaxis + global PRM frontier exploration) |
 | **RRT-Infotaxis** | `rrt_infotaxis` | [Park & Cho, 2022](https://www.sciencedirect.com/science/article/pii/S1270963821007860) | Local development package for experimenting with RRT-Infotaxis variants and improvements |
 | **Classical Infotaxis** | `infotaxis` | [Vergassola et al., 2007](https://www.nature.com/articles/nature05464) | Grid-based entropy-minimization search |
 | **Ali's IGDM** | `ali_igdm` | — | ROS2 port of the best-performing algorithm from the `rrt_infotaxis` experiments |
+| **ADSM** | `adsm` | — | State-of-the-art baseline used in the evaluation |
+| **EESA** | `eesa` | — | State-of-the-art baseline used in the evaluation |
+
+### Results
+
+Hardware-validated evaluation on the full ROS2 + GADEN stack: 7 scenario maps ×
+5 runs per method. Timing and distance metrics are computed over successful
+runs only, reported as mean (std).
+
+| Method | Success Rate | 1-Step Computation [ms] | Total Travel Time [s] | Travel Distance [m] |
+|---|---|---|---|---|
+| EESA | 20/35 (57%) | 10.8 (21.7) | **110 (73)** | **19.8 (11.0)** |
+| ADSM | 28/35 (80%) | 9.5 (11.9) | 160 (109) | 30.2 (23.2) |
+| **RLaika (ours)** | **32/35 (91%)** | **1.4 (0.2)** | 897 (766) | 66.4 (57.3) |
+
+Per-scenario success and travel distance (TD, successful runs):
+
+| Map | RLaika | TD [m] | ADSM | TD [m] | EESA | TD [m] |
+|---|---|---|---|---|---|---|
+| 4_rooms | **5/5** | **16.2** | 3/5 | 64.3 | 0/5 | — |
+| 10x6_u_left | **5/5** | 36.9 | **5/5** | **13.6** | **5/5** | 19.2 |
+| 10x6_u_right | **5/5** | 39.6 | **5/5** | **12.6** | **5/5** | 13.7 |
+| curved_labyrinth_left | **5/5** | 47.3 | **5/5** | 31.6 | 3/5 | **20.9** |
+| curved_labyrinth_right | **5/5** | 76.9 | **5/5** | 31.1 | **5/5** | **16.3** |
+| many_rooms | **4/5** | 180.3 | 3/5 | **34.0** | 2/5 | 43.7 |
+| ultimate | **3/5** | 132.1 | 2/5 | **52.9** | 0/5 | — |
+| **TOTAL** | **32/35** | | 28/35 | | 20/35 | |
+
+RLaika trades longer search paths for the highest success rate and a ~7×
+cheaper per-step decision (a single network forward pass instead of
+information-gain planning).
 
 ## Repository Structure
 
@@ -65,10 +97,12 @@ base/
 
 ### Python
 
-- NumPy
-- SciPy
-- Matplotlib
-- Numba (for JIT-accelerated particle filter operations)
+Listed in [`requirements.txt`](requirements.txt):
+
+- NumPy, SciPy, Matplotlib
+- Numba (JIT-accelerated particle filter operations)
+- PyTorch and Gymnasium (RL training and deployment)
+- PyYAML (eval-config / scenario parsing)
 
 ### ROS2 Packages
 
@@ -93,7 +127,7 @@ cd ~/ros2_ws/src
 git clone https://github.com/Boun-Final-Project/base.git
 
 # Install Python dependencies
-pip install numpy scipy matplotlib numba
+pip install -r base/requirements.txt
 
 # Build
 cd ~/ros2_ws
@@ -221,6 +255,167 @@ python3 src/base/efe_igdm/scripts/plot_search_trajectory.py
 python3 src/base/efe_igdm/scripts/plot_entropy.py
 ```
 
+## RL Policy Training (RLaika)
+
+RLaika is trained entirely in a fast Python simulator (procedural maps + a
+filament-based plume model) inside the
+[`reinforcement_learning`](reinforcement_learning/) package — no ROS2 or GADEN
+needed at training time. Producing a deployable checkpoint is a two-stage
+process: a from-scratch PPO **base training** run, followed by an optional
+**CFD local-wind finetune** that closes the wind-distribution gap to GADEN.
+
+### 1. Base training — the champion recipe
+
+[`reinforcement_learning/train_champ.sh`](reinforcement_learning/train_champ.sh)
+launches the exact PPO recipe that produced the champion checkpoint
+`agent_91750400.pt` (dual-backbone architecture, seed 1; the champion is the
+early-stopped best checkpoint at ~91.75M of a 200M-step budget).
+
+```bash
+# On SLURM (recommended)
+sbatch reinforcement_learning/train_champ.sh
+
+# Locally / custom python interpreter
+bash reinforcement_learning/train_champ.sh
+VENV_PY=/path/to/python bash reinforcement_learning/train_champ.sh
+```
+
+#### Training hyperparameters
+
+| Category | Parameter | Value |
+|---|---|---|
+| **PPO core** | Learning rate | 3 × 10⁻⁴ |
+| | Discount factor γ | 0.99 |
+| | GAE λ | 0.95 |
+| | Clip ratio ε | 0.3 |
+| | Value loss coefficient | 0.5 |
+| | Entropy coefficient | 0.02 |
+| **Rollout & updates** | Total timesteps | 2 × 10⁸ budget (champion early-stopped at ~9.2 × 10⁷) |
+| | Number of parallel envs | 256 |
+| | Rollout length | 1024 |
+| | Minibatches per update | 32 |
+| | Update epochs | 10 |
+| **Optimization** | Max gradient norm | 0.5 |
+| | Learning-rate annealing | linear, from 50% of training |
+| | Target KL (early stop) | 0.05 |
+| **Episode budget** | Max steps per episode | 600 |
+| | Step cost r_step | −1.0 |
+| | Detection / collision / success | +0.75 / −5.0 / +200.0 |
+| | Success distance D_success | 0.5 m |
+| **Curriculum learning** | Map templates (stages) | T0–T1, T0–T3, T0–T5 |
+| | Unlock at progress | 0%, 25%, 50% |
+| | Room size schedule | 8×6–10×8 m → 8×6–20×15 m |
+| | Curriculum fraction | 50% of training |
+
+`train_champ.sh` sets the run-defining values (learning rate, clip ratio,
+target KL, annealing, envs, rollout length, timesteps, curriculum, seed) via
+CLI flags, and pins the recipe values that differ from this branch's
+`config.py` defaults (the reward constants, no loop penalty, and the slower
+T0–T5 template schedule) via `OSL_*` environment overrides that `config.py`
+reads — so the script runs unmodified on this branch and reproduces the
+champion recipe without changing the defaults other code sees. All values are
+recorded in the committed snapshot `champ_config.json`, and each run writes
+its own effective `config.json` for provenance.
+
+Checkpoints, training metrics (`metrics.npz`), and curve plots land in
+`reinforcement_learning/runs/<run-name>/`.
+
+[`reinforcement_learning/champ_config.json`](reinforcement_learning/champ_config.json)
+is the full hyperparameter snapshot of the original run and is the
+authoritative provenance.
+
+### 2. Selecting a checkpoint
+
+Training success keeps climbing long after transfer to GADEN has peaked, so
+always select checkpoints by GADEN evaluation, never by training reward:
+
+```bash
+sbatch reinforcement_learning/eval_gaden.sh reinforcement_learning/runs/<run-name>
+```
+
+### 3. Finetuning on CFD wind with local-wind observation
+
+Uniform per-episode wind is a useful simplification for base training, but it
+does not capture the recirculation, channelling, and shear that obstacles
+produce — the largest remaining train/eval distribution gap to GADEN. The
+[`cfd_wind_pipeline`](cfd_wind_pipeline/) package closes it: we pre-compute a
+library of **~2,400 maps with CFD-solved wind fields** (OpenFOAM, generated
+once offline because each solve is compute-heavy) and finetune the policy
+against that library.
+
+The finetune resumes from the uniform-wind champion at 91.75M steps with a
+reduced learning rate (5 × 10⁻⁵, annealed to 1 × 10⁻⁵) and switches the wind
+observation from the episode's spatial mean to the **local wind measured at
+the robot's position** (`OSL_LOCAL_WIND_OBS=1`). To expose the policy to
+episodes where it starts outside the plume, **20% of episodes re-place the
+robot 4–14 m away from the plume** (far-plume spawns,
+`cfd_wind_pipeline/far_plume_placement.py`). Every checkpoint is evaluated
+inline on realistic-gas GADEN episodes and the best-scoring checkpoint is
+deployed — typically reached ~15M finetune steps in; longer finetuning
+degrades the policy. On the offline real-gas evaluation harness this recipe
+took the champion from 57% to 76–80% overall success (20 episodes/map),
+including the first non-zero results on `many_rooms`.
+
+**Step 1 — build a CFD wind library** (one-off; needs SLURM + an OpenFOAM
+container). See the [`cfd_wind_pipeline` README](cfd_wind_pipeline/README.md)
+for the full walkthrough. Optionally precompute the far-spawn placement cache:
+
+```bash
+sbatch cfd_wind_pipeline/sbatch/precompute_far_placement.sh \
+    /path/to/cfd_library[,/path/to/cfd_library_2] /path/to/rl-package-checkout
+```
+
+**Step 2 — launch the finetune:**
+
+```bash
+bash cfd_wind_pipeline/sbatch/finetune_local_wind.sh \
+    /path/to/cfd_library[,/path/to/cfd_library_2] \
+    /path/to/rl-package-checkout \
+    /path/to/checkpoints/agent_91750400.pt
+```
+
+#### Fine-tuning hyperparameters
+
+| Parameter | Value |
+|---|---|
+| Resume from | champion checkpoint @ 91.75M steps |
+| Learning rate | 5 × 10⁻⁵, annealed linearly to 1 × 10⁻⁵ |
+| Clip ratio ε / target KL | 0.3 / 0.05 |
+| Parallel envs | 96 |
+| Wind observation | local wind at robot cell (`OSL_LOCAL_WIND_OBS=1`) |
+| Training wind | CFD library (~2,400 maps), no synthetic-wind mix |
+| Far-plume spawns | 20% of episodes, 4–14 m plume-hit distance |
+| Step budget | 152M absolute (~60M headroom over the resumed step) |
+| Checkpoint selection | inline real-gas GADEN eval; best ≈ +15M steps |
+
+Notes:
+
+- Like all trained weights, the champion checkpoint `agent_91750400.pt` is
+  distributed outside git — see [Checkpoints](#checkpoints) under the
+  deployment section.
+- `<rl-package-checkout>` can simply be this repository's root — its
+  `reinforcement_learning` package supports `OSL_LOCAL_WIND_OBS`, the inline
+  real-gas GADEN eval (`OSL_INLINE_GADEN_*`, writes
+  `runs/<name>/gaden_curve.csv` including a step-0 baseline row when
+  resuming), and the far-plume spawns.
+- The inline eval needs `GADEN_SCENARIOS_ROOT` to point at the GADEN replay
+  data (scenario folders with stored gas iterations); without it, maps fall
+  back to the surrogate plume, which is known to overestimate. Offline
+  checkpoint evaluation via `reinforcement_learning/eval_gaden.sh` remains
+  available as a fallback (supports `--real-gas`).
+- `--total-timesteps` is **absolute** (resumed step + extra), not additional.
+- Per the checkpoint-selection rule above, the GADEN peak arrives ~15M steps
+  into the finetune and drifts down afterwards — early-stop on GADEN eval, not
+  training reward.
+- The finetuned policy observes local wind, so eval and deployment must also
+  run with `OSL_LOCAL_WIND_OBS=1`; mixing the conventions silently degrades it.
+
+For custom recipes (mixing synthetic-wind resets back in via
+`CFD_MIX_SYNTHETIC`, restricting map templates via `CFD_TEMPLATE_FILTER`, other
+PPO flags), call the underlying
+[`cfd_wind_pipeline/sbatch/train_cfd_library.sh`](cfd_wind_pipeline/sbatch/train_cfd_library.sh)
+directly — the launcher above is a thin, recipe-pinned wrapper around it.
+
 ## RL Policy Deployment (RLaika)
 
 Besides the information-theoretic algorithms above, the platform deploys
@@ -230,11 +425,28 @@ package (`gaden_rl_node_lidar`; lidar + wind observation, `arch ∈ {mlp, modula
 dual, spatial}`) and can optionally engage a SLAM-based frontier-escape stack
 when the policy gets wedged in a room.
 
+### Checkpoints
+
+Trained weights (`*.pt`) are deliberately **not committed to git** (see
+`.gitignore`); they are distributed as `rl_deploy_bundle.tar.gz` — an archive
+containing the deployed checkpoint (`agent_188416000.pt`), a standalone copy
+of the network/env source it was trained against, and its training config.
+Ask the maintainers (see [Contributors](#contributors)) for the bundle, then
+place the checkpoint where the commands below expect it. The repo does commit
+each checkpoint's provenance (`agent_188416000_config.json`,
+`agent_188416000_DEPLOY_NOTE.md`).
+
 ### Batch deployment / evaluation
 
-`run_rl_lidar_batch.sh` (at the **workspace root**,
-`~/ros2_ws/`, alongside the other `run_*_batch.sh` runners) deploys a checkpoint
-over the 7 evaluation maps and collects
+[`run_rl_lidar_batch.sh`](run_rl_lidar_batch.sh) (tracked at the repo root)
+runs from the **workspace root** (`~/ros2_ws/`, alongside the other
+`run_*_batch.sh` runners) — install it there first:
+
+```bash
+cp ~/ros2_ws/src/base/run_rl_lidar_batch.sh ~/ros2_ws/
+```
+
+It deploys a checkpoint over the 7 evaluation maps and collects
 per-run summaries. Each run brings up the GADEN world
 (`main_simbot_launch.py method:=none`), runs `gaden_rl_node_lidar`, harvests
 `node.log → summary.txt`, and tears the sim down before the next run.
