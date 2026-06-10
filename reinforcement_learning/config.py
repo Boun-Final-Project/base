@@ -42,7 +42,10 @@ R_MAX_STEPS = -20.0
 # Per-point contribution decays with age: weight(age) = LOOP_DECAY**(age-1).
 LOOP_HISTORY = 10
 D_LOOP = 0.3   # < STEP_SIZE so a clean forward step doesn't self-trigger
-R_LOOP_BASE = -0.05
+# Default 0 = loop penalty OFF (the loop-penalty training experiments were
+# net-negative; the champion and deployed checkpoints trained without it).
+# Opt in per-run via OSL_R_LOOP_BASE (e.g. -0.05).
+R_LOOP_BASE = 0.0
 LOOP_DECAY = 0.85
 
 # Env-var recipe overrides — used by reproduction scripts (train_champ.sh)
