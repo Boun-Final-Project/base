@@ -221,6 +221,99 @@ python3 src/base/efe_igdm/scripts/plot_search_trajectory.py
 python3 src/base/efe_igdm/scripts/plot_entropy.py
 ```
 
+## RL Policy Training (RLaika)
+
+RLaika is trained entirely in a fast Python simulator (procedural maps + a
+filament-based plume model) inside the
+[`reinforcement_learning`](reinforcement_learning/) package — no ROS2 or GADEN
+needed at training time. Producing a deployable checkpoint is a two-stage
+process: a from-scratch PPO **base training** run, followed by an optional
+**CFD local-wind finetune** that closes the wind-distribution gap to GADEN.
+
+### 1. Base training — the champion recipe
+
+[`reinforcement_learning/train_champ.sh`](reinforcement_learning/train_champ.sh)
+launches the exact PPO recipe that produced the champion checkpoint
+`agent_91750400.pt`: dual-backbone architecture, 256 parallel envs, map
+curriculum, clip-epsilon 0.3, target-KL 0.05, LR 3e-4 annealed from 50% of
+training, seed 1, 200M total steps (the champion is the early-stopped best
+checkpoint at ~91.75M).
+
+```bash
+# On SLURM (recommended)
+sbatch reinforcement_learning/train_champ.sh
+
+# Locally / custom python interpreter
+bash reinforcement_learning/train_champ.sh
+VENV_PY=/path/to/python bash reinforcement_learning/train_champ.sh
+```
+
+Checkpoints and TensorBoard logs land in
+`reinforcement_learning/runs/<run-name>/`.
+
+[`reinforcement_learning/champ_config.json`](reinforcement_learning/champ_config.json)
+is the full hyperparameter snapshot of the original run and is the
+authoritative provenance. **Reward caveat:** the champion was trained with
+`R_STEP = -1.0` and `R_DETECTION = 0.75`; `config.py` on `main` carries
+different values. To reproduce the champion exactly, run the script from the
+`efe/champ-training-script` branch (whose `config.py` matches the snapshot),
+or set those two values in
+[`reinforcement_learning/config.py`](reinforcement_learning/config.py) to the
+snapshot values first.
+
+### 2. Selecting a checkpoint
+
+Training success keeps climbing long after transfer to GADEN has peaked, so
+always select checkpoints by GADEN evaluation, never by training reward:
+
+```bash
+sbatch reinforcement_learning/eval_gaden.sh reinforcement_learning/runs/<run-name>
+```
+
+### 3. Finetuning on CFD wind with local-wind observation
+
+GADEN evaluation maps use spatially-varying CFD wind, while base training uses
+uniform per-episode wind — the largest remaining train/eval distribution gap.
+The [`cfd_wind_pipeline`](cfd_wind_pipeline/) package closes it: it builds an
+offline library of OpenFOAM wind fields on procedural maps and finetunes the
+policy against that library. Combined with switching the wind observation from
+the spatial mean to the **local wind at the robot's cell**
+(`OSL_LOCAL_WIND_OBS=1`), this is our strongest finetune: on the offline
+real-gas evaluation harness the champion went from 57% to 76% overall success
+(20 episodes/map), including the first non-zero result on `many_rooms`
+(0% → 50%).
+
+**Step 1 — build a CFD wind library** (one-off; needs SLURM + an OpenFOAM
+container). See the [`cfd_wind_pipeline` README](cfd_wind_pipeline/README.md)
+for the full walkthrough.
+
+**Step 2 — launch the finetune:**
+
+```bash
+bash cfd_wind_pipeline/sbatch/finetune_local_wind.sh \
+    /path/to/cfd_library[,/path/to/cfd_library_2] \
+    /path/to/rl-package-checkout \
+    /path/to/checkpoints/agent_91750400.pt
+```
+
+Notes:
+
+- The RL package checkout must support `OSL_LOCAL_WIND_OBS` in its `config.py`
+  (`feature/local-wind-obs` lineage).
+- `--total-timesteps` is **absolute** (resumed step + extra), not additional;
+  the script defaults to 152M (= champion 91.75M + ~60M headroom).
+- Per the checkpoint-selection rule above, the GADEN peak typically arrives
+  ~15M steps into the finetune and drifts down afterwards — early-stop on
+  GADEN eval.
+- The finetuned policy observes local wind, so eval and deployment must also
+  run with `OSL_LOCAL_WIND_OBS=1`; mixing the conventions silently degrades it.
+
+For custom recipes (mixing synthetic-wind resets back in via
+`CFD_MIX_SYNTHETIC`, restricting map templates via `CFD_TEMPLATE_FILTER`, other
+PPO flags), call the underlying
+[`cfd_wind_pipeline/sbatch/train_cfd_library.sh`](cfd_wind_pipeline/sbatch/train_cfd_library.sh)
+directly — the launcher above is a thin, recipe-pinned wrapper around it.
+
 ## RL Policy Deployment (RLaika)
 
 Besides the information-theoretic algorithms above, the platform deploys
