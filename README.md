@@ -234,10 +234,8 @@ process: a from-scratch PPO **base training** run, followed by an optional
 
 [`reinforcement_learning/train_champ.sh`](reinforcement_learning/train_champ.sh)
 launches the exact PPO recipe that produced the champion checkpoint
-`agent_91750400.pt`: dual-backbone architecture, 256 parallel envs, map
-curriculum, clip-epsilon 0.3, target-KL 0.05, LR 3e-4 annealed from 50% of
-training, seed 1, 200M total steps (the champion is the early-stopped best
-checkpoint at ~91.75M).
+`agent_91750400.pt` (dual-backbone architecture, seed 1; the champion is the
+early-stopped best checkpoint at ~91.75M of a 200M-step budget).
 
 ```bash
 # On SLURM (recommended)
@@ -247,6 +245,39 @@ sbatch reinforcement_learning/train_champ.sh
 bash reinforcement_learning/train_champ.sh
 VENV_PY=/path/to/python bash reinforcement_learning/train_champ.sh
 ```
+
+#### Training hyperparameters
+
+| Category | Parameter | Value |
+|---|---|---|
+| **PPO core** | Learning rate | 3 × 10⁻⁴ |
+| | Discount factor γ | 0.99 |
+| | GAE λ | 0.95 |
+| | Clip ratio ε | 0.3 |
+| | Value loss coefficient | 0.5 |
+| | Entropy coefficient | 0.02 |
+| **Rollout & updates** | Total timesteps | 2 × 10⁸ budget (champion early-stopped at ~9.2 × 10⁷) |
+| | Number of parallel envs | 256 |
+| | Rollout length | 1024 |
+| | Minibatches per update | 32 |
+| | Update epochs | 10 |
+| **Optimization** | Max gradient norm | 0.5 |
+| | Learning-rate annealing | linear, from 50% of training |
+| | Target KL (early stop) | 0.05 |
+| **Episode budget** | Max steps per episode | 600 |
+| | Step cost r_step | −1.0 |
+| | Detection / collision / success | +0.75 / −5.0 / +200.0 |
+| | Success distance D_success | 0.5 m |
+| **Curriculum learning** | Map templates (stages) | T0–T1, T0–T3, T0–T5 |
+| | Unlock at progress | 0%, 25%, 50% |
+| | Room size schedule | 8×6–10×8 m → 8×6–20×15 m |
+| | Curriculum fraction | 50% of training |
+
+`train_champ.sh` sets the run-defining values (learning rate, clip ratio,
+target KL, annealing, envs, rollout length, timesteps, curriculum, seed) via
+CLI flags; everything else comes from `config.py` defaults (see the reward
+caveat below). All of them are recorded in the committed snapshot
+`champ_config.json`.
 
 Checkpoints and TensorBoard logs land in
 `reinforcement_learning/runs/<run-name>/`.
