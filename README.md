@@ -371,7 +371,7 @@ sbatch cfd_wind_pipeline/sbatch/precompute_far_placement.sh \
 bash cfd_wind_pipeline/sbatch/finetune_local_wind.sh \
     /path/to/cfd_library[,/path/to/cfd_library_2] \
     /path/to/rl-package-checkout \
-    /path/to/checkpoints/agent_91750400.pt
+    "$(pwd)/checkpoints/agent_91750400.pt"
 ```
 
 #### Fine-tuning hyperparameters
@@ -390,9 +390,8 @@ bash cfd_wind_pipeline/sbatch/finetune_local_wind.sh \
 
 Notes:
 
-- Like all trained weights, the champion checkpoint `agent_91750400.pt` is
-  distributed outside git — see [Checkpoints](#checkpoints) under the
-  deployment section.
+- The champion checkpoint is committed at `checkpoints/agent_91750400.pt` —
+  see [Checkpoints](#checkpoints).
 - `<rl-package-checkout>` can simply be this repository's root — its
   `reinforcement_learning` package supports `OSL_LOCAL_WIND_OBS`, the inline
   real-gas GADEN eval (`OSL_INLINE_GADEN_*`, writes
@@ -427,14 +426,18 @@ when the policy gets wedged in a room.
 
 ### Checkpoints
 
-Trained weights (`*.pt`) are deliberately **not committed to git** (see
-`.gitignore`); they are distributed as `rl_deploy_bundle.tar.gz` — an archive
-containing the deployed checkpoint (`agent_188416000.pt`), a standalone copy
-of the network/env source it was trained against, and its training config.
-Ask the maintainers (see [Contributors](#contributors)) for the bundle, then
-place the checkpoint where the commands below expect it. The repo does commit
-each checkpoint's provenance (`agent_188416000_config.json`,
-`agent_188416000_DEPLOY_NOTE.md`).
+The released checkpoints are committed in [`checkpoints/`](checkpoints/)
+(~6 MB each, ~500k parameters, with optimizer state for resuming):
+
+| File | What it is |
+|---|---|
+| `checkpoints/agent_91750400.pt` | the uniform-wind **champion** (base training, 91.75M steps) — the resume base for the CFD local-wind finetune |
+| `checkpoints/agent_188416000.pt` | the **deployed** dual-backbone checkpoint used in the batch-deployment example below |
+
+Provenance is committed too: `reinforcement_learning/champ_config.json` for
+the champion, and `agent_188416000_config.json` /
+`agent_188416000_DEPLOY_NOTE.md` for the deployed checkpoint. Other run
+outputs (`*.pt`) stay untracked by `.gitignore`.
 
 ### Batch deployment / evaluation
 
@@ -457,7 +460,7 @@ colcon build --packages-select gaden_transfer test_env --symlink-install
 source install/setup.bash
 
 # 7 maps × 5 runs, dual-backbone checkpoint, SLAM frontier-escape + video, headless
-RL_CHECKPOINT=~/ros2_ws/src/base/agent_188416000.pt RL_ARCH=dual \
+RL_CHECKPOINT=~/ros2_ws/src/base/checkpoints/agent_188416000.pt RL_ARCH=dual \
 RL_NUM_RUNS=5 RL_ESCAPE=1 RL_RECORD=1 \
 bash ~/ros2_ws/run_rl_lidar_batch.sh
 ```
