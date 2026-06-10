@@ -1,19 +1,51 @@
 # Autonomous Gas Source Localization on GADEN
 
-A ROS2 research platform for autonomous gas source localization (GSL) in unknown indoor environments. This repository implements and compares multiple information-theoretic search algorithms using the [GADEN](https://github.com/MAPIRlab/gaden) gas dispersion simulator and a simulated Pioneer P3DX robot.
+A ROS2 research platform for autonomous gas source localization (GSL) in unknown indoor environments. This repository implements and compares information-theoretic baselines and a reinforcement-learning policy, **RLaika**, using the [GADEN](https://github.com/MAPIRlab/gaden) gas dispersion simulator and a simulated Pioneer P3DX robot.
 
 ## Overview
 
-Finding gas leak sources in indoor environments is challenging due to turbulent airflow, obstacles, and the absence of stable concentration gradients. This project implements several algorithms that guide a mobile robot to autonomously locate gas sources by maximizing information gain at each step.
+Finding gas leak sources in indoor environments is challenging due to turbulent airflow, obstacles, and the absence of stable concentration gradients. This project implements information-theoretic baselines and a reinforcement-learning policy, RLaika, that guide a mobile robot to autonomously locate gas sources.
 
 ### Algorithms Implemented
 
 | Algorithm | Package | Based On | Description |
 |-----------|---------|----------|-------------|
+| **RLaika** (ours) | `reinforcement_learning`, `gaden_transfer` | — | PPO policy (lidar + gas + wind observations, dual-backbone network) trained in a fast Python simulator and deployed on GADEN — see [Training](#rl-policy-training-rlaika) and [Deployment](#rl-policy-deployment-rlaika) |
 | **Dual-Mode IGDM** | `efe_igdm` | [Kim et al., 2025](https://ieeexplore.ieee.org/document/10777609/) | Indoor Gaussian Dispersion Model with dual-mode planning (local RRT-Infotaxis + global PRM frontier exploration) |
 | **RRT-Infotaxis** | `rrt_infotaxis` | [Park & Cho, 2022](https://www.sciencedirect.com/science/article/pii/S1270963821007860) | Local development package for experimenting with RRT-Infotaxis variants and improvements |
 | **Classical Infotaxis** | `infotaxis` | [Vergassola et al., 2007](https://www.nature.com/articles/nature05464) | Grid-based entropy-minimization search |
 | **Ali's IGDM** | `ali_igdm` | — | ROS2 port of the best-performing algorithm from the `rrt_infotaxis` experiments |
+| **ADSM** | `adsm` | — | State-of-the-art baseline used in the evaluation |
+| **EESA** | `eesa` | — | State-of-the-art baseline used in the evaluation |
+
+### Results
+
+Hardware-validated evaluation on the full ROS2 + GADEN stack: 7 scenario maps ×
+5 runs per method. Timing and distance metrics are computed over successful
+runs only, reported as mean (std).
+
+| Method | Success Rate | 1-Step Computation [ms] | Total Travel Time [s] | Travel Distance [m] |
+|---|---|---|---|---|
+| EESA | 20/35 (57%) | 10.8 (21.7) | **110 (73)** | **19.8 (11.0)** |
+| ADSM | 28/35 (80%) | 9.5 (11.9) | 160 (109) | 30.2 (23.2) |
+| **RLaika (ours)** | **32/35 (91%)** | **1.4 (0.2)** | 897 (766) | 66.4 (57.3) |
+
+Per-scenario success and travel distance (TD, successful runs):
+
+| Map | RLaika | TD [m] | ADSM | TD [m] | EESA | TD [m] |
+|---|---|---|---|---|---|---|
+| 4_rooms | **5/5** | **16.2** | 3/5 | 64.3 | 0/5 | — |
+| 10x6_u_left | **5/5** | 36.9 | **5/5** | **13.6** | **5/5** | 19.2 |
+| 10x6_u_right | **5/5** | 39.6 | **5/5** | **12.6** | **5/5** | 13.7 |
+| curved_labyrinth_left | **5/5** | 47.3 | **5/5** | 31.6 | 3/5 | **20.9** |
+| curved_labyrinth_right | **5/5** | 76.9 | **5/5** | 31.1 | **5/5** | **16.3** |
+| many_rooms | **4/5** | 180.3 | 3/5 | **34.0** | 2/5 | 43.7 |
+| ultimate | **3/5** | 132.1 | 2/5 | **52.9** | 0/5 | — |
+| **TOTAL** | **32/35** | | 28/35 | | 20/35 | |
+
+RLaika trades longer search paths for the highest success rate and a ~7×
+cheaper per-step decision (a single network forward pass instead of
+information-gain planning).
 
 ## Repository Structure
 
@@ -65,10 +97,12 @@ base/
 
 ### Python
 
-- NumPy
-- SciPy
-- Matplotlib
-- Numba (for JIT-accelerated particle filter operations)
+Listed in [`requirements.txt`](requirements.txt):
+
+- NumPy, SciPy, Matplotlib
+- Numba (JIT-accelerated particle filter operations)
+- PyTorch and Gymnasium (RL training and deployment)
+- PyYAML (eval-config / scenario parsing)
 
 ### ROS2 Packages
 
@@ -93,7 +127,7 @@ cd ~/ros2_ws/src
 git clone https://github.com/Boun-Final-Project/base.git
 
 # Install Python dependencies
-pip install numpy scipy matplotlib numba
+pip install -r base/requirements.txt
 
 # Build
 cd ~/ros2_ws
@@ -283,7 +317,7 @@ champion recipe without changing the defaults other code sees. All values are
 recorded in the committed snapshot `champ_config.json`, and each run writes
 its own effective `config.json` for provenance.
 
-Checkpoints and TensorBoard logs land in
+Checkpoints, training metrics (`metrics.npz`), and curve plots land in
 `reinforcement_learning/runs/<run-name>/`.
 
 [`reinforcement_learning/champ_config.json`](reinforcement_learning/champ_config.json)
@@ -356,6 +390,9 @@ bash cfd_wind_pipeline/sbatch/finetune_local_wind.sh \
 
 Notes:
 
+- Like all trained weights, the champion checkpoint `agent_91750400.pt` is
+  distributed outside git — see [Checkpoints](#checkpoints) under the
+  deployment section.
 - `<rl-package-checkout>` can simply be this repository's root — its
   `reinforcement_learning` package supports `OSL_LOCAL_WIND_OBS`, the inline
   real-gas GADEN eval (`OSL_INLINE_GADEN_*`, writes
@@ -388,11 +425,23 @@ package (`gaden_rl_node_lidar`; lidar + wind observation, `arch ∈ {mlp, modula
 dual, spatial}`) and can optionally engage a SLAM-based frontier-escape stack
 when the policy gets wedged in a room.
 
+### Checkpoints
+
+Trained weights (`*.pt`) are deliberately **not committed to git** (see
+`.gitignore`); they are distributed as `rl_deploy_bundle.tar.gz` — an archive
+containing the deployed checkpoint (`agent_188416000.pt`), a standalone copy
+of the network/env source it was trained against, and its training config.
+Ask the maintainers (see [Contributors](#contributors)) for the bundle, then
+place the checkpoint where the commands below expect it. The repo does commit
+each checkpoint's provenance (`agent_188416000_config.json`,
+`agent_188416000_DEPLOY_NOTE.md`).
+
 ### Batch deployment / evaluation
 
 `run_rl_lidar_batch.sh` (at the **workspace root**,
-`~/ros2_ws/`, alongside the other `run_*_batch.sh` runners) deploys a checkpoint
-over the 7 evaluation maps and collects
+`~/ros2_ws/`, alongside the other `run_*_batch.sh` runners — currently
+installed on the deployment machine rather than tracked in this repo) deploys
+a checkpoint over the 7 evaluation maps and collects
 per-run summaries. Each run brings up the GADEN world
 (`main_simbot_launch.py method:=none`), runs `gaden_rl_node_lidar`, harvests
 `node.log → summary.txt`, and tears the sim down before the next run.
