@@ -1,0 +1,10 @@
+# Default playback scene (stock main_simbot uses playback=scene1).
+# Start time: 200 iterations (=100 s at saveDeltaTime 0.5). Adjust as needed.
+playback_initial_iteration: 200
+playback_loop:
+  loop: false
+  from: 0
+  to: 0
+simulations:
+  - sim: sim1
+    gas_color: [0.29, 1.0, 0.0]
