@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+benchmark_env terminal UI — plug & play scenario runner.
+
+Run with:  ros2 run benchmark_env benchmark_gui
+
+Lists the scenarios in the installed benchmark_env package, shows each scenario's
+source / robot-start / start-time / gas-baked status (from its stock gaden config
+files), and runs the stock launches:
+    [p] Preprocess  -> gaden_preproc_launch.py
+    [b] Bake gas    -> gaden_sim_launch.py
+    [r] Run         -> main_simbot_launch.py
+It never injects robot/source/start-time; those come from the scenario's config.
+"""
+import os
+import sys
+import glob
+import subprocess
+
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+try:
+    from ament_index_python.packages import get_package_share_directory
+    SHARE = get_package_share_directory("benchmark_env")
+except Exception:
+    SHARE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+SCEN_DIR = os.path.join(SHARE, "scenarios")
+
+# ── colors ───────────────────────────────────────────────────────────────────
+B, D, C, G, Y, R, W, X = (
+    "\033[1m", "\033[2m", "\033[36m", "\033[32m", "\033[33m", "\033[31m", "\033[97m", "\033[0m"
+)
+
+
+def list_scenarios():
+    return sorted(
+        os.path.basename(os.path.dirname(p))
+        for p in glob.glob(os.path.join(SCEN_DIR, "*", "gaden.gproj"))
+    )
+
+
+def config_dir(scenario, configuration="config1"):
+    return os.path.join(SCEN_DIR, scenario, "environment_configurations", configuration)
+
+
+def list_sims(scenario):
+    d = os.path.join(config_dir(scenario), "simulations")
+    return sorted(
+        os.path.basename(p) for p in glob.glob(os.path.join(d, "*")) if os.path.isdir(p)
+    ) or ["sim1"]
+
+
+def bake_is_stale(scenario, sim):
+    """True if the baked gas is older than the config that defines it.
+
+    The gas source position (and gas type, wind, etc.) is frozen into the baked
+    log files at bake time — the player reads it from there, NOT from sim.yaml.
+    So editing sim.yaml/config.yaml has no effect until a re-bake. This compares
+    the newest result file against the config mtimes to detect that drift.
+    Returns False if there is no baked gas at all (that case is handled as
+    'not baked' elsewhere).
+    """
+    result = os.path.join(config_dir(scenario), "simulations", sim, "result")
+    if not (os.path.isdir(result) and os.listdir(result)):
+        return False
+    try:
+        newest_bake = max(
+            os.path.getmtime(os.path.join(result, f)) for f in os.listdir(result)
+        )
+    except OSError:
+        return False
+    inputs = [
+        os.path.join(config_dir(scenario), "simulations", sim, "sim.yaml"),
+        os.path.join(config_dir(scenario), "config.yaml"),
+    ]
+    for path in inputs:
+        try:
+            if os.path.getmtime(path) > newest_bake:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _yaml(path):
+    if yaml is None or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+def info(scenario, sim):
+    cfg = _yaml(os.path.join(config_dir(scenario), "config.yaml"))
+    src = _yaml(os.path.join(config_dir(scenario), "simulations", sim, "sim.yaml"))
+    scene = _yaml(os.path.join(config_dir(scenario), "scenes", "scene1.yaml"))
+    result = os.path.join(config_dir(scenario), "simulations", sim, "result")
+    baked = os.path.isdir(result) and bool(os.listdir(result))
+    n = len(os.listdir(result)) if baked else 0
+    if not baked:
+        gas_status = f"{R}NO — run [p] then [b]{X}"
+    elif bake_is_stale(scenario, sim):
+        gas_status = f"{Y}STALE{X} ({n} iters) {D}— config changed since bake; re-bake [b]{X}"
+    else:
+        gas_status = f"{G}yes{X} ({n} iters)"
+    return {
+        "source": (src.get("source") or {}).get("position", "?"),
+        "robot (empty_point)": cfg.get("empty_point", "?"),
+        "start_iter (scene1)": scene.get("playback_initial_iteration", "?"),
+        "gas baked": gas_status,
+    }
+
+
+def run(launch_file, scenario, sim):
+    cmd = ["ros2", "launch", "benchmark_env", launch_file,
+           f"scenario:={scenario}", f"simulation:={sim}"]
+    print(f"\n{D}$ {' '.join(cmd)}{X}\n")
+    try:
+        return subprocess.run(cmd).returncode
+    except KeyboardInterrupt:
+        print(f"\n{Y}interrupted{X}")
+        return 130
+
+
+def pick(prompt, items):
+    """Return chosen item, or None to go back."""
+    for i, it in enumerate(items):
+        print(f"  {W}{i+1:2d}{X}) {it}")
+    while True:
+        c = input(f"\n{B} >>{X} {prompt} {D}[number, Enter=back, q=quit]{X}: ").strip().lower()
+        if c in ("q", "quit"):
+            sys.exit(0)
+        if c in ("back", ""):
+            return None
+        if c.isdigit() and 1 <= int(c) <= len(items):
+            return items[int(c) - 1]
+        print(f"  {R}invalid{X}")
+
+
+def scenario_menu(scenario):
+    sims = list_sims(scenario)
+    sim = sims[0]
+    while True:
+        print(f"\n{B}{C} {scenario}{X}  {D}(sim: {sim}){X}")
+        print(f"{D} ─────────────────────────────────────{X}")
+        for k, v in info(scenario, sim).items():
+            print(f"  {k:22s}: {v}")
+        print(f"\n  {W}g{X}) Go — bake gas if needed, then run   {D}(quick 'show me this map'){X}")
+        print(f"  {W}b{X}) Bake gas (preprocess + gas sim)     {W}r{X}) Run only {D}(skips preproc; may use stale robot start){X}")
+        print(f"  {W}p{X}) Preprocess only {D}(occupancy + robot start; no gas re-bake){X}")
+        if len(sims) > 1:
+            print(f"  {W}s{X}) switch simulation (current: {sim})")
+        c = input(f"\n{B} >>{X} action {D}[g/b/r/p{'/s' if len(sims)>1 else ''}, Enter=back, q=quit]{X}: ").strip().lower()
+        if c in ("q", "quit"):
+            sys.exit(0)
+        elif c == "" or c == "back":
+            return
+        elif c == "p":
+            run("gaden_preproc_launch.py", scenario, sim)
+        elif c == "b":
+            # preprocess THEN bake; skip the bake if preprocessing failed
+            if run("gaden_preproc_launch.py", scenario, sim) == 0:
+                run("gaden_sim_launch.py", scenario, sim)
+        elif c == "r":
+            run("main_simbot_launch.py", scenario, sim)
+        elif c == "g":
+            # ALWAYS preprocess (fast; re-syncs robot start / occupancy from config.yaml
+            # empty_point), then bake gas only if it's missing, then run.
+            result = os.path.join(config_dir(scenario), "simulations", sim, "result")
+            baked = os.path.isdir(result) and bool(os.listdir(result))
+            stale = baked and bake_is_stale(scenario, sim)
+            ok = run("gaden_preproc_launch.py", scenario, sim) == 0
+            if ok and (not baked or stale):
+                reason = "no baked gas" if not baked else "config changed since last bake"
+                print(f"{Y}  {reason} — baking first{X}")
+                ok = run("gaden_sim_launch.py", scenario, sim) == 0
+            if ok:
+                run("main_simbot_launch.py", scenario, sim)
+        elif c == "s" and len(sims) > 1:
+            chosen = pick("select simulation", sims)
+            if chosen:
+                sim = chosen
+
+
+def main():
+    scenarios = list_scenarios()
+    if not scenarios:
+        print(f"{R}No scenarios found in {SCEN_DIR}{X}")
+        return 1
+    while True:
+        print(f"\n{B}{C}╔════════════════════════════════════╗{X}")
+        print(f"{B}{C}║   benchmark_env  —  scenario menu   ║{X}")
+        print(f"{B}{C}╚════════════════════════════════════╝{X}")
+        print(f"{D} {SCEN_DIR}{X}\n")
+        s = pick("select scenario", scenarios)
+        if s is None:
+            # from top level, back == quit
+            return 0
+        scenario_menu(s)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print()
+        sys.exit(0)
