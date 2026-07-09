@@ -80,7 +80,7 @@ class ActorCritic(nn.Module):
         """
         return self.critic(self.backbone(obs))
 
-    def get_action_and_value(self, obs, action=None):
+    def get_action_and_value(self, obs, action=None, deterministic=False):
         """Sample action and compute log_prob, entropy, V(s).
 
         Parameters
@@ -112,7 +112,7 @@ class ActorCritic(nn.Module):
         dist = Beta(alpha, beta)
 
         if action is None:
-            action = dist.rsample()  # (batch, 1)
+            action = dist.mean if deterministic else dist.rsample()  # (batch, 1)
 
         log_prob = dist.log_prob(action).sum(dim=-1)  # (batch,)
         entropy = dist.entropy().sum(dim=-1)           # (batch,)
@@ -224,7 +224,7 @@ class ActorCriticModular(nn.Module):
     def get_value(self, obs):
         return self.critic(self._encode(obs))
 
-    def get_action_and_value(self, obs, action=None):
+    def get_action_and_value(self, obs, action=None, deterministic=False):
         features = self._encode(obs)
 
         ab = self.actor(features)
@@ -233,7 +233,7 @@ class ActorCriticModular(nn.Module):
         dist = Beta(alpha, beta)
 
         if action is None:
-            action = dist.rsample()
+            action = dist.mean if deterministic else dist.rsample()
 
         log_prob = dist.log_prob(action).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
@@ -399,13 +399,13 @@ class ActorCriticDualBackbone(nn.Module):
         feat = self.critic_res(self.critic_proj(encoded))
         return self.critic_head(feat)
 
-    def get_action_and_value(self, obs, action=None):
+    def get_action_and_value(self, obs, action=None, deterministic=False):
         encoded = self._encode_shared(obs)
 
         # Actor
         dist = self._actor_dist(encoded)
         if action is None:
-            action = dist.rsample()  # (B, 2): (cos θ, sin θ)
+            action = dist.mean if deterministic else dist.rsample()  # (B, 2): (cos θ, sin θ)
 
         log_prob = dist.log_prob(action).sum(dim=-1)  # (B,)
         entropy = dist.entropy().sum(dim=-1)           # (B,)

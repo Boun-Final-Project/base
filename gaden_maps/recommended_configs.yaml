@@ -38,6 +38,13 @@
     start_time: 100
     notes: "Snake-shaped corridor."
 
+10x6_u_east:
+  sim1:
+    source: [9.5, 3.0]
+    robot_start: [1.5, 3.0]
+    start_time: 100
+    notes: "East-source confound test. Source in RIGHT dead-end, robot starts LEFT. Symmetric to 10x6_u_left. Gas re-baked 2026-06-22."
+
 10x6_u_left:
   sim1:
     source: [1.45, 3.0]
@@ -52,6 +59,13 @@
     start_time: 100
     notes: "Source in left dead-end, U opens to the right. Robot starts opposite end."
 
+4_rooms_east:
+  sim1:
+    source: [11.0, 3.0]
+    robot_start: [2.5, 3.0]
+    start_time: 100
+    notes: "East-source confound test of 4_rooms. Source in bottom-RIGHT room, robot starts bottom-LEFT. Gas re-baked 2026-06-22."
+
 4_rooms:
   sim1:
     source: [2.5, 3.0]
@@ -63,6 +77,20 @@
     robot_start: [10.0, 1.0]  # TODO: fill in
     start_time: 100
     notes: ""
+
+curved_labrinth_east_left:
+  sim1:
+    source: [9.5, 3.0]
+    robot_start: [1.0, 3.0]
+    start_time: 100
+    notes: "East-source confound test of curved_labrinth_left. Source RIGHT, robot starts LEFT. Gas re-baked 2026-06-22."
+
+curved_labrinth_east_right:
+  sim1:
+    source: [9.5, 3.0]
+    robot_start: [1.0, 3.0]
+    start_time: 100
+    notes: "East-source confound test of curved_labrinth_right. Source RIGHT, robot starts LEFT. Gas re-baked 2026-06-22."
 
 curved_labrinth_left:
   sim1:
@@ -96,6 +124,27 @@ ultimate:
     robot_start: [18.0,10.0]
     start_time: 350
     notes: "Complex layout combining multiple room types."
+
+10x6_u_right_east:
+  sim1:
+    source: [9.0, 3.0]
+    robot_start: [1.5, 3.0]
+    start_time: 100
+    notes: "East-source confound test of 10x6_u_right. Source RIGHT, robot starts LEFT. Gas re-bake required."
+
+many_rooms_east:
+  sim1:
+    source: [15.0, 8.0]
+    robot_start: [2.8, 4.2]
+    start_time: 250
+    notes: "East-source confound test of many_rooms. Source in east rooms, robot starts west. Gas re-bake required."
+
+ultimate_east:
+  sim1:
+    source: [18.0, 10.0]
+    robot_start: [1.5, 3.0]
+    start_time: 350
+    notes: "East-source confound test of ultimate. Source in east wing, robot starts west wing. Gas re-bake required."
 
 env_a:
   sim1:

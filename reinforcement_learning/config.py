@@ -7,7 +7,7 @@ Single source of truth — all other modules import from here.
 # Environment
 # =============================================================================
 MAX_STEPS = 600
-STEP_SIZE = 0.5                 # meters per action
+STEP_SIZE = 0.3                 # meters per action
 GRID_RESOLUTION = 0.1           # meters (occupancy grid cell size)
 D_SUCCESS = 0.5                 # meters, source-found threshold
 ROBOT_RADIUS = 0.25             # meters, collision checking radius (matches GADEN planners)

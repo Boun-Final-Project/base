@@ -188,6 +188,18 @@ SCENE_EOF
     primary_sim="$selected_id"
 fi
 
+# ── Mirror scene into install tree (player reads from install share) ───────────────
+# runsim launches gaden_player, which resolves scenes via get_package_share_directory,
+# i.e. the install tree. Scenes created/selected here live in the source tree, so
+# symlink the scene into install if it isn't there (matches --symlink-install layout).
+src_scene="$SCENARIOS_DIR/$scenario/environment_configurations/config1/scenes/$selected_id.yaml"
+install_scene="$INSTALL_SCENARIOS_DIR/$scenario/environment_configurations/config1/scenes/$selected_id.yaml"
+if [ -f "$src_scene" ] && [ ! -e "$install_scene" ]; then
+    mkdir -p "$(dirname "$install_scene")"
+    ln -sf "$src_scene" "$install_scene"
+    echo -e "  ${DIM}Linked scene into install tree${RESET}"
+fi
+
 # ── Recommended config ───────────────────────────────────────────────────────────
 RECOMMENDED_CONFIGS="$SCRIPT_DIR/../gaden_maps/recommended_configs.yaml"
 REC_ROBOT_START=""

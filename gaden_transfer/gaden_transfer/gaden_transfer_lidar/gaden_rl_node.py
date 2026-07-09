@@ -34,9 +34,7 @@ Only ``model_state_dict`` is loaded here — the optimiser state is ignored.
 import os
 import sys
 import math
-import json
 import time
-from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -51,12 +49,12 @@ from olfaction_msgs.msg import GasSensor, Anemometer
 from gaden_msgs.srv import WindPosition
 from geometry_msgs.msg import PoseWithCovarianceStamped, Point, Twist
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import Path as NavPath
+from nav_msgs.msg import Path as NavPath, OccupancyGrid
 from visualization_msgs.msg import Marker
 
 # RL package imports: add src/base/ to sys.path so both the installed entry
 # point and direct execution can find the reinforcement_learning package.
-_SRC_BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', '..'))
+_SRC_BASE = '/home/efe/ros2_ws/src/base'
 if _SRC_BASE not in sys.path:
     sys.path.insert(0, _SRC_BASE)
 
@@ -83,8 +81,7 @@ from .escape_planner import CirclingEscape
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load_agent(checkpoint_path: str, arch: str, device: torch.device,
-                run_cfg: dict = None):
+def _load_agent(checkpoint_path: str, arch: str, device: torch.device):
     """Load a trained agent from a checkpoint file.
 
     Parameters
@@ -96,56 +93,26 @@ def _load_agent(checkpoint_path: str, arch: str, device: torch.device,
         'modular', or 'dual'.  Must match the original training flag.
     device : torch.device
         Where to place the model (cpu / cuda).
-    run_cfg : dict, optional
-        Values from config.json; used to set obs/lidar/gas dims correctly.
 
     Returns
     -------
     agent : nn.Module
         Loaded model in eval mode.
     """
-    if run_cfg is None:
-        run_cfg = {}
-    lidar_len = run_cfg.get("LIDAR_NUM_RAYS", cfg.LIDAR_NUM_RAYS)
-    if ("GAS_HISTORY_LENGTH" in run_cfg and "GAS_FEATURES_PER_STEP" in run_cfg):
-        gas_len = run_cfg["GAS_HISTORY_LENGTH"] * run_cfg["GAS_FEATURES_PER_STEP"]
-    else:
-        gas_len = cfg.GAS_HISTORY_LENGTH * cfg.GAS_FEATURES_PER_STEP
-    obs_dim = run_cfg.get("STATE_DIM", cfg.STATE_DIM)
-
     if arch == 'spatial':
         agent = ActorCriticSpatial()
     elif arch == 'dual':
-        agent = ActorCriticDualBackbone(obs_dim=obs_dim, gas_len=gas_len, lidar_len=lidar_len)
+        agent = ActorCriticDualBackbone(obs_dim=cfg.STATE_DIM)
     elif arch == 'modular':
-        agent = ActorCriticModular(obs_dim=obs_dim, gas_len=gas_len, lidar_len=lidar_len)
+        agent = ActorCriticModular(obs_dim=cfg.STATE_DIM)
     else:
-        agent = ActorCritic(obs_dim=obs_dim)
+        agent = ActorCritic(obs_dim=cfg.STATE_DIM)
 
     ckpt = torch.load(checkpoint_path, map_location=device)
     agent.load_state_dict(ckpt['model_state_dict'])
     agent.to(device)
     agent.eval()
     return agent
-
-
-def _load_run_config(checkpoint_path: str) -> dict:
-    """Read config.json from the checkpoint's parent run directory.
-
-    Looks for config.json two levels up from the checkpoint file:
-      .../runs/<run-name>/checkpoints/agent_STEP.pt
-                         ^^^^^^^^^^^ config.json lives here
-    Returns an empty dict if not found.
-    """
-    run_dir = Path(checkpoint_path).parent.parent
-    config_path = run_dir / "config.json"
-    if config_path.exists():
-        try:
-            with open(config_path) as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return {}
-    return {}
 
 
 def _action_to_target(robot_x: float, robot_y: float,
@@ -337,6 +304,132 @@ class GadenRLNode(Node):
         # so _cmd_vel_tick never publishes during a Nav2 policy drive.
         self._cmdvel_active: bool = False
 
+        # DirectDrive (OSL_DIRECT_DRIVE=1): a THIRD per-step motion mode. Physically
+        # drives the robot to each clamped 0.5 m policy goal via the same closed-loop
+        # cmd_vel controller as det-drive, but adds a per-tick lidar+occupancy safety
+        # gate so the center provably never enters ROBOT_RADIUS of a wall. Replaces
+        # Nav2-DRIVE (whose global planner hugs walls / DWB tracking error trips the
+        # 0.28 m collision boundary) while staying physical (unlike teleport) and
+        # faithful (lands where teleport would, so the policy obs is unchanged).
+        # Precedence: DirectDrive > Nav2 (use_nav2 param) > teleport. Mutually
+        # exclusive with OSL_DET_DRIVE and use_nav2 — leave both unset/False.
+        self._direct_drive: bool = os.environ.get('OSL_DIRECT_DRIVE', '0') == '1'
+        self._dd_linear: float = float(os.environ.get('OSL_DD_LINEAR', '0.3'))
+        self._dd_gain: float = float(os.environ.get('OSL_DD_GAIN', '2.0'))
+        self._dd_wmax: float = float(os.environ.get('OSL_DD_WMAX', '1.5'))
+        self._dd_arrive_tol: float = float(os.environ.get('OSL_DD_ARRIVE_TOL', '0.10'))
+        self._dd_timeout: float = float(os.environ.get('OSL_DD_TIMEOUT', '12.0'))
+        self._dd_lookahead: float = float(os.environ.get('OSL_DD_LOOKAHEAD', '0.20'))
+        self._dd_lidar_margin: float = float(os.environ.get('OSL_DD_LIDAR_MARGIN', '0.33'))
+        self._dd_slow_r: float = float(os.environ.get('OSL_DD_SLOW_R', '0.30'))
+        self._dd_cone_half: float = float(os.environ.get('OSL_DD_CONE_HALF', '0.79'))
+        self._dd_stuck_s: float = float(os.environ.get('OSL_DD_STUCK_S', '2.0'))
+        # DirectDrive runtime state (separate _dd_active flag so the validated
+        # det-drive HYBRID escape path stays byte-identical):
+        self._dd_active: bool = False
+        self._dd_best_dist: float = float('inf')
+        self._dd_progress_ns: int = 0
+        self._dd_cone_min_sensor: Optional[float] = None
+
+        # CENTERLINE-PURSUIT (OSL_PURSUIT=1, requires OSL_DIRECT_DRIVE=1 + OSL_ROUTE=1):
+        # follow a static-map, radius-consistent, centerline-biased A* path to each
+        # (unchanged) clamped policy goal with a SMOOTH lookahead controller whose speed
+        # tapers CONTINUOUSLY with forward clearance (never a binary freeze => no wedge),
+        # and whose stall-recovery pulls toward higher EDT clearance + the GOAL (never the
+        # raw heading => no ceiling-slide/wander). Rebuilds Nav2's plan+follow honestly.
+        import threading as _threading
+        self._pursuit: bool = os.environ.get('OSL_PURSUIT', '0') == '1'
+        self._pp_vmax: float = float(os.environ.get('OSL_PP_VMAX', '0.9'))
+        self._pp_gain: float = float(os.environ.get('OSL_PP_GAIN', '1.5'))
+        self._pp_wmax: float = float(os.environ.get('OSL_PP_WMAX', '2.0'))
+        self._pp_lookahead: float = float(os.environ.get('OSL_PP_LOOKAHEAD', '0.30'))
+        self._pp_advance: float = float(os.environ.get('OSL_PP_ADVANCE', '0.15'))
+        self._pp_arrive_tol: float = float(os.environ.get('OSL_PP_ARRIVE_TOL', '0.10'))
+        self._pp_slow_r: float = float(os.environ.get('OSL_PP_SLOW_R', '0.30'))
+        self._pp_he_cut: float = float(os.environ.get('OSL_PP_HE_CUT', '1.0'))
+        self._pp_spin: float = float(os.environ.get('OSL_PP_SPIN', '1.2'))
+        self._pp_cone_stop: float = float(os.environ.get('OSL_PP_CONE_STOP', '0.18'))
+        self._pp_cone_free: float = float(os.environ.get('OSL_PP_CONE_FREE', '0.40'))
+        self._pp_stuck_s: float = float(os.environ.get('OSL_PP_STUCK_S', '2.5'))
+        self._pp_timeout: float = float(os.environ.get('OSL_PP_TIMEOUT', '8.0'))
+        self._pp_stall_ticks: int = int(os.environ.get('OSL_PP_STALL_TICKS', '15'))
+        self._pp_clear_w: float = float(os.environ.get('OSL_PP_CLEAR_W', '2.0'))
+        self._pp_active: bool = False
+        self._pp_path = None
+        self._pp_idx: int = 0
+        self._pp_goal = None
+        self._pp_best: float = float('inf')
+        self._pp_progress_ns: int = 0
+        self._pp_stall_n: int = 0
+        self._pp_recover_ns: int = 0
+        self._pp_lock = _threading.Lock()
+
+        # ClearanceRoute (OSL_ROUTE=1, requires OSL_DIRECT_DRIVE=1): before driving,
+        # SNAP each clamped goal up a cached clearance (distance-transform) field to the
+        # nearest corridor-center cell. _clamp_to_free's straight walk-back parks the
+        # 0.28 body ON the wall-grazing is_valid boundary; from there ~half the policy's
+        # 0.5 m headings point into the wall -> clamp stay-put -> circle (measured 53%).
+        # Snapping the landing pose to the corridor centerline (like Nav2's inflation
+        # kept it central, but with no Nav2 and no wedging) collapses that cascade.
+        self._route_on: bool = os.environ.get('OSL_ROUTE', '0') == '1'
+        self._route_snap_r: float = float(os.environ.get('OSL_ROUTE_SNAP_R', '0.4'))   # snap search disk (m)
+        self._route_snap_cap: float = float(os.environ.get('OSL_ROUTE_SNAP_CAP', '0.30'))  # max lateral displacement (m)
+        # Snap to the MINIMUM displacement that reaches this clearance FLOOR (off the
+        # wall), not the max-clearance cell — keeps the landing near the policy's goal
+        # and avoids over-centering into wide pockets / away from narrow maze throats.
+        self._route_target_clear: float = float(os.environ.get('OSL_ROUTE_TARGET_CLEAR', '0.40'))
+        # A* router: when the policy's straight step is blocked (clamp advances < minstep),
+        # plan a centerline-biased path AROUND the wall toward the policy's raw target and
+        # take its first ~0.5 m waypoint. W_CLEAR pulls the path onto the EDT ridge.
+        self._route_wclear: float = float(os.environ.get('OSL_ROUTE_WCLEAR', '2.0'))
+        self._route_minstep: float = float(os.environ.get('OSL_ROUTE_MINSTEP', '0.15'))
+        self._route_horizon: float = float(os.environ.get('OSL_ROUTE_HORIZON', '5.0'))  # m, free-space flood reach
+        self._route_goal_radius: float = float(os.environ.get('OSL_ROUTE_GOAL_RADIUS', '0.25'))  # plan the GOAL like 0.05 (0.25)
+        # Goal-clamp radius: the radius the policy's 0.5m target is validated/walked-back
+        # at. Default 0.28 (= physical body). Set OSL_GOAL_CLAMP_RADIUS=0.05 to compute the
+        # goal EXACTLY as the 0.05-era runs did (they used 0.25; 0.05 = treat the body as a
+        # point for planning). The 0.28 body is still kept safe downstream, so a wall-closer
+        # goal just lets the body drive further along the ray before BasicSim stops it.
+        self._goal_clamp_radius: float = float(os.environ.get('OSL_GOAL_CLAMP_RADIUS', str(cfg.ROBOT_RADIUS)))
+        # Deterministic eval: use the policy's MEAN action instead of sampling from its
+        # high-variance Gaussian (std up to 1.65). Sampling is noise-dominated at deploy
+        # (the headings wander); the mean is the clean learned heading. OSL_DETERMINISTIC=1.
+        self._deterministic: bool = os.environ.get('OSL_DETERMINISTIC', '0') == '1'
+        # GOAL-REPLAY diagnostic (definitive goal-following test): when OSL_REPLAY_GOALS
+        # points at a file of "x y" world points (e.g. a recorded 0.05 success path), the
+        # POLICY is bypassed and the 0.28 body is driven to each recorded goal in turn via
+        # the SAME clamp+route+DirectDrive pipeline. Tests whether the executor can follow
+        # the exact 0.05 goals to the source (isolates movement from the policy).
+        self._replay_path: str = os.environ.get('OSL_REPLAY_GOALS', '')
+        self._replay_goals_list = None
+        self._replay_idx: int = 0
+        if self._replay_path:
+            pts = []
+            try:
+                with open(self._replay_path) as _f:
+                    for _ln in _f:
+                        _ln = _ln.strip()
+                        if not _ln or _ln.startswith('#'):
+                            continue
+                        _a, _b = _ln.split()[:2]
+                        pts.append((float(_a), float(_b)))
+                self._replay_goals_list = pts
+            except Exception as _e:
+                self.get_logger().error(f'OSL_REPLAY_GOALS load failed: {_e}')
+        self._route_freemasks = None   # inflation-eroded free masks (3,2,1,0 cells), built at map load
+        self._dd_debug: bool = os.environ.get('OSL_DD_DEBUG', '0') == '1'   # per-step goal-chain trace
+        self._clear_cells = None    # EDT clearance field (cells-to-nearest-wall), built at map load
+        if self._route_on and not self._direct_drive:
+            self.get_logger().warn(
+                'OSL_ROUTE=1 requires OSL_DIRECT_DRIVE=1 (it layers on the DirectDrive '
+                'executor) — disabling ClearanceRoute.')
+            self._route_on = False
+        if self._pursuit and not (self._direct_drive and self._route_on):
+            self.get_logger().warn(
+                'OSL_PURSUIT=1 requires OSL_DIRECT_DRIVE=1 + OSL_ROUTE=1 (cmd_vel + cone-min '
+                '+ freemasks) — disabling CenterlinePursuit.')
+            self._pursuit = False
+
         # Wind z-snap (local-wind policies only). The anemometer reads wind at a
         # fixed TF height z=0.5, but the CFD wind field has irregular z-banding:
         # at many (x,y) cells z=0.5 lands in an empty layer and returns 0 m/s.
@@ -372,6 +465,41 @@ class GadenRLNode(Node):
             self._occ_map.origin_x = -0.2
             self._occ_map.origin_y = -0.2
 
+        # ClearanceRoute: cache the Euclidean distance transform of the free space
+        # once (cells-to-nearest-wall; *resolution = meters). Its local maxima are the
+        # corridor centerlines that _snap_to_clearance climbs toward. Few-ms, one-time.
+        if self._route_on:
+            try:
+                from scipy.ndimage import distance_transform_edt
+                self._clear_cells = distance_transform_edt(self._occ_map.grid == 0)
+                # Inflation-eroded free masks (robot radius ~3 cells), relaxed 3->2->1->0
+                # so narrow doorways stay plannable; the A* router uses these.
+                occ = (self._occ_map.grid != 0)
+                self._route_freemasks = []
+                # Radius-consistent inflation: the PRIMARY (first) mask must clear exactly
+                # the body radius so A* paths are clearance-true at cfg.ROBOT_RADIUS, not a
+                # hardcoded 0.30 m. r_cells = round(radius/res): 0.20/0.10 -> 2, 0.28 -> 3
+                # (so the old (3,2,1,0) is reproduced for the 0.28 body = no regression).
+                _r_cells = max(1, int(round(cfg.ROBOT_RADIUS / self._occ_map.resolution)))
+                _infl_levels = sorted({_r_cells, _r_cells - 1, max(0, _r_cells - 2), 0}, reverse=True)
+                for infl in _infl_levels:
+                    block = occ.copy()
+                    for _ in range(infl):
+                        d = block.copy()
+                        d[1:, :] |= block[:-1, :]; d[:-1, :] |= block[1:, :]
+                        d[:, 1:] |= block[:, :-1]; d[:, :-1] |= block[:, 1:]
+                        block = d
+                    self._route_freemasks.append((self._occ_map.grid == 0) & (~block))
+                self.get_logger().info(
+                    f'ClearanceRoute ENABLED: EDT clearance field + A* free masks built '
+                    f'(snap_r={self._route_snap_r} m, cap={self._route_snap_cap} m, '
+                    f'wclear={self._route_wclear}, minstep={self._route_minstep} m). '
+                    f'max clearance={self._clear_cells.max()*self._occ_map.resolution:.2f} m')
+            except Exception as e:
+                self._clear_cells = None
+                self._route_freemasks = None
+                self.get_logger().warn(f'ClearanceRoute: EDT build failed ({e}) — snap/A* disabled.')
+
         self._map_width: float = self._occ_map.real_world_width
         self._map_height: float = self._occ_map.real_world_height
         self.get_logger().info(
@@ -391,14 +519,7 @@ class GadenRLNode(Node):
                 f"Checkpoint not found: {self._checkpoint_path}"
             )
 
-        run_cfg = _load_run_config(self._checkpoint_path)
-        self._agent = _load_agent(self._checkpoint_path, self._arch, self._device, run_cfg)
-        self.get_logger().info(
-            f'Run config: LIDAR_NUM_RAYS={run_cfg.get("LIDAR_NUM_RAYS", cfg.LIDAR_NUM_RAYS)} '
-            f'GAS_HISTORY_LENGTH={run_cfg.get("GAS_HISTORY_LENGTH", cfg.GAS_HISTORY_LENGTH)} '
-            f'STATE_DIM={run_cfg.get("STATE_DIM", cfg.STATE_DIM)} '
-            f'({"from config.json" if run_cfg else "cfg defaults — config.json not found"})'
-        )
+        self._agent = _load_agent(self._checkpoint_path, self._arch, self._device)
         n_params = sum(p.numel() for p in self._agent.parameters())
         self.get_logger().info(
             f'Loaded checkpoint: {self._checkpoint_path} '
@@ -414,7 +535,7 @@ class GadenRLNode(Node):
         else:
             self._obs_builder = ObservationBuilder(
                 self._map_width, self._map_height, lidar_frame=self._lidar_frame,
-                drive_mode=self._use_nav2,
+                drive_mode=(self._use_nav2 or self._direct_drive),
             )
             self.get_logger().info(f'Lidar frame: {self._lidar_frame}')
 
@@ -441,6 +562,10 @@ class GadenRLNode(Node):
         baseline behaviour is unchanged unless explicitly enabled.
         """
         self._escape = None
+        # Opt-in radial escape from _clamp_to_free dead-ends (pocket/edge traps where
+        # every policy goal is rejected -> robot would otherwise freeze in place).
+        # Independent of OSL_ESCAPE (the circling/map-stall escape).
+        self._clamp_escape = os.environ.get('OSL_CLAMP_ESCAPE', '0') == '1'
         self._escape_dump_every = int(os.environ.get('OSL_ESCAPE_DUMP_EVERY', '0'))
         if os.environ.get('OSL_ESCAPE', '0') != '1':
             return
@@ -468,9 +593,39 @@ class GadenRLNode(Node):
                 f'cooldown={self._escape.cooldown}, min_dist={self._escape.min_dist}m, '
                 f'target={self._escape.target_mode}'
             )
+            # Publish the escape's online SLAM map (the robot's actual perception)
+            # so an RViz video can show it instead of the ground-truth map.
+            slam_qos = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                                  reliability=QoSReliabilityPolicy.RELIABLE)
+            self._slam_map_pub = self.create_publisher(OccupancyGrid, '/rlaika/slam_map', slam_qos)
+            self._slam_map_timer = self.create_timer(0.5, self._publish_slam_map)
+            self.get_logger().info('Publishing online SLAM map on /rlaika/slam_map (2 Hz).')
         except Exception as exc:
             self.get_logger().error(f'Failed to init circling-escape: {exc} — disabled.')
             self._escape = None
+
+    def _publish_slam_map(self):
+        """Publish the escape's online occupancy grid (robot's perception) as a
+        nav_msgs/OccupancyGrid for visualization. -1 unknown, 0 free, 100 occ, 50 outlet."""
+        if self._escape is None:
+            return
+        sm = self._escape.slam_map
+        msg = OccupancyGrid()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        msg.info.resolution = sm.resolution
+        msg.info.width = sm.width
+        msg.info.height = sm.height
+        msg.info.origin.position.x = sm.origin_x
+        msg.info.origin.position.y = sm.origin_y
+        msg.info.origin.orientation.w = 1.0
+        g = sm.grid.flatten()
+        ros = np.full_like(g, -1, dtype=np.int8)
+        ros[g == 0] = 0
+        ros[g == 1] = 100
+        ros[g == 2] = 50
+        msg.data = ros.tolist()
+        self._slam_map_pub.publish(msg)
 
     def _init_ros_interfaces(self):
         """Set up subscribers and the Navigator (reused from efe_igdm)."""
@@ -538,14 +693,36 @@ class GadenRLNode(Node):
         else:
             self.get_logger().info('Motion mode: TELEPORT (instant)')
 
-        if self._det_drive:
+        if self._det_drive or self._direct_drive:
             self._cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
-            self._cmd_vel_timer = self.create_timer(0.05, self._cmd_vel_tick)
-            self.get_logger().info(
-                'HYBRID drive: ESCAPE HOPS via deterministic cmd_vel '
-                f'(linear={self._det_linear} m/s, gain={self._det_gain}, '
-                f'arrive_tol={self._det_arrive_tol} m, timeout={self._det_timeout}s); '
-                'POLICY steps stay on Nav2/DWB (obstacle-avoiding)')
+            if self._direct_drive and self._pursuit:
+                tick_cb = self._pursuit_tick
+            elif self._direct_drive:
+                tick_cb = self._direct_drive_tick
+            else:
+                tick_cb = self._cmd_vel_tick
+            self._cmd_vel_timer = self.create_timer(0.05, tick_cb)
+            if self._pursuit:
+                self.get_logger().info(
+                    'Motion mode: CENTERLINE-PURSUIT (A* path + smooth lookahead, '
+                    f'continuous clearance-tapered speed; vmax={self._pp_vmax} m/s, '
+                    f'gain={self._pp_gain}, wmax={self._pp_wmax}, lookahead={self._pp_lookahead} m, '
+                    f'arrive_tol={self._pp_arrive_tol} m, cone_stop={self._pp_cone_stop}/'
+                    f'cone_free={self._pp_cone_free} m, spin={self._pp_spin} rad, '
+                    f'clear_w={self._pp_clear_w}, stuck={self._pp_stuck_s}s, timeout={self._pp_timeout}s)')
+            elif self._direct_drive:
+                self.get_logger().info(
+                    'Motion mode: DIRECT DRIVE (closed-loop cmd_vel, lidar+occupancy '
+                    f'safety-gated; linear={self._dd_linear} m/s, gain={self._dd_gain}, '
+                    f'wmax={self._dd_wmax} rad/s, arrive_tol={self._dd_arrive_tol} m, '
+                    f'lookahead={self._dd_lookahead} m, lidar_margin={self._dd_lidar_margin} m, '
+                    f'stuck={self._dd_stuck_s}s, timeout={self._dd_timeout}s)')
+            else:
+                self.get_logger().info(
+                    'HYBRID drive: ESCAPE HOPS via deterministic cmd_vel '
+                    f'(linear={self._det_linear} m/s, gain={self._det_gain}, '
+                    f'arrive_tol={self._det_arrive_tol} m, timeout={self._det_timeout}s); '
+                    'POLICY steps stay on Nav2/DWB (obstacle-avoiding)')
 
 
     # ------------------------------------------------------------------
@@ -582,27 +759,32 @@ class GadenRLNode(Node):
         # target, don't start another step. _on_nav_complete clears _is_moving
         # when the goal finishes (success/abort/reject), and the next pose
         # callback then proceeds. No-op in teleport mode (_use_nav2 False).
-        if self._use_nav2 and self._is_moving:
-            # Per-step drive timeout: if DWB gets wedged (recovery-loop stall),
-            # cancel the goal so the policy re-predicts in ~drive_timeout s instead
-            # of waiting ~150 s for Nav2's behavior tree to give up.
-            # Escape hops are short (~0.5 m line-of-sight); fail them fast (10 s)
-            # so a wedged hop is skipped quickly instead of burning 30 s.
-            eff_timeout = self._drive_timeout
-            if self._escape is not None and self._escape.escaping:
-                eff_timeout = min(self._drive_timeout, 10.0)
-            if (eff_timeout > 0.0 and self._drive_goal_time is not None
-                    and not self._drive_canceling):
-                elapsed = (self.get_clock().now()
-                           - self._drive_goal_time).nanoseconds * 1e-9
-                if elapsed > eff_timeout:
-                    self._drive_canceling = True
-                    self.get_logger().warn(
-                        f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
-                        f'DRIVE TIMEOUT — goal not reached in {elapsed:.1f}s '
-                        f'(> {eff_timeout:.1f}s); canceling, re-predicting.')
-                    if self._navigator is not None:
-                        self._navigator.cancel_current_goal()
+        if (self._use_nav2 or self._direct_drive) and self._is_moving:
+            # DirectDrive owns its own arrival/timeout/stuck logic inside the tick,
+            # so under it this gate simply waits (returns) while moving. The Nav2
+            # per-step drive timeout below applies only to Nav2.
+            if self._use_nav2:
+                # Per-step drive timeout: if DWB gets wedged (recovery-loop stall),
+                # cancel the goal so the policy re-predicts in ~drive_timeout s instead
+                # of waiting ~150 s for Nav2's behavior tree to give up.
+                # Escape hops are short (~0.5 m line-of-sight); fail them fast (10 s)
+                # so a wedged hop is skipped quickly instead of burning 30 s.
+                eff_timeout = self._drive_timeout
+                if self._escape is not None and self._escape.escaping:
+                    eff_timeout = min(self._drive_timeout, 10.0)
+                _goal_t = self._drive_goal_time
+                if (eff_timeout > 0.0 and _goal_t is not None
+                        and not self._drive_canceling):
+                    elapsed = (self.get_clock().now()
+                               - _goal_t).nanoseconds * 1e-9
+                    if elapsed > eff_timeout:
+                        self._drive_canceling = True
+                        self.get_logger().warn(
+                            f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
+                            f'DRIVE TIMEOUT — goal not reached in {elapsed:.1f}s '
+                            f'(> {eff_timeout:.1f}s); canceling, re-predicting.')
+                        if self._navigator is not None:
+                            self._navigator.cancel_current_goal()
             return
 
         # Initial: teleport to start position once
@@ -645,6 +827,24 @@ class GadenRLNode(Node):
             return
         finite_ranges = [r for r in msg.ranges if math.isfinite(r)]
         self._latest_lidar_min = min(finite_ranges) if finite_ranges else None
+
+        # Forward-cone min (DirectDrive safety gate): nearest return within a
+        # +/-_dd_cone_half arc about robot forward. Computed in the SENSOR frame
+        # (ray i -> angle_min + i*increment, ray 0 = robot forward), so it is
+        # heading-invariant and needs no yaw correction. Using the forward arc
+        # (not the global min) avoids a wall beside/behind falsely holding the
+        # gate and stalling forward motion in a wide corridor.
+        if self._direct_drive:
+            cone = None
+            ang = msg.angle_min
+            for r in msg.ranges:
+                if math.isfinite(r):
+                    a = math.atan2(math.sin(ang), math.cos(ang))  # wrap to [-pi,pi]
+                    if abs(a) <= self._dd_cone_half and (cone is None or r < cone):
+                        cone = r
+                ang += msg.angle_increment
+            self._dd_cone_min_sensor = cone
+
         self._obs_builder.update_lidar(msg)
 
         # Fold the same scan into the online SLAM map for the circling-escape —
@@ -775,9 +975,109 @@ class GadenRLNode(Node):
         tw.angular.z = self._det_gain * heading_error
         self._cmd_vel_pub.publish(tw)
 
+    # ------------------------------------------------------------------
+    # DirectDrive: physical, lidar-gated closed-loop drive to each goal
+    # ------------------------------------------------------------------
+    def _start_direct_move(self, x, y):
+        """Begin a DirectDrive physical move to the (already-clamped) goal (x,y).
+        _direct_drive_tick drives it and clears _is_moving on arrival/timeout/stuck.
+        Uses a SEPARATE _dd_active flag so the det-drive HYBRID escape path is
+        untouched; leaves _drive_goal_time None so the Nav2 timeout path stays inert."""
+        self._waypoint_x = float(x)
+        self._waypoint_y = float(y)
+        self._waypoint_start_ns = self.get_clock().now().nanoseconds
+        self._dd_progress_ns = self._waypoint_start_ns
+        self._dd_best_dist = float('inf')
+        self._is_moving = True
+        self._dd_active = True
+        self._drive_goal_time = None
+
+    def _dd_forward_cone_min(self):
+        """Nearest lidar return within +/-_dd_cone_half of robot forward (meters),
+        or None if no scan yet. Cached per-scan in _lidar_callback (sensor frame,
+        heading-invariant)."""
+        return self._dd_cone_min_sensor
+
+    def _direct_drive_tick(self):
+        """Proportional rotate-then-go controller with a per-tick safety gate.
+        Rotation in place cannot translate the center toward a wall, so only
+        FORWARD translation is gated: it is published only when (a) the body-heading
+        occupancy lookahead is free at radius ROBOT_RADIUS and (b) the forward-cone
+        lidar min clears _dd_lidar_margin. Otherwise linear.x=0 (rotate/recover in
+        place). Goals are pre-clamped clear, so the gate is skipped within lookahead
+        range of the goal to avoid a false-block on the final approach. Stops on
+        arrival (within _dd_arrive_tol), hard timeout, or no-progress (stuck), then
+        clears _is_moving so the next _pose_callback advances the step."""
+        if not self._dd_active or self._waypoint_x is None:
+            return
+        if self._robot_x is None or self._current_theta is None:
+            return
+        rx, ry, th = self._robot_x, self._robot_y, self._current_theta
+        dx = self._waypoint_x - rx
+        dy = self._waypoint_y - ry
+        dist = math.hypot(dx, dy)
+        now_ns = self.get_clock().now().nanoseconds
+
+        # Heading error to goal, wrapped to [-pi, pi] (computed first so the watchdog
+        # can tell turning-in-place apart from being stuck).
+        he = math.atan2(dy, dx) - th
+        he = math.atan2(math.sin(he), math.cos(he))
+        rotating = abs(he) > 0.8                         # rotate-in-place gate (~46 deg)
+
+        # Progress watchdog: fast recovery (re-predict) vs the slow hard timeout.
+        # Rotation in place makes no translation progress but is NOT stuck — the robot
+        # is pivoting to face the goal — so reset the clock while rotating. Without
+        # this, any pivot longer than _dd_stuck_s (e.g. a ~180-240 deg turn-around in a
+        # dead-end) is aborted mid-turn and the robot can NEVER reverse direction. This
+        # was the corner-stuck bug behind every "froze at the wall" we saw.
+        if dist < self._dd_best_dist - 0.02:
+            self._dd_best_dist = dist
+            self._dd_progress_ns = now_ns
+        if rotating:
+            self._dd_progress_ns = now_ns
+        no_progress = (now_ns - self._dd_progress_ns) > self._dd_stuck_s * 1e9
+        timed_out = (now_ns - self._waypoint_start_ns) > self._dd_timeout * 1e9
+
+        if dist < self._dd_arrive_tol or timed_out or no_progress:
+            self._cmd_vel_pub.publish(Twist())          # zero Twist = stop
+            if self._dd_debug:
+                reason = 'arrive' if dist < self._dd_arrive_tol else ('timeout' if timed_out else 'stuck')
+                dur = (now_ns - self._waypoint_start_ns) * 1e-9
+                self.get_logger().info(
+                    f'[DD end] reason={reason} dist_left={dist:.3f} dur={dur:.2f}s '
+                    f'pos=({rx:.2f},{ry:.2f}) he={math.degrees(he):.0f}deg rotating={rotating} '
+                    f'goal=({self._waypoint_x:.2f},{self._waypoint_y:.2f}) best={self._dd_best_dist:.3f}')
+            self._dd_active = False
+            self._is_moving = False                     # -> next pose cb advances step
+            self._waypoint_x = self._waypoint_y = None
+            return
+
+        # Safety gate (forward translation only; skipped near a pre-clamped goal).
+        forward_ok = True
+        if not rotating and dist > self._dd_lookahead:
+            look_x = rx + self._dd_lookahead * math.cos(th)
+            look_y = ry + self._dd_lookahead * math.sin(th)
+            occ_ok = (not hasattr(self, '_occ_map')) or \
+                self._occ_map.is_valid((look_x, look_y), radius=cfg.ROBOT_RADIUS)
+            cone_min = self._dd_forward_cone_min()
+            lid_ok = (cone_min is None) or (cone_min > self._dd_lidar_margin)
+            forward_ok = occ_ok and lid_ok
+
+        tw = Twist()
+        if rotating or not forward_ok:
+            tw.linear.x = 0.0                            # freeze translation, keep steering
+        else:
+            tw.linear.x = self._dd_linear * min(1.0, dist / self._dd_slow_r)  # near-goal ramp
+        w = self._dd_gain * he
+        tw.angular.z = max(-self._dd_wmax, min(self._dd_wmax, w))  # explicit clamp
+        self._cmd_vel_pub.publish(tw)
+
     def _drive_escape_waypoint(self, wp):
-        """Drive one short escape-path waypoint (Nav2 stop-go, cmd_vel, or teleport)."""
+        """Drive one short escape-path waypoint (DirectDrive, Nav2 stop-go, cmd_vel, or teleport)."""
         wx, wy = float(wp[0]), float(wp[1])
+        if self._direct_drive:
+            self._start_direct_move(wx, wy)
+            return
         if self._det_drive:
             self._start_cmdvel_move(wx, wy)
             return
@@ -935,11 +1235,8 @@ class GadenRLNode(Node):
                 obs, dtype=torch.float32, device=self._device
             ).unsqueeze(0)
             with torch.no_grad():
-                if self._arch == 'dual':
-                    encoded = self._agent._encode_shared(obs_t)
-                    action = self._agent._actor_dist(encoded).mean
-                else:
-                    action, _, _, _ = self._agent.get_action_and_value(obs_t)
+                action, _, _, _ = self._agent.get_action_and_value(
+                    obs_t, deterministic=self._deterministic)
             action_np = action.cpu().numpy().flatten()  # (1,) or (2,)
 
         # --- Optional debug dump (dual/flat arch): full obs vector + raw action
@@ -963,6 +1260,19 @@ class GadenRLNode(Node):
             self._robot_x, self._robot_y,
             action_np, self._arch, cfg.STEP_SIZE
         )
+
+        # --- GOAL-REPLAY override: ignore the policy, drive to the next recorded goal. ---
+        if self._replay_goals_list is not None:
+            if self._replay_idx >= len(self._replay_goals_list):
+                self.get_logger().info(
+                    f'[Episode {self._episode}] Replay goals exhausted at step '
+                    f'{self._step_in_episode} (final d2src={dist_to_source:.3f} m).')
+                self._end_episode(success=(dist_to_source < cfg.D_SUCCESS))
+                return
+            gx, gy = self._replay_goals_list[self._replay_idx]
+            self._replay_idx += 1
+            theta = math.atan2(gy - self._robot_y, gx - self._robot_x)
+            target_x, target_y = float(gx), float(gy)
 
         # Heading-frame agents need ray 0 of next obs to align with the direction
         # they just commanded — track it here so the next obs is built correctly.
@@ -991,8 +1301,10 @@ class GadenRLNode(Node):
         # If basic_sim would reject this teleport (target inside a wall), the
         # robot wouldn't move at all. Walk back along the ray until we land in
         # a free cell, exactly like the training collision logic.
+        raw_tx, raw_ty = target_x, target_y    # policy's intended target (pre-clamp), for A* routing
         target_x, target_y, collided = self._clamp_to_free(
-            self._robot_x, self._robot_y, target_x, target_y, theta
+            self._robot_x, self._robot_y, target_x, target_y, theta,
+            radius=self._goal_clamp_radius
         )
         if collided:
             self.get_logger().info(
@@ -1003,9 +1315,69 @@ class GadenRLNode(Node):
         if self._publish_action_marker:
             self._publish_next_action_marker(target_x, target_y)
 
-        # --- Move robot: Nav2 (stop-go) or teleport. Policy steps stay on Nav2/DWB
-        # (obstacle-avoiding); det-drive is reserved for escape hops only. ---
-        if self._use_nav2 and self._navigator is not None:
+        # --- Move robot: DirectDrive (physical, lidar-gated), Nav2 (stop-go), or
+        # teleport. Target is already collision-clamped above; do NOT re-clamp. ---
+        if self._direct_drive:
+            if self._pursuit:
+                # CENTERLINE-PURSUIT: build a static-map path to the policy's goal, then
+                # _pursuit_tick follows it smoothly. Rebuilt every policy step (~0.5 m).
+                gx, gy = target_x, target_y
+                clamp_step = math.hypot(gx - self._robot_x, gy - self._robot_y)
+                if collided and clamp_step < self._route_minstep:
+                    # BLOCKED: the clamp gave no forward progress (policy points into a wall,
+                    # stay-put). Route toward the policy's RAW intent (raw_tx,raw_ty ~ the
+                    # heading) with a clearance bias -> go AROUND the wall toward the corridor
+                    # CENTER (the clearance term), NOT sliding along the wall/ceiling (which
+                    # was the wander root cause). This replaces the old raw-heading flood.
+                    g = self._route_clearance_step(self._robot_x, self._robot_y, raw_tx, raw_ty)
+                    path = ([(self._robot_x, self._robot_y), g] if g is not None
+                            else [(self._robot_x, self._robot_y), (self._robot_x, self._robot_y)])
+                elif self._seg_is_valid(self._robot_x, self._robot_y, gx, gy):
+                    path = [(self._robot_x, self._robot_y), (gx, gy)]
+                else:
+                    path = self._route_astar(self._robot_x, self._robot_y, gx, gy)
+                    if not path or len(path) < 2:
+                        g = self._route_clearance_step(self._robot_x, self._robot_y, gx, gy)
+                        path = ([(self._robot_x, self._robot_y), g] if g is not None
+                                else [(self._robot_x, self._robot_y), (self._robot_x, self._robot_y)])
+                self._start_pursuit(path)
+            elif self._route_on:
+                # MOVE LIKE THE 0.05 RUNS: drive to the policy's (clamped, valid) goal.
+                # The goal is exactly what a 0.05-radius run targets (clamp radii 0.25 vs
+                # 0.28 differ on 0% of steps). The ONLY difference is the 0.28 body, so the
+                # ONLY job here is MOVEMENT: reach that goal collision-free. Drive straight
+                # if the segment is clear; otherwise plan a short A* path AROUND the wall to
+                # the SAME goal (Nav2's global planner rebuilt honestly: 0.28-inflated grid,
+                # centerline cost, string-pulled to one <=0.5 m hop). The reverse-capable
+                # controller (below) backs into goals behind it instead of wedging on a 180
+                # deg spin (the thing Nav2's forward-only DWB could not do). No gas, no
+                # heading-flood, no snap — purely getting the body to the 0.05 goal.
+                gx, gy = target_x, target_y
+                clamp_step = math.hypot(gx - self._robot_x, gy - self._robot_y)
+                blocked = collided and clamp_step < self._route_minstep
+                if blocked:
+                    # The clamp only walks STRAIGHT back along the policy ray; when that ray
+                    # is walled for the 0.28 body it gives up (stay-put) and the robot
+                    # deadlocks (a 0.05 body would have squeezed forward). Go AROUND the
+                    # wall toward the policy's intent instead: flood the reachable free
+                    # space and step toward the cell with most progress along the heading
+                    # (capped 0.5 m). This is the planner the bigger body needs — pure
+                    # movement, the "better planner" that lets 0.28 reach 0.05's goals.
+                    g = self._route_toward_heading(self._robot_x, self._robot_y, theta)
+                    if g is not None:
+                        target_x, target_y = g
+                    # else: truly no reachable progress -> stay, re-predict next step.
+                elif not self._seg_is_valid(self._robot_x, self._robot_y, gx, gy):
+                    # Forward goal is valid but the straight segment grazes a wall -> A*
+                    # a short path AROUND the wall to the SAME 0.05 goal.
+                    wp = self._route_step_goal(self._robot_x, self._robot_y, gx, gy)
+                    if wp is not None:
+                        target_x, target_y = wp
+                # else: straight line to the 0.05 goal is clear -> drive straight to it.
+            if not self._pursuit:
+                # Physically drive there via the closed-loop cmd_vel controller (0.28-collision-safe).
+                self._start_direct_move(target_x, target_y)
+        elif self._use_nav2 and self._navigator is not None:
             # Drive to the (collision-clamped) target. yaw=theta + use_orientation
             # makes the robot arrive facing the commanded direction so the next
             # step's heading-frame obs aligns; the drive_mode roll corrects any
@@ -1035,18 +1407,25 @@ class GadenRLNode(Node):
     # ------------------------------------------------------------------
 
     def _clamp_to_free(self, rx: float, ry: float,
-                       tx: float, ty: float, theta: float) -> tuple:
+                       tx: float, ty: float, theta: float, radius: float = None) -> tuple:
         """Validate target; if blocked, walk back along the ray until free.
+
+        ``radius`` defaults to cfg.ROBOT_RADIUS (the 0.28 body). Pass a smaller value
+        (e.g. OSL_GOAL_CLAMP_RADIUS=0.05) to compute the GOAL exactly like the 0.05-era
+        runs (which clamped at 0.25); the 0.28 body is still kept collision-safe by the
+        route/snap/DirectDrive gate + the BasicSim 0.28 backstop, so a goal closer to a
+        wall just means the body drives further along the ray before it physically stops.
 
         Returns
         -------
         (clamped_x, clamped_y, collided) where ``collided`` is True iff the
         original target was not free.
         """
+        rad = cfg.ROBOT_RADIUS if radius is None else radius
         if not hasattr(self, '_occ_map'):
             return tx, ty, False
 
-        if self._occ_map.is_valid((tx, ty), radius=cfg.ROBOT_RADIUS):
+        if self._occ_map.is_valid((tx, ty), radius=rad):
             return tx, ty, False
 
         # Original target blocked — walk back along the ray
@@ -1054,12 +1433,481 @@ class GadenRLNode(Node):
         while step >= 0.1:
             cx = rx + step * math.cos(theta)
             cy = ry + step * math.sin(theta)
-            if self._occ_map.is_valid((cx, cy), radius=cfg.ROBOT_RADIUS):
+            if self._occ_map.is_valid((cx, cy), radius=rad):
                 return cx, cy, True
             step -= 0.05
 
+        # Nowhere to go along the policy ray. Optionally sweep OTHER headings for any
+        # valid nearby target so the robot escapes pocket/edge traps instead of
+        # freezing in place for the rest of the episode (OSL_CLAMP_ESCAPE=1). Prefer
+        # larger hops, and never re-try the (blocked) policy heading itself.
+        if getattr(self, '_clamp_escape', False):
+            for esc_r in (cfg.STEP_SIZE, 0.35, 0.25, 0.15):
+                for j in range(1, 16):
+                    ang = theta + j * (2.0 * math.pi / 16.0)
+                    ex = rx + esc_r * math.cos(ang)
+                    ey = ry + esc_r * math.sin(ang)
+                    if self._occ_map.is_valid((ex, ey), radius=rad):
+                        return ex, ey, True
+
         # Nowhere to go — stay in place
         return rx, ry, True
+
+    # ------------------------------------------------------------------
+    # ClearanceRoute: snap a clamped goal up to the corridor centerline
+    # ------------------------------------------------------------------
+    def _clear_at(self, wx: float, wy: float) -> float:
+        """Clearance (m to nearest wall) at world point, 0.0 if out of bounds/no field."""
+        if self._clear_cells is None:
+            return 0.0
+        gx, gy = self._occ_map.world_to_grid(wx, wy)
+        if 0 <= gy < self._clear_cells.shape[0] and 0 <= gx < self._clear_cells.shape[1]:
+            return float(self._clear_cells[gy, gx]) * self._occ_map.resolution
+        return 0.0
+
+    def _seg_is_valid(self, ax: float, ay: float, bx: float, by: float) -> bool:
+        """True iff the 0.28-body straight segment a->b stays free (sampled <cell res)."""
+        d = math.hypot(bx - ax, by - ay)
+        n = max(1, int(d / 0.05))
+        for k in range(n + 1):
+            t = k / n
+            if not self._occ_map.is_valid((ax + t * (bx - ax), ay + t * (by - ay)),
+                                          radius=cfg.ROBOT_RADIUS):
+                return False
+        return True
+
+    def _goal_like_005(self, rx, ry, tx, ty, theta, radius):
+        """Calculate the next GOAL exactly like the r=0.05 run: the first point along
+        the policy ray that is `radius`-valid (0.05 used radius 0.25), walking back from
+        the full 0.5 m target. This is the goal the 0.05 setup would aim at. Returns
+        (rx,ry) only if nothing on the ray is valid."""
+        if self._occ_map.is_valid((tx, ty), radius=radius):
+            return tx, ty
+        step = cfg.STEP_SIZE - 0.05
+        while step >= 0.1:
+            cx = rx + step * math.cos(theta)
+            cy = ry + step * math.sin(theta)
+            if self._occ_map.is_valid((cx, cy), radius=radius):
+                return cx, cy
+            step -= 0.05
+        return rx, ry
+
+    def _snap_to_clearance(self, rx: float, ry: float, cx: float, cy: float) -> tuple:
+        """Nudge the clamped goal (cx,cy) just off the wall: the MINIMUM-displacement
+        valid+reachable cell whose clearance reaches the floor (_route_target_clear).
+        This un-grazes the landing pose (kills the stay-put cascade) while staying close
+        to the policy's goal and NOT over-centering into wide pockets (which would dodge
+        narrow maze throats). If the clamp goal is already above the floor, no move. If
+        no cell reaches the floor within the disk (truly tight spot), fall back to the
+        max-clearance cell as a best-effort un-graze."""
+        if self._clear_cells is None:
+            return cx, cy
+        if self._clear_at(cx, cy) >= self._route_target_clear:
+            return cx, cy
+        res = self._occ_map.resolution
+        snap_r = max(1, int(round(self._route_snap_r / res)))
+        gx0, gy0 = self._occ_map.world_to_grid(cx, cy)
+        H, W = self._clear_cells.shape
+        floor_x = floor_y = None
+        floor_disp = float('inf')        # nearest cell reaching the clearance floor
+        fb_x, fb_y = cx, cy              # fallback: best-effort max clearance
+        fb_c = self._clear_at(cx, cy)
+        for dgy in range(-snap_r, snap_r + 1):
+            for dgx in range(-snap_r, snap_r + 1):
+                if dgx * dgx + dgy * dgy > snap_r * snap_r:
+                    continue
+                gx, gy = gx0 + dgx, gy0 + dgy
+                if not (0 <= gy < H and 0 <= gx < W):
+                    continue
+                c = float(self._clear_cells[gy, gx]) * res
+                if c <= fb_c and c < self._route_target_clear:
+                    continue
+                wx, wy = self._occ_map.grid_to_world(gx, gy)
+                disp = math.hypot(wx - cx, wy - cy)
+                if disp > self._route_snap_cap:
+                    continue
+                if not self._occ_map.is_valid((wx, wy), radius=cfg.ROBOT_RADIUS):
+                    continue
+                if not self._seg_is_valid(cx, cy, wx, wy):
+                    continue
+                if c >= self._route_target_clear:
+                    if disp < floor_disp:        # prefer the closest off-wall cell
+                        floor_disp, floor_x, floor_y = disp, wx, wy
+                elif c > fb_c:
+                    fb_x, fb_y, fb_c = wx, wy, c  # track best-effort fallback
+        if floor_x is not None:
+            return floor_x, floor_y
+        return fb_x, fb_y
+
+    @staticmethod
+    def _nearest_free_cell(cell, free, r=6):
+        cx, cy = cell
+        if free(cx, cy):
+            return (cx, cy)
+        for rad in range(1, r + 1):
+            for dx in range(-rad, rad + 1):
+                for dy in range(-rad, rad + 1):
+                    if free(cx + dx, cy + dy):
+                        return (cx + dx, cy + dy)
+        return None
+
+    def _route_astar(self, sx, sy, gx, gy):
+        """Centerline-biased A* on the static map: route the 0.28 body AROUND a wall
+        toward (gx,gy) when the straight step is blocked. 8-connected, obstacle-inflated
+        (robot radius, relaxed 3->2->1->0 so doorways stay plannable), no diagonal
+        corner-cut, EDT-clearance cost to hug corridor centers. Returns ~0.5 m world
+        waypoints (start first) each re-validated with is_valid(0.28), or None."""
+        if self._route_freemasks is None or not hasattr(self, '_occ_map'):
+            return None
+        import heapq
+        og = self._occ_map
+        H, W = og.grid.shape
+        res = og.resolution
+        ox, oy = og.origin_x, og.origin_y
+        clr = self._clear_cells
+        wclr = self._route_wclear
+        nbrs = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+                (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414)]
+        for freemask in self._route_freemasks:        # already relaxed 3->2->1->0
+            def free(cx, cy):
+                return 0 <= cx < W and 0 <= cy < H and freemask[cy, cx]
+            start = self._nearest_free_cell((int((sx - ox) / res), int((sy - oy) / res)), free)
+            goal = self._nearest_free_cell((int((gx - ox) / res), int((gy - oy) / res)), free)
+            if start is None or goal is None:
+                continue
+
+            def hcost(a):
+                return math.hypot(a[0] - goal[0], a[1] - goal[1])
+
+            openq = [(hcost(start), 0.0, start)]
+            gsc = {start: 0.0}
+            came = {}
+            reached = None
+            while openq:
+                _, gc, cur = heapq.heappop(openq)
+                if cur == goal or hcost(cur) <= 1.0:
+                    reached = cur
+                    break
+                if gc > gsc.get(cur, 1e18):
+                    continue
+                for dx, dy, cost in nbrs:
+                    nx, ny = cur[0] + dx, cur[1] + dy
+                    if not free(nx, ny):
+                        continue
+                    if dx and dy and not (free(cur[0] + dx, cur[1]) and
+                                          free(cur[0], cur[1] + dy)):
+                        continue
+                    cc = float(clr[ny, nx]) if clr is not None else 99.0
+                    ng = gc + cost * (1.0 + wclr / (cc + 1.0))   # centerline bias
+                    if ng < gsc.get((nx, ny), 1e18):
+                        gsc[(nx, ny)] = ng
+                        came[(nx, ny)] = cur
+                        heapq.heappush(openq, (ng + hcost((nx, ny)), ng, (nx, ny)))
+            if reached is None:
+                continue
+            cells = [reached]
+            while cells[-1] in came:
+                cells.append(came[cells[-1]])
+            cells.reverse()
+            out = []                                       # full-resolution world path
+            for c in cells:
+                wx, wy = og.grid_to_world(*c)
+                if not og.is_valid((wx, wy), radius=cfg.ROBOT_RADIUS):
+                    rep = self._nearest_free_cell(c, free)
+                    if rep is None:
+                        continue
+                    wx, wy = og.grid_to_world(*rep)
+                out.append((wx, wy))
+            return out if len(out) >= 2 else None
+        return None
+
+    def _route_step_goal(self, rx, ry, gx, gy):
+        """A* around the wall toward (gx,gy), then STRING-PULL: return the furthest
+        point on the path still in straight line-of-sight from (rx,ry), capped at one
+        STEP_SIZE. This stops at the corner (so the rotate-then-go controller never
+        tries to drive straight through a wall) while making real progress around it.
+        Returns (x,y) or None."""
+        path = self._route_astar(rx, ry, gx, gy)
+        if not path:
+            return None
+        goal = None
+        for (wx, wy) in path[1:]:
+            if math.hypot(wx - rx, wy - ry) > cfg.STEP_SIZE + 0.05:
+                break                                      # cap step length
+            if not self._seg_is_valid(rx, ry, wx, wy):
+                break                                      # corner — stop at last clear
+            goal = (wx, wy)
+        return goal
+
+    def _route_toward_heading(self, rx, ry, theta):
+        """Direction-following local planner (the maze solver). Flood the reachable
+        free space from the robot (Dijkstra on the inflation-eroded mask, so cells are
+        >=0.3 m off walls), pick the reachable cell with MAXIMUM progress along the
+        policy heading, backtrack the path, then string-pull to the first line-of-sight
+        step (cap STEP_SIZE). This follows the corridor toward where the policy wants to
+        go and BACKS OUT of dead-ends (the escape route's far cells outscore the pocket),
+        instead of routing toward a target buried in a wall. Returns (x,y) or None."""
+        if self._route_freemasks is None or not hasattr(self, '_occ_map'):
+            return None
+        import heapq
+        og = self._occ_map
+        res = og.resolution
+        ox, oy = og.origin_x, og.origin_y
+        H, W = og.grid.shape
+        ct, st = math.cos(theta), math.sin(theta)
+        horizon = self._route_horizon / res
+        nbrs = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+                (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414)]
+        for freemask in self._route_freemasks:
+            def free(cx, cy):
+                return 0 <= cx < W and 0 <= cy < H and freemask[cy, cx]
+            start = self._nearest_free_cell((int((rx - ox) / res), int((ry - oy) / res)), free)
+            if start is None:
+                continue
+            distc = {start: 0.0}
+            came = {}
+            pq = [(0.0, start)]
+            best_cell = start
+            best_score = 0.0
+            while pq:
+                d, cur = heapq.heappop(pq)
+                if d > distc.get(cur, 1e18):
+                    continue
+                wx, wy = og.grid_to_world(*cur)
+                score = (wx - rx) * ct + (wy - ry) * st        # progress along the heading
+                if score > best_score:
+                    best_score = score
+                    best_cell = cur
+                for dx, dy, cost in nbrs:
+                    nx, ny = cur[0] + dx, cur[1] + dy
+                    if not free(nx, ny):
+                        continue
+                    if dx and dy and not (free(cur[0] + dx, cur[1]) and free(cur[0], cur[1] + dy)):
+                        continue
+                    nd = d + cost
+                    if nd <= horizon and nd < distc.get((nx, ny), 1e18):
+                        distc[(nx, ny)] = nd
+                        came[(nx, ny)] = cur
+                        heapq.heappush(pq, (nd, (nx, ny)))
+            if best_cell == start or best_score <= 0.05:
+                continue                                        # no forward progress at this infl; relax
+            cells = [best_cell]
+            while cells[-1] in came:
+                cells.append(came[cells[-1]])
+            cells.reverse()
+            goal = None
+            for c in cells[1:]:
+                wx, wy = og.grid_to_world(*c)
+                if math.hypot(wx - rx, wy - ry) > cfg.STEP_SIZE + 0.05:
+                    break
+                if not self._seg_is_valid(rx, ry, wx, wy):
+                    break
+                goal = (wx, wy)
+            if goal is not None:
+                return goal
+        return None
+
+    def _route_clearance_step(self, rx, ry, gx, gy):
+        """Clearance-seeking recovery (the anti-wander fix). Flood the reachable free
+        space (Dijkstra on the inflation-eroded mask), score each cell by NET PROGRESS
+        TOWARD THE GOAL plus an EDT-clearance bonus, pick the max, string-pull to the
+        first line-of-sight step (cap STEP_SIZE). Unlike _route_toward_heading this follows
+        the GOAL (not the raw policy heading) AND prefers higher clearance, so at a wall pin
+        it pulls toward the corridor CENTER / goal instead of sliding along the wall/ceiling
+        (the slide into y>5.5 off-distribution space was the wander root cause). Returns
+        (x,y) or None."""
+        if self._route_freemasks is None or not hasattr(self, '_occ_map'):
+            return None
+        import heapq
+        og = self._occ_map
+        res = og.resolution
+        ox, oy = og.origin_x, og.origin_y
+        H, W = og.grid.shape
+        _dgx, _dgy = gx - rx, gy - ry
+        _n = math.hypot(_dgx, _dgy)
+        ugx, ugy = (_dgx / _n, _dgy / _n) if _n > 1e-6 else (0.0, 0.0)
+        clr = self._clear_cells
+        horizon = self._route_horizon / res
+        nbrs = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+                (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414)]
+        for freemask in self._route_freemasks:
+            def free(cx, cy):
+                return 0 <= cx < W and 0 <= cy < H and freemask[cy, cx]
+            start = self._nearest_free_cell((int((rx - ox) / res), int((ry - oy) / res)), free)
+            if start is None:
+                continue
+            distc = {start: 0.0}
+            came = {}
+            pq = [(0.0, start)]
+            best_cell = start
+            best_score = -1e18
+            while pq:
+                d, cur = heapq.heappop(pq)
+                if d > distc.get(cur, 1e18):
+                    continue
+                wx, wy = og.grid_to_world(*cur)
+                cc = (float(clr[cur[1], cur[0]]) * res) if clr is not None else 0.0
+                score = (wx - rx) * ugx + (wy - ry) * ugy + self._pp_clear_w * cc
+                if score > best_score:
+                    best_score = score
+                    best_cell = cur
+                for dx, dy, cost in nbrs:
+                    nx, ny = cur[0] + dx, cur[1] + dy
+                    if not free(nx, ny):
+                        continue
+                    if dx and dy and not (free(cur[0] + dx, cur[1]) and free(cur[0], cur[1] + dy)):
+                        continue
+                    nd = d + cost
+                    if nd <= horizon and nd < distc.get((nx, ny), 1e18):
+                        distc[(nx, ny)] = nd
+                        came[(nx, ny)] = cur
+                        heapq.heappush(pq, (nd, (nx, ny)))
+            if best_cell == start:
+                continue
+            cells = [best_cell]
+            while cells[-1] in came:
+                cells.append(came[cells[-1]])
+            cells.reverse()
+            goal = None
+            for c in cells[1:]:
+                wx, wy = og.grid_to_world(*c)
+                if math.hypot(wx - rx, wy - ry) > cfg.STEP_SIZE + 0.05:
+                    break
+                if not self._seg_is_valid(rx, ry, wx, wy):
+                    break
+                goal = (wx, wy)
+            if goal is not None:
+                return goal
+        return None
+
+    def _start_pursuit(self, path):
+        """Begin following a static-map path (list of (x,y), start first) with the smooth
+        lookahead controller in _pursuit_tick. _pp_goal = the path's final point; the tick
+        clears _is_moving on arrival/timeout/no-progress so the next policy step runs."""
+        self._pp_path = path
+        self._pp_idx = 0
+        self._pp_goal = path[-1]
+        now = self.get_clock().now().nanoseconds
+        self._waypoint_start_ns = now
+        self._pp_progress_ns = now
+        self._pp_recover_ns = now
+        self._pp_best = float('inf')
+        self._pp_stall_n = 0
+        self._is_moving = True
+        self._pp_active = True
+        self._drive_goal_time = None
+        if self._dd_debug:
+            self.get_logger().info(
+                f'[PP plan] n={len(path)} goal=({self._pp_goal[0]:.2f},{self._pp_goal[1]:.2f}) '
+                f'from=({path[0][0]:.2f},{path[0][1]:.2f})')
+
+    def _pursuit_tick(self):
+        """Smooth pure-pursuit follower of self._pp_path with CONTINUOUS clearance-tapered
+        speed (creeps through 0.30 m throats, never a binary freeze => no wedge) and a
+        clearance-seeking stall recovery (pulls toward goal+center, never the raw heading
+        => no ceiling-slide). The lookahead is always ON the pre-validated path, so curving
+        toward it is collision-safe. Clears _is_moving on arrival/timeout/no-progress."""
+        if not self._pp_lock.acquire(blocking=False):
+            return
+        try:
+            if not self._pp_active or self._pp_path is None:
+                return
+            if self._robot_x is None or self._current_theta is None:
+                return
+            rx, ry, th = self._robot_x, self._robot_y, self._current_theta
+            path = self._pp_path
+            gx, gy = self._pp_goal
+            dist_goal = math.hypot(gx - rx, gy - ry)
+            now = self.get_clock().now().nanoseconds
+
+            # advance the path index past waypoints already reached
+            while self._pp_idx < len(path) - 1 and \
+                    math.hypot(path[self._pp_idx][0] - rx, path[self._pp_idx][1] - ry) < self._pp_advance:
+                self._pp_idx += 1
+
+            # lookahead point: walk forward from the index accumulating arc-length
+            lx, ly = path[-1]
+            acc = 0.0
+            px, py = rx, ry
+            for k in range(self._pp_idx, len(path)):
+                wx, wy = path[k]
+                seg = math.hypot(wx - px, wy - py)
+                if acc + seg >= self._pp_lookahead:
+                    t = (self._pp_lookahead - acc) / seg if seg > 1e-6 else 1.0
+                    lx, ly = px + t * (wx - px), py + t * (wy - py)
+                    break
+                acc += seg
+                px, py = wx, wy
+                lx, ly = wx, wy
+
+            # steer toward the lookahead
+            he = math.atan2(ly - ry, lx - rx) - th
+            he = math.atan2(math.sin(he), math.cos(he))
+            w = max(-self._pp_wmax, min(self._pp_wmax, self._pp_gain * he))
+
+            # continuous speed = binding constraint of heading-align x forward-clearance,
+            # ramped down near the goal. Never a binary freeze (only slows in a throat).
+            cone = self._dd_forward_cone_min()
+            heading_f = max(0.0, 1.0 - abs(he) / self._pp_he_cut)
+            if cone is None:
+                cone_f = 1.0
+            else:
+                cone_f = (cone - self._pp_cone_stop) / max(1e-6, self._pp_cone_free - self._pp_cone_stop)
+                cone_f = max(0.0, min(1.0, cone_f))
+            goal_ramp = min(1.0, dist_goal / self._pp_slow_r)
+            v = self._pp_vmax * min(heading_f, cone_f) * goal_ramp
+
+            aligning = abs(he) > self._pp_spin       # turning in place to face the goal = progress
+            rotate_in_place = aligning or (cone is not None and cone <= self._pp_cone_stop)
+
+            # progress watchdog (a productive turn is NOT a stall: reset the clock while aligning)
+            if dist_goal < self._pp_best - 0.02:
+                self._pp_best = dist_goal
+                self._pp_progress_ns = now
+            if aligning:
+                self._pp_progress_ns = now
+                self._pp_stall_n = 0
+            no_progress = (now - self._pp_progress_ns) > self._pp_stuck_s * 1e9
+            timed_out = (now - self._waypoint_start_ns) > self._pp_timeout * 1e9
+
+            if dist_goal < self._pp_arrive_tol or timed_out or no_progress:
+                if self._dd_debug:
+                    _rsn = 'arrive' if dist_goal < self._pp_arrive_tol else ('timeout' if timed_out else 'no_progress')
+                    self.get_logger().info(
+                        f'[PP end] {_rsn} d2goal={dist_goal:.2f} pos=({rx:.2f},{ry:.2f}) '
+                        f'cone={(cone if cone is not None else -1):.2f} he={math.degrees(he):.0f} stall={self._pp_stall_n}')
+                self._cmd_vel_pub.publish(Twist())
+                self._pp_active = False
+                self._is_moving = False
+                self._pp_path = None
+                return
+
+            tw = Twist()
+            tw.linear.x = 0.0 if rotate_in_place else v
+            tw.angular.z = w
+            self._cmd_vel_pub.publish(tw)
+
+            # clearance-seeking stall recovery: truly pinned (not translating, not aligning)
+            if v >= 0.03 and not rotate_in_place:
+                self._pp_stall_n = 0
+            elif (not aligning) and dist_goal > self._pp_arrive_tol:
+                self._pp_stall_n += 1
+            if self._pp_stall_n >= self._pp_stall_ticks and (now - self._pp_recover_ns) > 0.75e9:
+                self._pp_recover_ns = now
+                g = self._route_clearance_step(rx, ry, gx, gy)
+                if self._dd_debug:
+                    self.get_logger().info(
+                        f'[PP recover] pinned ({rx:.2f},{ry:.2f}) cone={(cone if cone is not None else -1):.2f} '
+                        f'he={math.degrees(he):.0f} -> clearance g={g}')
+                if g is not None:
+                    self._pp_path = [(rx, ry), g]
+                    self._pp_goal = g
+                    self._pp_idx = 0
+                    self._pp_progress_ns = now
+                    self._pp_best = float('inf')
+                    self._pp_stall_n = 0
+        finally:
+            self._pp_lock.release()
 
     # ------------------------------------------------------------------
     # Episode management
@@ -1097,7 +1945,14 @@ class GadenRLNode(Node):
         # guarantees the observation builder sees the new pose before any
         # step is taken.
         self._step_in_episode = 0
+        self._replay_idx = 0  # restart the recorded goal sequence for the new episode
         self._is_moving = False  # clear any lingering drive flag before next episode
+        if self._direct_drive and self._cmd_vel_pub is not None:
+            self._cmd_vel_pub.publish(Twist())  # stop any in-flight DirectDrive / pursuit
+            self._dd_active = False
+            self._pp_active = False
+            self._pp_path = None
+            self._waypoint_x = self._waypoint_y = None
         self._obs_builder.reset()
         self._obs_builder.robot_x = self._robot_x
         self._obs_builder.robot_y = self._robot_y
