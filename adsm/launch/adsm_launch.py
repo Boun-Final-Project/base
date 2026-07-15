@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 
@@ -52,7 +53,7 @@ def generate_launch_description():
                 'source_y': LaunchConfiguration('source_y'),
                 'source_th': LaunchConfiguration('source_th'),
                 'iter_rate': LaunchConfiguration('iter_rate'),
-                'max_iter': 200,
+                'max_iter': ParameterValue(LaunchConfiguration('max_iter'), value_type=int),
                 'stuck_duration_th': 60.0,
                 'visual': True,
                 'data_path': LaunchConfiguration('data_path'),

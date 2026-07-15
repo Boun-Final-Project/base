@@ -321,6 +321,68 @@ def get_template_curriculum(progress):
     return max_id, weights
 
 
+# Cache for inline GADEN eval (loaded once on first use).
+_INLINE_GADEN_MAPS = None
+
+
+_INLINE_GADEN_RESULT_DIRS = None
+
+
+def _inline_gaden_eval(agent, global_step, output_dir, device, arch):
+    """Evaluate the in-memory agent on the GADEN maps and append a row to
+    <output_dir>/gaden_curve.csv. Reuses the eval_checkpoints_gaden machinery;
+    runs on the same GPU, so it briefly pauses training. Episodes default to 10
+    (override OSL_INLINE_GADEN_EPS). Honors OSL_LOCAL_WIND_OBS via the env.
+
+    If OSL_INLINE_GADEN_REALGAS=1, replays the REAL stored GADEN concentration
+    fields (the validated proxy; the surrogate plume overestimates ~30pts and
+    lies on 4rooms/many_rooms). Needs GADEN_SCENARIOS_ROOT to point at the
+    replay data; maps without a resolvable result dir fall back to surrogate."""
+    global _INLINE_GADEN_MAPS, _INLINE_GADEN_RESULT_DIRS
+    import csv
+    from reinforcement_learning.test import eval_checkpoints_gaden as ecg
+    from reinforcement_learning.test.gaden_loader import DEFAULT_MAP_KEYS
+
+    n_eps = int(os.environ.get("OSL_INLINE_GADEN_EPS", "10"))
+    real_gas = os.environ.get("OSL_INLINE_GADEN_REALGAS", "0") == "1"
+    if _INLINE_GADEN_MAPS is None:
+        _INLINE_GADEN_MAPS = ecg.load_maps(ecg._DEFAULT_GADEN_ROOT, DEFAULT_MAP_KEYS)
+    if _INLINE_GADEN_RESULT_DIRS is None:
+        from reinforcement_learning.test.gaden_loader import resolve_result_dir
+        _INLINE_GADEN_RESULT_DIRS = [
+            (resolve_result_dir(k) if real_gas else None) for k in DEFAULT_MAP_KEYS]
+        if real_gas:
+            n_real = sum(d is not None for d in _INLINE_GADEN_RESULT_DIRS)
+            print(f"  [inline-gaden-eval] real-gas replay for "
+                  f"{n_real}/{len(DEFAULT_MAP_KEYS)} maps", flush=True)
+
+    was_training = agent.training
+    agent.eval()
+    per_map = {}
+    with torch.no_grad():
+        for mi, (key, fm) in enumerate(zip(DEFAULT_MAP_KEYS, _INLINE_GADEN_MAPS)):
+            rd = _INLINE_GADEN_RESULT_DIRS[mi]
+            succ = [ecg.run_episode(agent, fm, 1000 * mi + ei, device, arch=arch,
+                                    result_dir=rd)[1]
+                    for ei in range(n_eps)]
+            per_map[key] = float(np.mean(succ))
+    if was_training:
+        agent.train()
+
+    overall = float(np.mean(list(per_map.values())))
+    csv_path = os.path.join(output_dir, "gaden_curve.csv")
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, "a", newline="") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(["step", "overall"] + list(DEFAULT_MAP_KEYS))
+        w.writerow([global_step, f"{overall:.4f}"]
+                   + [f"{per_map[k]:.4f}" for k in DEFAULT_MAP_KEYS])
+    mr = per_map.get("many_rooms", float("nan"))
+    print(f"  [inline-gaden-eval] step={global_step:,} overall={overall:.1%} "
+          f"many_rooms={mr:.1%} ({n_eps} eps) → {csv_path}")
+
+
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -454,6 +516,16 @@ def train(args):
     obs, _ = vec_env.reset()
     start_time = time.time()
 
+    # Step-0 baseline GADEN eval: score the resumed checkpoint BEFORE any
+    # training update, so the gaden_curve's first row is a true "before
+    # finetune" baseline to measure improvement against (same env-var gate).
+    if os.environ.get("OSL_INLINE_GADEN_EVAL", "0") == "1" and args.resume:
+        try:
+            _inline_gaden_eval(agent, global_step, args.output_dir,
+                               device, args.arch)
+        except Exception as e:
+            print(f"  [inline-gaden-eval step-0] skipped (error: {e})")
+
     # Recurrent hidden state for the spatial architecture (carried across the
     # rollout; reset to zero on episode boundaries).
     gru_h = None
@@ -463,6 +535,14 @@ def train(args):
     prev_max_template = -1  # sentinel — triggers print on first curriculum update
 
     for update in range(start_update + 1, num_updates + 1):
+        # --total-timesteps is ABSOLUTE: stop once the global step budget is
+        # spent. The update-count range above can overshoot it when resuming a
+        # checkpoint whose update counter was denominated in a different batch
+        # size (e.g. finetuning a 256-env checkpoint with 96 envs).
+        if global_step >= args.total_timesteps:
+            print(f"Reached total-timesteps budget ({global_step:,} >= "
+                  f"{args.total_timesteps:,}) — stopping.")
+            break
         # Learning rate annealing (only after anneal_start fraction of training)
         if args.anneal_lr:
             progress = (update - 1) / num_updates
@@ -610,7 +690,10 @@ def train(args):
             )
 
         # === Checkpoint ===
-        if update % args.save_interval == 0 or update == num_updates:
+        # (also save on the last update before the absolute step budget ends,
+        # which can arrive before num_updates when resuming — see loop top)
+        if (update % args.save_interval == 0 or update == num_updates
+                or global_step >= args.total_timesteps):
             path = os.path.join(ckpt_dir, f"agent_{global_step}.pt")
             torch.save({
                 "model_state_dict": agent.state_dict(),
@@ -619,6 +702,16 @@ def train(args):
                 "update": update,
             }, path)
             print(f"  Saved checkpoint: {path}")
+
+            # Optional inline GADEN eval (env-var gated, off by default). Builds
+            # a (step → GADEN success) curve during training without a separate
+            # watcher job. Wrapped so a failure can never kill training.
+            if os.environ.get("OSL_INLINE_GADEN_EVAL", "0") == "1":
+                try:
+                    _inline_gaden_eval(agent, global_step, args.output_dir,
+                                       device, args.arch)
+                except Exception as e:
+                    print(f"  [inline-gaden-eval] skipped (error: {e})")
 
     vec_env.close()
 

@@ -9,11 +9,15 @@
 #
 # The full hyperparameter snapshot from that run is committed next to this
 # script as `champ_config.json`. The CLI flags below set every value that
-# defines the champion run; all remaining hyperparameters (rewards, entropy,
-# minibatches, filament plume model, etc.) come from `config.py` on this
-# branch, which already matches champ_config.json — notably R_STEP=-1.0 and
-# R_DETECTION=0.75. If you port this script to another branch, verify those
-# two reward values against champ_config.json first.
+# defines the champion run; the remaining recipe-defining values that differ
+# from this branch's config.py defaults (rewards R_STEP/R_DETECTION, no loop
+# penalty, the slower T0-T5 curriculum) are pinned via the OSL_* env-var
+# overrides exported below — config.py reads them, so this script reproduces
+# the champion recipe without touching the branch defaults. Everything else
+# (entropy, minibatches, filament plume model, ...) already matches
+# champ_config.json. One known later improvement is baked into this branch:
+# the sub-cell continuous lidar wall distance fix (the original run used the
+# coarser cell-quantized lidar).
 #
 # Usage:
 #   sbatch reinforcement_learning/train_champ.sh     # on SLURM
@@ -45,6 +49,14 @@ VENV_PY="${VENV_PY:-/home/efe-mantaroglu/simenv/bin/python}"
 RUN_NAME="ppo_champ_$(date +%Y%m%d_%H%M%S)_job${SLURM_JOB_ID:-local}"
 OUT_DIR="reinforcement_learning/runs/${RUN_NAME}"
 mkdir -p "${OUT_DIR}"
+
+# Pin the champion recipe values that differ from this branch's config.py
+# defaults (see header). Verified against champ_config.json.
+export OSL_R_STEP=-1.0
+export OSL_R_DETECTION=0.75
+export OSL_R_LOOP_BASE=0            # champion predates the loop penalty
+export OSL_TEMPLATE_STAGES=0:1,0.25:3,0.5:5   # T0-T5 only, slower unlocks
+
 
 # --- Champion recipe (source: champ_config.json / runs/lidar-007) ------------
 #   dual architecture, 256 parallel envs, curriculum on,

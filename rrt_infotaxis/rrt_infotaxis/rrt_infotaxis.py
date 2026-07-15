@@ -39,6 +39,7 @@ class RRTInfotaxisNode(Node):
         self.declare_parameter('zeta_1', 0.1)  # Gaussian dispersion parameter
         self.declare_parameter('zeta_2', 0.1)  # Gaussian dispersion parameter
         self.declare_parameter('positive_weight', 0.5)  # Weight of information gain compared to travel cost
+        self.declare_parameter('max_steps', 0)  # 0 = unlimited
 
         # Sensor readings
         self.sensor_raw_value = None
@@ -451,6 +452,13 @@ class RRTInfotaxisNode(Node):
         if self.sensor_raw_value is None or self.current_position is None:
             self.get_logger().debug('Waiting for sensor and position data...')
             return
+
+        max_steps = self.get_parameter('max_steps').value
+        if max_steps > 0 and self.step_count >= max_steps:
+            self.get_logger().info(f'[MAX STEPS] Reached step limit ({max_steps}). Finishing.')
+            self.search_complete = True
+            import os
+            os._exit(0)
 
         # Initialize sensor threshold with first measurement
         if not self.sensor_initialized:

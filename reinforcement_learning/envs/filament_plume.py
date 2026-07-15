@@ -141,9 +141,13 @@ class FilamentPlume:
         # Using 3-sigma turbulence as a practical upper bound on speed.
         _max_speed = self._wind_field.max_speed() if self._wind_field is not None else self.wind_speed
         _max_disp  = _max_speed * (1.0 + 3.0 * self.turbulence_scale) * self.dt
-        self._tunnel_check_steps = max(
+        # Defensive cap: a corrupt wind field (CFD blow-up cell, up to 9e9 m/s)
+        # would make this allocate a ~500GB linspace → OOM crash. A filament can
+        # only physically cross a bounded map; 512 samples covers any sane map at
+        # 0.1m resolution. Never let a bad value take down training.
+        self._tunnel_check_steps = min(512, max(
             8, int(np.ceil(_max_disp / self.grid.resolution)) + 2
-        )
+        ))
 
         # Filament state: parallel arrays that grow/shrink via culling
         # Pre-allocate with generous capacity to avoid frequent reallocation.

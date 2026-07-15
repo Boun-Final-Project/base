@@ -78,15 +78,38 @@ def greedy_action(agent, spatial_t, wind_t):
         return dist.mean.cpu().numpy()
 
 
-def rollout(agent, full_map, episode_seed, device):
-    """Run one greedy episode, return (success, total_return, trajectory)."""
+def _patch_local_wind_ctx(env, wind_field):
+    """Rewrite the policy ctx wind from the local cell wind at the robot's
+    position. Returns the rebuilt wind ctx vector. Diagnostic for the
+    ctx-vs-local mismatch on real CFD wind fields."""
+    rob = env._env._robot_pos
+    local = wind_field.query(np.asarray([rob]))[0]
+    spd = float(np.hypot(local[0], local[1]))
+    dirn = float(np.arctan2(local[1], local[0]))
+    env._env._wind.set_uniform(spd, dirn)
+    time_frac = env._env._current_step / cfg.MAX_STEPS
+    return np.array([*env._env._wind.get_observation_spatial(), time_frac],
+                    dtype=np.float32)
+
+
+def rollout(agent, full_map, episode_seed, device, ctx_mode="mean"):
+    """Run one greedy episode, return (success, total_return, trajectory).
+
+    ctx_mode:
+      "mean"  — policy ctx wind = field's spatial mean (default; matches eval)
+      "local" — policy ctx wind = wind at the robot's current cell (diagnostic)
+    """
     map_data = {k: full_map[k] for k in ("grid", "source_pos", "robot_pos",
                                           "width", "height")}
+    wind_field = full_map["wind_field"]
     env = SpatialObsWrapper(GasSourceEnv())
     (spatial, wind), _ = env.reset(
         seed=episode_seed,
-        options={"map_data": map_data, "wind_field": full_map["wind_field"]},
+        options={"map_data": map_data, "wind_field": wind_field},
     )
+    if ctx_mode == "local":
+        wind = _patch_local_wind_ctx(env, wind_field)
+
     total_return = 0.0
     success = False
     while True:
@@ -95,6 +118,8 @@ def rollout(agent, full_map, episode_seed, device):
         action = greedy_action(agent, spatial_t, wind_t)[0]
         (spatial, wind), reward, terminated, truncated, _ = env.step(action)
         total_return += reward
+        if ctx_mode == "local":
+            wind = _patch_local_wind_ctx(env, wind_field)
         if terminated:
             success = True
             break
@@ -118,7 +143,8 @@ def _draw_gradient_line(ax, traj: np.ndarray, cmap_name: str, alpha: float):
 
 
 def visualize_one_map(agent, full_map, key: str, n_eps: int, device,
-                      out_path: Path, quiver_stride: int = 10) -> dict:
+                      out_path: Path, quiver_stride: int = 10,
+                      ctx_mode: str = "mean") -> dict:
     grid_arr = full_map["grid"].grid
     res      = full_map["grid"].resolution
     H, W     = grid_arr.shape
@@ -145,7 +171,7 @@ def visualize_one_map(agent, full_map, key: str, n_eps: int, device,
     lengths   = []
     for ei in range(n_eps):
         seed = 1000 * hash(key) % 100000 + ei
-        succ, ret, traj = rollout(agent, full_map, seed, device)
+        succ, ret, traj = rollout(agent, full_map, seed, device, ctx_mode=ctx_mode)
         successes.append(succ)
         rewards.append(ret)
         lengths.append(len(traj))
@@ -194,6 +220,8 @@ def main():
     parser.add_argument("--output-dir",       type=Path, default=None,
                         help="Defaults to test/gaden_trajectories/<run-name>/")
     parser.add_argument("--device",           type=str, default=None)
+    parser.add_argument("--ctx-mode",         choices=["mean", "local"], default="mean",
+                        help="Policy ctx wind: spatial mean (default) or local cell at robot.")
     args = parser.parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -212,7 +240,9 @@ def main():
 
     agent = load_agent(ckpt, device)
 
-    out_root = args.output_dir or (_DEFAULT_OUT_ROOT / run_dir.name)
+    print(f"Ctx mode:   {args.ctx_mode}")
+    suffix = "" if args.ctx_mode == "mean" else f"_ctx-{args.ctx_mode}"
+    out_root = args.output_dir or (_DEFAULT_OUT_ROOT / (run_dir.name + suffix))
     print(f"Output:     {out_root}")
 
     yaml_path = args.gaden_root / "recommended_configs.yaml"
@@ -220,7 +250,8 @@ def main():
         full_map = load_full_map(args.gaden_root, yaml_path, key)
         out_path = out_root / f"{key}.png"
         stats = visualize_one_map(agent, full_map, key,
-                                  args.episodes_per_map, device, out_path)
+                                  args.episodes_per_map, device, out_path,
+                                  ctx_mode=args.ctx_mode)
         ok = sum(stats["successes"])
         print(f"  {key:18s}  {ok}/{args.episodes_per_map} success  "
               f"mean steps={np.mean(stats['lengths']):.0f}  "

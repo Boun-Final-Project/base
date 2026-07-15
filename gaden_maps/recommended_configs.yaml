@@ -55,12 +55,12 @@
 4_rooms:
   sim1:
     source: [2.5, 3.0]
-    robot_start: [9.0, 3.0]
+    robot_start: [10.0, 1.0]
     start_time: 100
     notes: "Source in first room. Robot starts far room."
   sim2:
     source: [9.0, 6.0]
-    robot_start: null   # TODO: fill in
+    robot_start: [10.0, 1.0]  # TODO: fill in
     start_time: 100
     notes: ""
 
@@ -80,20 +80,20 @@ curved_labrinth_right:
 
 many_rooms:
   sim1:
-    source: [1.45, 3.0]
-    robot_start: [9.0, 3.0]
+    source: [2.8, 4.2]
+    robot_start: [15.0, 8.0]
     start_time: 250
-    notes: "Multiple rooms. Source in first room, robot starts last room."
+    notes: "Multiple rooms. Scoring source MATCHED to the GADEN gas source (sim.yaml 2.8,4.2) so success = reaching where the gas is actually emitted."
   sim2:
     source: [2.0, 8.0]
-    robot_start: null   # TODO: fill in
+    robot_start: [15.0, 8.0]
     start_time: 250
     notes: ""
 
 ultimate:
   sim1:
     source: [1.45, 3.0]
-    robot_start: [19.0, 9.0]
+    robot_start: [18.0,10.0]
     start_time: 350
     notes: "Complex layout combining multiple room types."
 
@@ -108,22 +108,22 @@ env_b:
   sim1:
     source: [22.5, 10.5]
     robot_start: [2.5, 14.75]
-    start_time: 200
+    start_time: 800
     notes: ""
   sim2:
     source: [18.0, 10.5]
     robot_start: [2.5, 14.75]
-    start_time: 200
+    start_time: 800
     notes: ""
   sim3:
     source: [14.0, 12.0]
     robot_start: [2.5, 14.75]
-    start_time: 200
+    start_time: 1200
     notes: ""
   sim4:
     source: [6.5, 5.5]
     robot_start: [2.5, 14.75]
-    start_time: 200
+    start_time: 800
     notes: ""
 
 env_c:
@@ -137,7 +137,7 @@ env_c_nowind:
   sim1:
     source: [18.0, 7.5]
     robot_start: [2.5, 4.5]
-    start_time: 200
+    start_time: 800
     notes: "No wind variant — slower gas dispersal, longer warmup."
 
 env_c_slow:

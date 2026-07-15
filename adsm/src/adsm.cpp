@@ -388,10 +388,31 @@ bool Adsm::reached_point(double x, double y) {
 }
 
 void Adsm::create_random_gaol(double start_x, double start_y, double r, double& goal_x, double& goal_y) {
-    double rand_theta = static_cast<double>(rand()) / RAND_MAX * 2 * M_PI;
-    double rand_r = static_cast<double>(rand()) / RAND_MAX * r;
-    goal_x = start_x + rand_r * cos(rand_theta);
-    goal_y = start_y + rand_r * sin(rand_theta);
+    // Sample a random goal within radius r that is inside the map and on a known,
+    // non-lethal cell. Without this guard a sample can land outside the arena or
+    // in a wall; Nav2 then rejects it ("off the global costmap"), the robot never
+    // moves, and the stuck watchdog fires. Fall back to the seed position so the
+    // goal stays in-bounds instead of drifting off the map.
+    const int max_tries = 50;
+    for (int i = 0; i < max_tries; ++i) {
+        double rand_theta = static_cast<double>(rand()) / RAND_MAX * 2 * M_PI;
+        double rand_r = static_cast<double>(rand()) / RAND_MAX * r;
+        double cx = start_x + rand_r * cos(rand_theta);
+        double cy = start_y + rand_r * sin(rand_theta);
+        int mx, my;
+        if (!map_.worldToMap(cx, cy, mx, my)) {
+            continue;  // outside the map bounds
+        }
+        int cost = map_.getCost(mx, my);
+        if (cost == Gridmap::LETHAL_OBSTACLE || cost == Gridmap::NO_INFORMATION) {
+            continue;  // wall or unexplored -> Nav2 can't plan there
+        }
+        goal_x = cx;
+        goal_y = cy;
+        return;
+    }
+    goal_x = start_x;
+    goal_y = start_y;
 }
 
 void Adsm::observe() {
@@ -605,7 +626,9 @@ void Adsm::evaluate() {
         goals_.clear();
         RCLCPP_INFO(this->get_logger(), "Generate a random goal. r: %.2f", random_sample_r_);
         double new_x, new_y;
-        create_random_gaol(goal_.x, goal_.y, random_sample_r_, new_x, new_y);
+        // Seed from the robot's current position, not the previous goal: seeding
+        // from goal_ let an out-of-bounds goal compound into a runaway drift.
+        create_random_gaol(real_x_, real_y_, random_sample_r_, new_x, new_y);
         goals_.push_back(GoalNode(iter_, new_x, new_y, GOAL_RANDOM_TYPE));
     }
 

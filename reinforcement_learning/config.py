@@ -29,9 +29,33 @@ STATE_DIM = GAS_HISTORY_LENGTH * GAS_FEATURES_PER_STEP + LIDAR_NUM_RAYS + 2 + 2 
 # Rewards
 # =============================================================================
 R_SUCCESS = 200.0
-R_DETECTION = 0.75
-R_STEP = -1.0
+R_DETECTION = 2.0
+R_NEW_CELL = 0.5
+R_STEP = -0.3
+R_REVISIT = -0.2   # penalty each time robot enters a cell it has visited before
 R_COLLISION = -5.0
+R_MAX_STEPS = -20.0
+
+# Trajectory-loop proximity penalty: penalize the robot for getting within
+# D_LOOP of any of the past LOOP_HISTORY trajectory points (most recent
+# past point excluded from the count is the previous step, age=1).
+# Per-point contribution decays with age: weight(age) = LOOP_DECAY**(age-1).
+LOOP_HISTORY = 10
+D_LOOP = 0.3   # < STEP_SIZE so a clean forward step doesn't self-trigger
+# Default 0 = loop penalty OFF (the loop-penalty training experiments were
+# net-negative; the champion and deployed checkpoints trained without it).
+# Opt in per-run via OSL_R_LOOP_BASE (e.g. -0.05).
+R_LOOP_BASE = 0.0
+LOOP_DECAY = 0.85
+
+# Env-var recipe overrides — used by reproduction scripts (train_champ.sh)
+# to pin a historical recipe without changing this branch's defaults. Unset
+# env vars leave the values above untouched. The champion recipe is
+# R_STEP=-1.0, R_DETECTION=0.75, R_LOOP_BASE=0 (it predates the loop penalty).
+import os as _os
+R_STEP = float(_os.environ.get('OSL_R_STEP', R_STEP))
+R_DETECTION = float(_os.environ.get('OSL_R_DETECTION', R_DETECTION))
+R_LOOP_BASE = float(_os.environ.get('OSL_R_LOOP_BASE', R_LOOP_BASE))
 
 # =============================================================================
 # Wind
@@ -39,6 +63,13 @@ R_COLLISION = -5.0
 WIND_SPEED_RANGE = (0.1, 1.5)   # m/s, per-episode uniform sample
 WIND_MAX_SPEED = 2.0            # for normalization
 WIND_DISPERSION_FACTOR = 2.0    # how much wind shifts concentration peak
+
+# When True AND a spatial wind_field is provided at reset, the policy OBSERVES
+# the local wind at the robot's position (wind_field.query(robot_pos)) instead
+# of the spatial mean. Must match between training and eval. Gated by env var
+# OSL_LOCAL_WIND_OBS so old checkpoints (trained on mean wind) are unaffected.
+import os as _os
+LOCAL_WIND_OBS = _os.environ.get('OSL_LOCAL_WIND_OBS', '0') == '1'
 
 # =============================================================================
 # Gas dispersion model selection
@@ -86,8 +117,7 @@ CURRICULUM_FRACTION = 0.5               # fraction of training to reach full siz
 
 # Curriculum: template unlock schedule (progress → max template index)
 # Templates: 0=empty, 1=single_wall, 2=u_shape, 3=three_walls, 4=complex_maze,
-#            5=multi_room, 6=dead_end_corridor, 7=serpentine_corridor,
-#            8=dense_multi_room, 9=hybrid
+# 5=multi_room, 6=dead_end_corridor, 7=serpentine, 8=dense_multi_room, 9=hybrid
 TEMPLATE_CURRICULUM_STAGES = [
     (0.00, 1),    # 0-10%:  templates 0-1 (gas-following only)
     (0.10, 3),    # 10-25%: + obstacles (T2, T3)
@@ -95,6 +125,14 @@ TEMPLATE_CURRICULUM_STAGES = [
     (0.40, 8),    # 40-60%: + dead-ends, serpentine, dense multi-room (T6-T8)
     (0.60, 9),    # 60%+:   + hybrids (T9)
 ]
+
+# Env-var override (recipe pinning, like the reward overrides above):
+# OSL_TEMPLATE_STAGES="progress:max_template,..." replaces the schedule.
+# The champion recipe is "0:1,0.25:3,0.5:5" (T0-T5 only, slower unlocks).
+if _os.environ.get('OSL_TEMPLATE_STAGES'):
+    TEMPLATE_CURRICULUM_STAGES = [
+        (float(s.split(':')[0]), int(s.split(':')[1]))
+        for s in _os.environ['OSL_TEMPLATE_STAGES'].split(',')]
 
 # Per-template sampling weights (used after curriculum unlocks them).
 # Higher weight = more episodes drawn from that template. T6/T7 get 3x

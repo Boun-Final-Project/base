@@ -299,6 +299,14 @@ class SpatialObsWrapper:
 
         spatial = np.stack([known, wall, gas, rec, det, motion], axis=0)  # (6, 98, 98)
         time_frac = self._env._current_step / cfg.MAX_STEPS
-        wind = np.array([*self._env._wind.get_observation_spatial(), time_frac],
-                        dtype=np.float32)                                  # (4,)
+        # Local-cell ctx: query the wind field at the robot's current cell so
+        # training and deployment share the same ctx semantics. Eliminates the
+        # ctx-vs-local mismatch on real CFD wind fields where the spatial mean
+        # diverges sharply from local wind direction (see
+        # docs/notes on the GADEN-eval ctx investigation).
+        wind = np.array(
+            [*self._env._wind.get_observation_spatial_at(self._env._robot_pos),
+             time_frac],
+            dtype=np.float32,
+        )                                                                  # (4,)
         return spatial, wind

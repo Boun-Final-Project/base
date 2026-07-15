@@ -1,0 +1,9 @@
+# Python dependencies (ROS2 packages are listed in the README and installed
+# via colcon/rosdep, not pip).
+numpy
+scipy
+matplotlib
+numba          # JIT-accelerated particle filter (efe_igdm)
+torch          # RL training + deployment (reinforcement_learning, gaden_transfer)
+gymnasium      # RL environment API
+pyyaml         # eval-config / scenario parsing
