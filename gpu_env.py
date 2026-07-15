@@ -279,6 +279,12 @@ class GpuVecEnvMulti:
         self.step_count = torch.zeros(E, device=device, dtype=torch.long)
         self.gas_xyb = torch.zeros((E, cfg.gas_hist, 3), device=device, dtype=dtype)
         self.gas_valid = torch.zeros((E, cfg.gas_hist), device=device, dtype=torch.bool)
+        # detection-reward mode: "continuous" (default, = control/s2: +r_det every in-gas
+        # step), "edge" (pay on each 0->1 re-acquisition), "once" (pay only first contact
+        # of the episode). edge/once need per-env history, reset in _reset_envs.
+        self.r_det_mode = getattr(cfg, "r_det_mode", "continuous")
+        self.prev_binary = torch.zeros(E, device=device, dtype=dtype)
+        self.ever_detected = torch.zeros(E, device=device, dtype=torch.bool)
 
         self._build_templates(grids, sources, winds, cfg)
 
@@ -340,6 +346,7 @@ class GpuVecEnvMulti:
         self.mass[idx] = self.cfg.mass
         self.wptr[idx] = self.tpl_n[m] % self.F
         self.gas_xyb[idx] = 0; self.gas_valid[idx] = False
+        self.prev_binary[idx] = 0; self.ever_detected[idx] = False
         # init threshold from first reading
         c = self._conc()
         self.threshold[idx] = c[idx]
@@ -432,7 +439,17 @@ class GpuVecEnvMulti:
 
         self.step_count = self.step_count + 1
         dist = torch.linalg.norm(self.robot - self.source, dim=1)
-        reward, term = reward_batch(dist, collision, binary, self.cfg.d_success,
+        # detection-reward trigger: shape the *reward* term only; the real `binary`
+        # still feeds the obs (gas_xyb) above, unchanged.
+        if self.r_det_mode == "edge":
+            det = (binary > self.prev_binary).to(self.dtype)             # 0->1 re-acquisition
+        elif self.r_det_mode == "once":
+            det = ((binary > 0.5) & ~self.ever_detected).to(self.dtype)  # first contact only
+        else:
+            det = binary                                                # continuous (default)
+        self.prev_binary = binary
+        self.ever_detected = self.ever_detected | (binary > 0.5)
+        reward, term = reward_batch(dist, collision, det, self.cfg.d_success,
                                     self.cfg.r_step, self.cfg.r_coll, self.cfg.r_det, self.cfg.r_success)
         trunc = self.step_count >= self.cfg.max_steps
         done = term | trunc

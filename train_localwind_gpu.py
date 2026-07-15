@@ -50,7 +50,8 @@ def ecfg(res, flip, step_size=None):
         lidar_rays=cfg.LIDAR_NUM_RAYS, lidar_range=cfg.LIDAR_MAX_RANGE, max_speed=cfg.WIND_MAX_SPEED,
         flip=flip, gas_hist=cfg.GAS_HISTORY_LENGTH, max_steps=cfg.MAX_STEPS, step_size=ss,
         d_success=cfg.D_SUCCESS, thr_weight=cfg.SENSOR_THRESHOLD_WEIGHT, robot_radius=cfg.ROBOT_RADIUS,
-        r_step=cfg.R_STEP, r_coll=cfg.R_COLLISION, r_det=cfg.R_DETECTION, r_success=cfg.R_SUCCESS)
+        r_step=cfg.R_STEP, r_coll=cfg.R_COLLISION, r_det=cfg.R_DETECTION, r_success=cfg.R_SUCCESS,
+        r_det_mode="continuous")
 
 
 def main():
@@ -101,6 +102,9 @@ def main():
                     help="fraction of updates over which K is annealed (log-space) to --gas-k")
     ap.add_argument("--gas-sigma", type=float, default=None,
                     help="FILAMENT_INITIAL_SIGMA (GADEN filamentInitialSigma=10cm => 0.1)")
+    ap.add_argument("--r-det-mode", choices=["continuous", "edge", "once"], default="continuous",
+                    help="detection-reward mode: continuous(=+r_det/in-gas step, default) | "
+                         "edge(pay each 0->1 re-acquisition) | once(pay first contact only)")
     ap.add_argument("--gas-fps", type=int, default=None,
                     help="FILAMENTS_PER_STEP (GADEN numFilaments_sec=10 at dt=0.5 => 5)")
     a = ap.parse_args()
@@ -157,6 +161,7 @@ def main():
             c.initial_sigma = float(a.gas_sigma)
         if a.gas_fps is not None:
             c.filaments_per_step = int(a.gas_fps)   # NB: ring buffer F = max_age*fps*2 grows with this
+        c.r_det_mode = a.r_det_mode
         return c
 
     _ecfg = _ft.partial(_gas_cfg, step_size=a.step_size)   # val env gets the TARGET gas physics
@@ -166,7 +171,8 @@ def main():
     if a.gas_k is not None:
         print(f"  GAS: K {k0:g} -> {a.gas_k:g} (log-anneal over first {a.gas_anneal_frac*100:.0f}% "
               f"of updates) | initial_sigma={train_cfg.initial_sigma:g} "
-              f"filaments_per_step={train_cfg.filaments_per_step} max_age={train_cfg.max_age}",
+              f"filaments_per_step={train_cfg.filaments_per_step} max_age={train_cfg.max_age} "
+              f"| R_DET_MODE={a.r_det_mode}",
               flush=True)
     env = ge.GpuVecEnvMulti(pool["grids"], pool["sources"], pool["winds"], pool["free_cells"], res,
                             train_cfg, DEV, E=a.envs, seed=a.seed,
