@@ -23,3 +23,7 @@ slurm-*.out
 # Media
 *.png
 *.mp4
+
+# Generated caches
+geo_cache_*.npz
+detect_cache_*.json
