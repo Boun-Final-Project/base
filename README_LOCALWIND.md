@@ -1,5 +1,26 @@
 # GPU local-wind-observation trainer
 
+## Status (2026-07-15)
+
+- **Built and running end-to-end**: batched GPU env, wind/lidar/filament kernels ported from the
+  validated CPU GPU-port, a CFD-library loader (`gpu_cfd_loader.py`), a procedural synth-wind
+  fallback (`synth_wind.py` + `wind_field_potflow.py`), a shard-based train/val split, and a
+  from-scratch GADEN eval harness (`gpu_fromscratch_gaden_eval.py`).
+- **Evaluated on real ROS2/Nav2 + GADEN** (29-scenario benchmark suite, 5 runs each = 145 runs):
+  the `control` checkpoint (trained with a buggy gas-dispersion constant, `FILAMENT_K=0.02`, 40x
+  too fast) and the `s2 gasfix` checkpoint (corrected `K=0.0005`) both land at **60% (87/145)**
+  overall — the corrected physics redistributes *which* map families win rather than raising the
+  aggregate. Full per-family breakdown in [`GPU_TRAINING_COMPARISON.md`](GPU_TRAINING_COMPARISON.md).
+- **Not yet done**: reflection physics in the GPU env, a full GADEN re-validation pass beyond the
+  comparison above, and wiring this trainer into the top-level project docs/workflow.
+- **CFD scenario generation is out of scope here.** This trainer only *consumes* a pre-baked CFD
+  wind-field library (`grid.npz` / `wind_field.npz` / `meta.json` per case, see
+  `gpu_cfd_loader.py`); it does not generate one. The actual scenario/library-generation pipeline
+  (mesh gen from GADEN scenarios, multi-direction OpenFOAM wind bake, library sharding) lives in
+  `cfd_wind_pipeline/` and is already pushed to GitHub on its own branch, `feature/cfd-wind-pipeline`
+  — not merged to `main` and not part of this PR.
+
+
 A GPU-vectorized trainer where the policy **observes the local wind at the robot's position**
 (a point anemometer) rather than a single mean wind vector. This is the `local2` lever that
 cracked the `many_rooms` GADEN map — it only matters when wind is **spatially varying**.
