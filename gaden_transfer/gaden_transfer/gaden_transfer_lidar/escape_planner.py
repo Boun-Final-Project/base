@@ -78,9 +78,22 @@ class CirclingEscape:
     def __init__(self, reference_map, robot_radius=0.25, logger=None,
                  win=25, ratio=0.2, streak=35, cooldown=40, min_dist=3.0,
                  grow_win=120, grow_min=250, frontier_min_cells=12,
-                 target_mode='largest'):
-        self.slam_map = create_empty_occupancy_map(reference_map)
-        self.mapper = LidarMapper(self.slam_map)
+                 target_mode='largest',
+                 use_live_grid=False, live_map_provider=None):
+        self._use_live_grid = bool(use_live_grid)
+        self._live_map_provider = live_map_provider
+
+        if self._use_live_grid:
+            if live_map_provider is None:
+                raise ValueError("use_live_grid=True requires live_map_provider")
+            live = live_map_provider()
+            self.slam_map = (live if live is not None
+                             else create_empty_occupancy_map(reference_map))
+            self.mapper = None
+        else:
+            self.slam_map = create_empty_occupancy_map(reference_map)
+            self.mapper = LidarMapper(self.slam_map)
+
         self.gp = GlobalPlanner(self.slam_map, robot_radius=robot_radius,
                                 frontier_min_size=3, debug=False)
         self.log = logger
@@ -136,10 +149,24 @@ class CirclingEscape:
         self._escape_fails = 0      # total wedged-hop attempts this escape
 
     # ------------------------------------------------------------------ SLAM
+    def _refresh_live_map(self):
+        """In live-grid mode, pull the latest map from the harness and rebind it
+        on self.gp so frontier detection / A* / coverage stats all see the
+        current slam_toolbox grid.  No-op in private-map mode."""
+        if not self._use_live_grid or self._live_map_provider is None:
+            return
+        latest = self._live_map_provider()
+        if latest is None:
+            return
+        self.slam_map = latest
+        self.gp.occupancy_grid = latest
+
     def update_scan(self, scan_msg, x, y, theta):
         """Fold one LaserScan into the online occupancy map (sensed data only)."""
         if x is None or y is None or theta is None:
             return
+        if self._use_live_grid:
+            return   # live slam_toolbox map is maintained externally; nothing to do
         try:
             self.mapper.update_from_scan(scan_msg, float(x), float(y), float(theta))
         except Exception as exc:  # never let SLAM crash the control loop
@@ -156,6 +183,7 @@ class CirclingEscape:
         Returns True if the robot is stuck (efficiency-streak OR coverage-
         stagnation has crossed its threshold). Sets ``self.stuck_reason``.
         """
+        self._refresh_live_map()
         x = float(x)
         y = float(y)
         if og:
@@ -224,6 +252,7 @@ class CirclingEscape:
         direction and return the farthest reachable FREE cell toward the source.
         None if too few gas observations. (`_eq3_logP` kept for reference.)
         """
+        self._refresh_live_map()
         if not self.use_source_est or len(self._gas_obs) < self.src_min_obs:
             return None
         obs = list(self._gas_obs)
@@ -265,6 +294,7 @@ class CirclingEscape:
 
         Returns (target_x, target_y, frontier_size, dist_m, n_waypoints) or None.
         """
+        self._refresh_live_map()
         if self.force_every > 0:
             # debug stress mode: force an escape every N steps regardless of stuck
             if (step - self._last_escape_step) < self.force_every:
@@ -394,6 +424,7 @@ class CirclingEscape:
         reproduces the old raw behaviour as a last resort). Diagonal moves may
         not cut through a wall corner. Returns ~0.5 m world waypoints or None.
         """
+        self._refresh_live_map()
         og = self.slam_map
         grid = og.grid
         H, W = grid.shape
@@ -476,6 +507,7 @@ class CirclingEscape:
 
     def _dump(self, x, y, target):
         """Debug snapshot of the SLAM grid + chosen target + planned path."""
+        self._refresh_live_map()
         if not self.dump_dir:
             return
         try:
@@ -497,6 +529,7 @@ class CirclingEscape:
     # --------------------------------------------------------------- helpers
     def dump_map(self, step, x, y):
         """Debug: snapshot the current SLAM grid + frontiers + robot pose."""
+        self._refresh_live_map()
         if not self.dump_dir:
             return
         try:
@@ -515,6 +548,7 @@ class CirclingEscape:
 
     def mapped_fraction(self):
         """Fraction of grid cells that are no longer unknown (for logging)."""
+        self._refresh_live_map()
         try:
             g = self.slam_map.grid
             return float((g != -1).sum()) / float(g.size)

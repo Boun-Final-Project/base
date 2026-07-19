@@ -1,0 +1,6 @@
+checkpoint: /home/efe/ros2_ws/src/gpu_gasfix_ab/gpu_gasfix_s1_job25963_upd5100_val83.9.pt
+arch: dual
+device: cpu
+lidar_frame: heading
+local_wind_obs: 1
+# wind_file is injected per-scenario by episode_runner (scenario_paths.wind_csv)

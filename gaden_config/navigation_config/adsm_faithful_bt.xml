@@ -1,0 +1,62 @@
+<!--
+  ADSM move_base-faithful navigation tree.
+
+  Builds on adsm_goal_update_bt.xml's GoalUpdater fix (see that file for the
+  full preemption writeup) and additionally matches move_base's replanning
+  cadence and recovery ladder, per
+  An-adaptive-robot-search-algorithm/params/move_base/move_base_params.yaml:
+
+    planner_frequency: 5.0          -> RateController hz="5.0" below
+    controller_patience/oscillation -> handled by the progress_checker in
+                                        nav2_params_adsm_faithful.yaml, not here
+    recovery_behaviors (default)    -> conservative reset (clear costmap),
+                                        rotate recovery, aggressive reset
+                                        (clear costmap outside a larger
+                                        window), rotate recovery, abort
+
+  Pair with nav2_params_adsm_faithful.yaml, which also drops the DWB min_vel_x
+  to -0.22 (reverse): move_base's local planner could always back out of a
+  wedge, so this tree's ladder does NOT include BackUp/Wait like
+  adsm_goal_update_bt.xml's does. Those covered for the missing reverse
+  capability in the literal-translation arm, and are redundant (Wait) or
+  no longer necessary (BackUp, since backing up is now in the controller's
+  own search space) once reverse is available to DWB directly.
+
+  Use with the adsm node's use_goal_update:=true, same as
+  adsm_goal_update_bt.xml.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="5.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <GoalUpdater input_goal="{goal}" output_goal="{updated_goal}">
+              <ComputePathToPose goal="{updated_goal}" path="{path}" planner_id="GridBased"/>
+            </GoalUpdater>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ConservativeReset">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="6.28"/>
+          <Sequence name="AggressiveReset">
+            <ClearEntireCostmap name="ClearLocalCostmap-Aggressive" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Aggressive" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="6.28"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

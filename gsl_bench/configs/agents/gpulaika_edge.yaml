@@ -1,0 +1,6 @@
+checkpoint: /home/efe/ros2_ws/src/gpulaika_gasfix/gpu_edge_job26352_upd1400.pt
+arch: dual
+device: cpu
+lidar_frame: heading
+local_wind_obs: 1
+# wind_file is injected per-scenario by episode_runner (scenario_paths.wind_csv)

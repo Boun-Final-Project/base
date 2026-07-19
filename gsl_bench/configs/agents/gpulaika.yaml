@@ -1,0 +1,6 @@
+checkpoint: /home/efe/ros2_ws/src/gpu_cfd_localwind_job25311/gpu_cfd_localwind_step05_job25311_upd4000_gaden80_ult85_many0.pt
+arch: dual
+device: cpu
+lidar_frame: heading
+local_wind_obs: 1
+# wind_file is injected per-scenario by episode_runner (scenario_paths.wind_csv)

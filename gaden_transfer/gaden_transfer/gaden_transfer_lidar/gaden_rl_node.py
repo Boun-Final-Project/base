@@ -46,6 +46,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.clock import Clock, ClockType
 
 from olfaction_msgs.msg import GasSensor, Anemometer
 from gaden_msgs.srv import WindPosition
@@ -218,7 +219,17 @@ class GadenRLNode(Node):
         # Occupancy service (used to auto-derive map dimensions)
         self.declare_parameter('occupancy_service', '/gaden_environment/occupancyMap3D')
         self.declare_parameter('occupancy_z_level', 5)
-        self.declare_parameter('occupancy_timeout', 60.0)
+        self.declare_parameter('occupancy_timeout', 300.0)
+        # Wall-clock seconds without a /ground_truth pose before the simulator is
+        # declared dead and the run is aborted. Guards against the env going brain-dead
+        # mid-run (gaden_player stops serving concentrations, BasicSim stops publishing),
+        # which otherwise hangs the node until the batch wall timeout. 0 disables.
+        self.declare_parameter('pose_stale_timeout', 120.0)
+        # Nav2 action-server pre-flight wait. Bringing up the full Nav2 lifecycle
+        # (map_server, amcl, planner, controller, bt_navigator) can exceed 60 s on a
+        # cold or shared host; a run that aborts here is a total loss, whereas waiting
+        # longer costs only the wait. Kept as a parameter so batch drivers can raise it.
+        self.declare_parameter('nav2_server_timeout', 300.0)
         # Path to GADEN wind CSV (e.g. .../wind_simulations/1ms/wind_at_cell_centers_0.csv)
         self.declare_parameter('wind_file', '')
         # Delay between teleport steps (seconds)
@@ -287,8 +298,16 @@ class GadenRLNode(Node):
 
         self._is_moving: bool = False
         # Per-step drive-timeout bookkeeping (drive mode only)
-        self._drive_goal_time = None        # rclpy Time when current goal was sent
+        self._drive_goal_time = None        # rclpy Time (SIM clock) when goal was sent
         self._drive_canceling: bool = False  # cancel issued, awaiting completion
+        # Wall-clock mirrors of the above. The sim-time drive timeout is evaluated in
+        # _pose_callback and measured on get_clock() — both of which are driven by the
+        # simulator. If BasicSim stalls or dies, poses stop AND /clock freezes, so that
+        # timeout can never fire and the run hangs until the batch wall timeout (seen:
+        # a single step blocking 6.3 h). These monotonic timestamps feed _wall_watchdog,
+        # which runs on a STEADY_TIME timer and is therefore immune to a dead simulator.
+        self._drive_goal_wall: Optional[float] = None   # time.monotonic() at goal send
+        self._last_pose_wall: Optional[float] = None    # time.monotonic() of last pose
         self._search_complete: bool = False
         self._start_teleport_done: bool = False
         self._slam_enabled: bool = False   # gate SLAM updates to post-teleport (set in _take_step)
@@ -524,11 +543,16 @@ class GadenRLNode(Node):
             # Pre-flight guard: Navigator.__init__ waits on the Nav2 action server
             # with NO timeout, so confirm it is up here (60 s) and fail fast
             # instead of hanging forever if the Nav2 stack didn't come up.
+            _nav_wait = float(self.get_parameter('nav2_server_timeout').value)
             _pre = ActionClient(self, NavigateToPose, '/PioneerP3DX/navigate_to_pose')
-            if not _pre.wait_for_server(timeout_sec=60.0):
+            self.get_logger().info(
+                f'Waiting up to {_nav_wait:.0f}s for Nav2 action server '
+                f'/PioneerP3DX/navigate_to_pose ...')
+            if not _pre.wait_for_server(timeout_sec=_nav_wait):
                 self.get_logger().error(
                     'use_nav2=True but Nav2 action server '
-                    '/PioneerP3DX/navigate_to_pose not available after 60 s — aborting.')
+                    f'/PioneerP3DX/navigate_to_pose not available after {_nav_wait:.0f} s '
+                    '— aborting.')
                 os._exit(2)
             _pre.destroy()
             self._navigator = Navigator(self, on_complete_callback=self._on_nav_complete)
@@ -537,6 +561,16 @@ class GadenRLNode(Node):
                 f'tolerance={self._nav_goal_tolerance:.2f} m)')
         else:
             self.get_logger().info('Motion mode: TELEPORT (instant)')
+
+        # Liveness watchdog. MUST run on a STEADY_TIME clock: a default timer follows the
+        # node clock, which is sim time under use_sim_time, so it would freeze in exactly
+        # the scenario it exists to catch (dead BasicSim => no /clock).
+        self._pose_stale_timeout = float(self.get_parameter('pose_stale_timeout').value)
+        self._watchdog_timer = self.create_timer(
+            2.0, self._wall_watchdog, clock=Clock(clock_type=ClockType.STEADY_TIME))
+        self.get_logger().info(
+            f'Wall-clock watchdog armed: env-dead abort after {self._pose_stale_timeout:.0f}s '
+            'without a pose; drive-timeout wall backstop active.')
 
         if self._det_drive:
             self._cmd_vel_pub = self.create_publisher(Twist, '/PioneerP3DX/cmd_vel', 10)
@@ -553,6 +587,7 @@ class GadenRLNode(Node):
     # ------------------------------------------------------------------
 
     def _pose_callback(self, msg: PoseWithCovarianceStamped):
+        self._last_pose_wall = time.monotonic()  # liveness beat for _wall_watchdog
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
 
@@ -591,10 +626,12 @@ class GadenRLNode(Node):
             eff_timeout = self._drive_timeout
             if self._escape is not None and self._escape.escaping:
                 eff_timeout = min(self._drive_timeout, 10.0)
-            if (eff_timeout > 0.0 and self._drive_goal_time is not None
+            # Snapshot: _on_nav_complete clears _drive_goal_time from another executor
+            # thread, so re-reading it after the guard can yield None mid-subtraction.
+            goal_time = self._drive_goal_time
+            if (eff_timeout > 0.0 and goal_time is not None
                     and not self._drive_canceling):
-                elapsed = (self.get_clock().now()
-                           - self._drive_goal_time).nanoseconds * 1e-9
+                elapsed = (self.get_clock().now() - goal_time).nanoseconds * 1e-9
                 if elapsed > eff_timeout:
                     self._drive_canceling = True
                     self.get_logger().warn(
@@ -682,13 +719,11 @@ class GadenRLNode(Node):
         # policies). For local point-wind policies (OSL_LOCAL_WIND_OBS=1) the
         # obs builder uses these LIVE anemometer readings at the robot cell.
         #
-        # BUG WORKAROUND: simulated_anemometer publishes wind_speed = u*u + v*v
-        # (squared magnitude — it never takes the sqrt; fake_anemometer.cpp:138).
-        # Training/Python eval feed the TRUE magnitude sqrt(u^2+v^2), so without
-        # correcting here the local-wind policy sees systematically crushed wind
-        # (e.g. 0.7 m/s -> 0.49, 0.1 -> 0.01), which nullifies the local-wind
-        # signal — observed as many_rooms collapsing 0% on ROS2 vs 90% in Python.
-        speed = float(np.sqrt(max(0.0, msg.wind_speed)))
+        # fake_anemometer.cpp now publishes the true magnitude hypot(u,v)
+        # directly (fixed 2026-07-16 — it used to publish u*u+v*v, the squared
+        # magnitude, requiring a sqrt() here to recover the true value). Do
+        # NOT re-add a sqrt: msg.wind_speed is already linear.
+        speed = float(max(0.0, msg.wind_speed))
         self._latest_wind_speed = speed
         self._latest_wind_dir = float(msg.wind_direction)
         if self._obs_builder is not None:
@@ -746,6 +781,7 @@ class GadenRLNode(Node):
         self._waypoint_y = float(y)
         self._waypoint_start_ns = self.get_clock().now().nanoseconds
         self._is_moving = True
+        self._drive_goal_wall = None  # cmd_vel path: Nav2 wall backstop stays inert
         self._cmdvel_active = True
         self._drive_goal_time = None
 
@@ -785,6 +821,7 @@ class GadenRLNode(Node):
             self._is_moving = True
             self._drive_canceling = False
             self._drive_goal_time = self.get_clock().now()
+            self._drive_goal_wall = time.monotonic()
             self._navigator.send_goal(
                 wx, wy, use_orientation=False, tolerance=self._nav_goal_tolerance)
         else:
@@ -795,7 +832,62 @@ class GadenRLNode(Node):
         flag so the next ground_truth pose callback takes the next step (stop-go)."""
         self._is_moving = False
         self._drive_goal_time = None
+        self._drive_goal_wall = None
         self._drive_canceling = False
+
+    def _wall_watchdog(self):
+        """Liveness watchdog on a STEADY_TIME (wall) clock.
+
+        Everything else in this node is driven by the simulator: the step loop runs off
+        /ground_truth callbacks and every timeout is measured on get_clock() (sim time,
+        published by BasicSim). So when the sim stalls or dies, the machinery meant to
+        rescue the run dies with it — poses stop arriving, /clock freezes, and the
+        per-step drive timeout in _pose_callback never gets a chance to run. Observed in
+        job 25445: one step blocked 6.3 h, and 20/145 runs burned the full 9 h batch
+        timeout doing nothing.
+
+        This timer is the only thing here that keeps ticking when the sim is gone.
+        """
+        now_w = time.monotonic()
+
+        # (1) Simulator liveness. No poses for pose_stale_timeout wall-seconds means the
+        # env is brain-dead (gaden_player stops serving concentrations, BasicSim stops
+        # publishing). Fail the run in ~2 min instead of hanging for hours.
+        if (self._pose_stale_timeout > 0.0 and self._last_pose_wall is not None
+                and not self._search_complete):
+            stale = now_w - self._last_pose_wall
+            if stale > self._pose_stale_timeout:
+                self.get_logger().error(
+                    f'ENV DEAD — no /ground_truth pose for {stale:.0f}s wall '
+                    f'(> {self._pose_stale_timeout:.0f}s). Simulator stopped publishing; '
+                    'aborting instead of hanging until the batch wall timeout.')
+                os._exit(3)
+
+        # (2) Wall-clock backstop for the per-step drive timeout. The sim-time check in
+        # _pose_callback normally fires first; this only catches the case where it
+        # cannot run at all. Deliberately slack (3x, min +30 s) so it never pre-empts
+        # the sim-time path during healthy operation.
+        if not (self._use_nav2 and self._is_moving) or self._drive_canceling:
+            return
+        goal_wall = self._drive_goal_wall
+        if goal_wall is None:
+            return
+        eff_timeout = self._drive_timeout
+        if self._escape is not None and self._escape.escaping:
+            eff_timeout = min(self._drive_timeout, 10.0)
+        if eff_timeout <= 0.0:
+            return
+        limit = max(eff_timeout * 3.0, eff_timeout + 30.0)
+        elapsed_w = now_w - goal_wall
+        if elapsed_w > limit:
+            self._drive_canceling = True
+            self.get_logger().warn(
+                f'[Ep {self._episode} Step {self._step_in_episode:3d}] '
+                f'WALL-CLOCK DRIVE TIMEOUT — {elapsed_w:.1f}s wall (> {limit:.1f}s) with '
+                'no goal completion and the sim-time watchdog never firing (poses or '
+                '/clock stalled); canceling, re-predicting.')
+            if self._navigator is not None:
+                self._navigator.cancel_current_goal()
 
     # ------------------------------------------------------------------
     # Core control loop
@@ -1013,6 +1105,7 @@ class GadenRLNode(Node):
             self._is_moving = True
             self._drive_canceling = False
             self._drive_goal_time = self.get_clock().now()  # for per-step timeout
+            self._drive_goal_wall = time.monotonic()        # wall-clock backstop
             self._navigator.send_goal(
                 target_x, target_y, yaw=theta,
                 use_orientation=True, tolerance=self._nav_goal_tolerance,
