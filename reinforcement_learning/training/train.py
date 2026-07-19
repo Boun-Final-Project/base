@@ -77,6 +77,10 @@ class VecEnv:
             env.set_room_size_range(w_range, h_range)
             env.set_max_template(max_template, weights)
 
+    def close(self):
+        """No-op: serial envs have no background resources to release."""
+        pass
+
     def step(self, actions):
         """Step all envs. Auto-resets on termination/truncation.
 
@@ -102,7 +106,13 @@ class VecEnv:
                 info["terminal_observation"] = obs
                 info["terminated"] = terminated  # source found
                 info["truncated"] = truncated     # timeout
-                obs, _ = env.reset()
+                obs, reset_info = env.reset()
+                # Carry the new episode's state forward so out-of-process
+                # callers (teacher map canvases) see post-reset values.
+                if "robot_pos" in reset_info:
+                    info["robot_pos"] = reset_info["robot_pos"]
+                if "map_ds" in reset_info:
+                    info["map_ds"] = reset_info["map_ds"]
 
             obs_list.append(obs)
             reward_list.append(reward)
@@ -131,7 +141,13 @@ def _worker(child_conn, parent_conn, env_fn):
                     info["terminal_observation"] = obs
                     info["terminated"] = terminated
                     info["truncated"] = truncated
-                    obs, _ = env.reset()
+                    obs, reset_info = env.reset()
+                    # Carry the new episode's state forward so out-of-process
+                    # callers (teacher map canvases) see post-reset values.
+                    if "robot_pos" in reset_info:
+                        info["robot_pos"] = reset_info["robot_pos"]
+                    if "map_ds" in reset_info:
+                        info["map_ds"] = reset_info["map_ds"]
                 child_conn.send((obs, np.float32(reward), np.float32(done), info))
             elif cmd == "reset":
                 obs, info = env.reset()
@@ -235,7 +251,11 @@ class SpatialVecEnv(VecEnv):
                 info["terminal_observation"] = obs
                 info["terminated"] = terminated
                 info["truncated"]  = truncated
-                obs, _ = env.reset()
+                obs, reset_info = env.reset()
+                if "robot_pos" in reset_info:
+                    info["robot_pos"] = reset_info["robot_pos"]
+                if "map_ds" in reset_info:
+                    info["map_ds"] = reset_info["map_ds"]
             obs_list.append(obs)
             reward_list.append(reward)
             done_list.append(float(done))

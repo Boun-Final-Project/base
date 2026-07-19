@@ -24,6 +24,9 @@ slurm-*.out
 *.png
 *.mp4
 
+# Generated caches
+geo_cache_*.npz
+detect_cache_*.json
 # RL checkpoints: stray run outputs stay out of git, but the released
 # checkpoints under checkpoints/ are tracked (small, ~6 MB each)
 *.pt

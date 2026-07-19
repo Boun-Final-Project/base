@@ -57,6 +57,7 @@ export OSL_R_DETECTION=0.75
 export OSL_R_LOOP_BASE=0            # champion predates the loop penalty
 export OSL_TEMPLATE_STAGES=0:1,0.25:3,0.5:5   # T0-T5 only, slower unlocks
 
+
 # --- Champion recipe (source: champ_config.json / runs/lidar-007) ------------
 #   dual architecture, 256 parallel envs, curriculum on,
 #   clip-epsilon 0.3, target-KL 0.05, LR 3e-4 annealed from 50% of training,
