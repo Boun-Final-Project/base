@@ -15,6 +15,7 @@
 #include <std_msgs/msg/color_rgba.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <chrono>
 #include <thread>
 #include <fstream>
@@ -68,6 +69,7 @@ private:
     double iter_start_rostime_;
     double iter_rate_;
     int max_iter_;
+    double distance_budget_ = 0.0;   // oracle-derived travel-distance cap, 0.0 = disabled
     double source_x_;
     double source_y_;
     double source_th_;
@@ -93,6 +95,15 @@ private:
     double dis_to_source_ = 0.0;
     std::vector<double> stuck_info_{std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0}; // x, y, last_stuck_time
     double set_random_goal_ = false;
+    // Held random-exploration/stuck-recovery target: without this, evaluate()
+    // re-rolled an independent random goal every 1 Hz tick whenever no better
+    // candidate existed, which out-paces Nav2/DWB's ability to even finish
+    // turning toward one goal before the next replaces it.
+    bool has_random_goal_ = false;
+    double random_goal_x_ = 0.0;
+    double random_goal_y_ = 0.0;
+    double random_goal_set_time_ = 0.0;
+    double random_goal_hold_th_;
     std::string result_ = "";
     std::vector<std::vector<double>> info_log_;
     std::vector<std::vector<double>> targets_log_;
@@ -107,6 +118,12 @@ private:
     rclcpp::Subscription<olfaction_msgs::msg::Anemometer>::SharedPtr anemometer_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr external_slam_map_sub_;
     rclcpp_action::Client<NavigateToPose>::SharedPtr nav_client_;
+    // move_base sendGoal() semantics: a new goal retargets the running drive.
+    // Nav2 instead preempts + rebuilds the BT, zeroing velocity every iteration.
+    // When true, retarget via Nav2's GoalUpdater topic instead of re-sending.
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_update_pub_;
+    bool use_goal_update_ = false;
+    bool nav_goal_active_ = false;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr visual_points_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr visual_lines_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr visual_text_pub_;
@@ -140,6 +157,7 @@ private:
     double probability(double x, double y);
     bool reached_point(double x, double y);
     void create_random_gaol(double start_x, double start_y, double r, double& goal_x, double& goal_y);
+    void pick_or_hold_random_goal();
     void observe();
     void estimate();
     void evaluate();

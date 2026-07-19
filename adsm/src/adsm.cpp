@@ -50,24 +50,34 @@ Adsm::Adsm() : Node("adsm_node") {
     // Run parameters
     this->declare_parameter("iter_rate", 1.0);
     this->declare_parameter("max_iter", 200);
+    this->declare_parameter("distance_budget", 0.0);
     this->declare_parameter("source_x", 0.0);
     this->declare_parameter("source_y", 0.0);
     this->declare_parameter("source_th", 0.5);
     this->declare_parameter("stuck_duration_th", 60.0);
+    // 0.0 = original behaviour (re-roll every 1 Hz tick, per the authors'
+    // ROS1 code). A positive value is a port-only deviation (see adsm.cpp's
+    // pick_or_hold_random_goal doc comment) that A/B-tested worse on
+    // House09 (2026-07-16: 5/5 ROBOT_STUCK, higher estimation error) --
+    // kept parameter-gated for future experiments, not deleted.
+    this->declare_parameter("random_goal_hold_th", 0.0);
     this->declare_parameter("visual", true);
     this->declare_parameter("data_path", "/tmp/adsm_results");
 
     iter_rate_ = this->get_parameter("iter_rate").as_double();
     max_iter_ = this->get_parameter("max_iter").as_int();
+    distance_budget_ = this->get_parameter("distance_budget").as_double();
     source_x_ = this->get_parameter("source_x").as_double();
     source_y_ = this->get_parameter("source_y").as_double();
     source_th_ = this->get_parameter("source_th").as_double();
     stuck_th_ = this->get_parameter("stuck_duration_th").as_double();
+    random_goal_hold_th_ = this->get_parameter("random_goal_hold_th").as_double();
     visual_ = this->get_parameter("visual").as_bool();
     data_path_ = this->get_parameter("data_path").as_string();
     random_run_id_ = generate_uuid();
     data_path_ = data_path_ + '/' + random_run_id_;
-    RCLCPP_INFO(this->get_logger(), "iter_rate %.2f, max_iter %d", iter_rate_, max_iter_);
+    RCLCPP_INFO(this->get_logger(), "iter_rate %.2f, max_iter %d, distance_budget %.2f",
+        iter_rate_, max_iter_, distance_budget_);
     RCLCPP_INFO(this->get_logger(), "source_x %.2f, source_y %.2f", source_x_, source_y_);
 
     // Topic parameters
@@ -77,6 +87,8 @@ Adsm::Adsm() : Node("adsm_node") {
     this->declare_parameter("gas_sensor_topic", "/fake_pid/Sensor_reading");
     this->declare_parameter("anemometer_topic", "/fake_anemometer/WindSensor_reading");
     this->declare_parameter("nav_action", "/PioneerP3DX/navigate_to_pose");
+    this->declare_parameter("use_goal_update", false);
+    this->declare_parameter("goal_update_topic", "/PioneerP3DX/goal_update");
     this->declare_parameter("gaden_occupancy_service", "/gaden_environment/occupancyMap3D");
     this->declare_parameter("z_level", 5);
     this->declare_parameter("external_slam_map_topic", "/slam_node/slam_map");
@@ -117,6 +129,11 @@ Adsm::Adsm() : Node("adsm_node") {
 
     // Create action client
     nav_client_ = rclcpp_action::create_client<NavigateToPose>(this, nav_action);
+    use_goal_update_ = this->get_parameter("use_goal_update").as_bool();
+    if (use_goal_update_) {
+        goal_update_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+            this->get_parameter("goal_update_topic").as_string(), 1);
+    }
 
     // Create publishers
     visual_points_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("~/visual_points", 1);
@@ -595,6 +612,46 @@ void Adsm::estimate() {
     RCLCPP_INFO(this->get_logger(), "size: goals_ %zu, epi_set_ %zu, epr_set_ %zu", goals_.size(), epi_set_.size(), epr_set_.size());
 }
 
+void Adsm::pick_or_hold_random_goal() {
+    // random_goal_hold_th_ == 0.0 (default) reproduces the authors' ROS1
+    // behaviour: re-roll an independent random point every 1 Hz tick.
+    //
+    // A positive hold_th was tried as a port-only fix for Nav2/DWB stalling
+    // out under fast retargeting (with PathAlign/GoalAlign critics weighted
+    // heavily, the top-scoring velocity each cycle was "rotate toward the
+    // (already stale) goal direction", so a goal changing every second meant
+    // the robot never finished turning -- observed as a ground-truth pose
+    // frozen for 30+ consecutive iterations near the source). Measured
+    // 2026-07-16 with hold_th=15.0 on House09: the hold itself worked (logs
+    // confirmed goals held the full 15 s) but success got WORSE (5/5
+    // ROBOT_STUCK, avg estimation error ~7.9 m vs ~6.5 m pre-fix) -- with a
+    // stable goal the robot drove directly into walls/corners instead, and
+    // Nav2's spin recovery couldn't dislodge it (no clearance margin in
+    // create_random_gaol, same as the original -- see
+    // ADSM_INVESTIGATION_20260716.md §2/§3). Left parameter-gated for future
+    // experiments, not the faithful default.
+    double now_t = this->now().seconds();
+    bool need_new = !has_random_goal_
+        || reached_point(random_goal_x_, random_goal_y_)
+        || (now_t - random_goal_set_time_) > random_goal_hold_th_;
+    if (need_new) {
+        double new_x, new_y;
+        // Seed from the robot's current position, not the previous goal: seeding
+        // from goal_ let an out-of-bounds goal compound into a runaway drift.
+        create_random_gaol(real_x_, real_y_, random_sample_r_, new_x, new_y);
+        random_goal_x_ = new_x;
+        random_goal_y_ = new_y;
+        random_goal_set_time_ = now_t;
+        has_random_goal_ = true;
+        RCLCPP_INFO(this->get_logger(), "Generate a random goal. r: %.2f, x %.2f y %.2f", random_sample_r_, new_x, new_y);
+    } else {
+        RCLCPP_INFO(this->get_logger(), "Hold random goal: x %.2f y %.2f (age %.1f/%.1f s)",
+            random_goal_x_, random_goal_y_, now_t - random_goal_set_time_, random_goal_hold_th_);
+    }
+    goals_.clear();
+    goals_.push_back(GoalNode(iter_, random_goal_x_, random_goal_y_, GOAL_RANDOM_TYPE));
+}
+
 void Adsm::evaluate() {
     if ((!goals_.empty()) && (!set_random_goal_)) {
         // Normalize j_p, j_i, and j
@@ -610,11 +667,9 @@ void Adsm::evaluate() {
         // Static map adaptation: if no gas AND no frontiers, all j=0 so fall back to random exploration
         if (sum_probability == 0.0 && sum_frontier_size == 0.0) {
             RCLCPP_INFO(this->get_logger(), "No gas and no frontiers (static map). Falling back to random exploration.");
-            goals_.clear();
-            double new_x, new_y;
-            create_random_gaol(real_x_, real_y_, random_sample_r_, new_x, new_y);
-            goals_.push_back(GoalNode(iter_, new_x, new_y, GOAL_RANDOM_TYPE));
+            pick_or_hold_random_goal();
         } else {
+            has_random_goal_ = false;  // back to normal weighted selection; next fallback starts fresh
             for (auto& temp_goal : goals_) {
                 temp_goal.j_p = sum_probability > 0 ? temp_goal.probability / sum_probability : 0.0;
                 temp_goal.j_i = sum_frontier_size > 0 ? temp_goal.frontier_size / sum_frontier_size : 0.0;
@@ -623,13 +678,7 @@ void Adsm::evaluate() {
             }
         }
     } else {
-        goals_.clear();
-        RCLCPP_INFO(this->get_logger(), "Generate a random goal. r: %.2f", random_sample_r_);
-        double new_x, new_y;
-        // Seed from the robot's current position, not the previous goal: seeding
-        // from goal_ let an out-of-bounds goal compound into a runaway drift.
-        create_random_gaol(real_x_, real_y_, random_sample_r_, new_x, new_y);
-        goals_.push_back(GoalNode(iter_, new_x, new_y, GOAL_RANDOM_TYPE));
+        pick_or_hold_random_goal();
     }
 
     // Select the point with the largest j as the navigation goal
@@ -656,9 +705,31 @@ void Adsm::navigate() {
     goal_msg.pose.pose.orientation.z = 0.0;
     goal_msg.pose.pose.orientation.w = 1.0;
 
-    auto send_goal_options = rclcpp_action::Client<NavigateToPose>::SendGoalOptions();
-    nav_client_->async_send_goal(goal_msg, send_goal_options);
-    RCLCPP_INFO(this->get_logger(), "Send goal: x %.2f y %.2f", goal_.x, goal_.y);
+    // Retarget the in-flight drive rather than preempting it. Re-sending the
+    // action goal makes bt_navigator halt FollowPath and rebuild the tree, so
+    // at iter_rate_ = 1 Hz the controller is reset before it ever moves the
+    // robot. GoalUpdater swaps the goal inside the running tree instead, which
+    // is what move_base's sendGoal() did. The action goal is (re)sent only when
+    // no drive is live — i.e. first iteration, or after the tree terminated.
+    if (use_goal_update_ && nav_goal_active_) {
+        geometry_msgs::msg::PoseStamped update;
+        update.header = goal_msg.pose.header;  // stamp = now(); MUST post-date
+        update.pose = goal_msg.pose.pose;      // the action goal or it's ignored
+        goal_update_pub_->publish(update);
+        RCLCPP_INFO(this->get_logger(), "Update goal: x %.2f y %.2f", goal_.x, goal_.y);
+    } else {
+        auto send_goal_options = rclcpp_action::Client<NavigateToPose>::SendGoalOptions();
+        if (use_goal_update_) {
+            using GoalHandle = rclcpp_action::ClientGoalHandle<NavigateToPose>;
+            send_goal_options.goal_response_callback =
+                [this](GoalHandle::SharedPtr handle) { if (!handle) nav_goal_active_ = false; };
+            send_goal_options.result_callback =
+                [this](const GoalHandle::WrappedResult &) { nav_goal_active_ = false; };
+            nav_goal_active_ = true;
+        }
+        nav_client_->async_send_goal(goal_msg, send_goal_options);
+        RCLCPP_INFO(this->get_logger(), "Send goal: x %.2f y %.2f", goal_.x, goal_.y);
+    }
 
     cal_duration_ms_ = (get_current_time() - cal_start_time_)*1000;
     RCLCPP_INFO(this->get_logger(), "Loop cost time: %.2f ms", cal_duration_ms_);
@@ -677,6 +748,14 @@ bool Adsm::check_terminal() {
     if (iter_ >= max_iter_) {
         result_ = "REACH_MAX_ITER";
         RCLCPP_INFO(this->get_logger(), "REACH_MAX_ITER: iter %d, max_iter %d", iter_, max_iter_);
+        return true;
+    }
+
+    // oracle-derived travel-distance budget check (0.0 = disabled)
+    if (distance_budget_ > 0.0 && total_distance_ >= distance_budget_) {
+        result_ = "DISTANCE_BUDGET_EXCEEDED";
+        RCLCPP_INFO(this->get_logger(), "DISTANCE_BUDGET_EXCEEDED: total_distance %.2f, budget %.2f",
+            total_distance_, distance_budget_);
         return true;
     }
 

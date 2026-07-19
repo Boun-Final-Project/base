@@ -1,0 +1,18 @@
+# ADSM paper defaults. Runtime requirements are enforced by the agent metadata:
+# realistic SLAM pose/map, Nav2, faithful controller profile, continuous 1 Hz motion.
+k1: 0.2
+random_sample_r: 3.0
+goal_cluster_num: 20
+obs_r: 0.2
+goal_reach_th: 0.5
+resample_time_th: 5.5
+gas_high_th: 0.3
+gas_low_th: 0.1
+sensor_window_length: 6.0
+frontier_search_th: 3.0
+rrt_max_iter: 200
+rrt_max_r: 3.0
+rrt_min_r: 0.7
+rrt_step_size: 0.3
+stuck_duration_th: 60.0
+# seed: 42  # uncomment for deterministic replay; omitted records a generated seed

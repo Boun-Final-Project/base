@@ -21,10 +21,11 @@ from eesa.banana import Banana
 class FinishCheck:
     """Checks various termination conditions."""
 
-    def __init__(self, node: Node, rc: RobotClient, params: dict):
+    def __init__(self, node: Node, rc: RobotClient, params: dict, agent):
         self.node = node
         self.rc = rc
         self.params = params
+        self.agent = agent
         self.robot_stuck_pose = None
         self.robot_stuck_last_time = None
         self.robot_stuck_dis_th = 0.2
@@ -52,6 +53,15 @@ class FinishCheck:
         if it >= self.params['max_iter']:
             self.result = 'REACH_MAX_ITER'
             self.node.get_logger().info(f"STOP: MAX_ITER ({it}/{self.params['max_iter']})")
+            return True
+
+        # Oracle-derived travel-distance budget (0.0 = disabled)
+        budget = self.params.get('distance_budget', 0.0)
+        if budget > 0.0 and self.agent.total_distance >= budget:
+            self.result = 'DISTANCE_BUDGET_EXCEEDED'
+            self.node.get_logger().info(
+                f'STOP: DISTANCE_BUDGET_EXCEEDED '
+                f'({self.agent.total_distance:.2f}/{budget:.2f} m)')
             return True
 
         # Stuck detection
@@ -98,6 +108,7 @@ class EesaNode(Node):
         self.declare_parameter('find_source_th', 0.5)
         self.declare_parameter('iter_rate', 1)
         self.declare_parameter('max_iter', 200)
+        self.declare_parameter('distance_budget', 0.0)
         self.declare_parameter('max_stuck_time', 60.0)
         self.declare_parameter('data_path', '/tmp/eesa_results')
         self.declare_parameter('visual', True)
@@ -129,6 +140,7 @@ class EesaNode(Node):
             'find_source_th': float(self.get_parameter('find_source_th').value),
             'iter_rate': int(self.get_parameter('iter_rate').value),
             'max_iter': int(self.get_parameter('max_iter').value),
+            'distance_budget': float(self.get_parameter('distance_budget').value),
             'max_stuck_time': float(self.get_parameter('max_stuck_time').value),
             'data_path': self.get_parameter('data_path').value,
             'visual': bool(self.get_parameter('visual').value),
@@ -163,8 +175,8 @@ def main(args=None):
         sensor_window=params['sensor_window'],
     )
 
-    fc = FinishCheck(node, rc, params)
     agent = Banana(node, mc, rc, params)
+    fc = FinishCheck(node, rc, params, agent)
 
     # Build a unique run path
     import uuid

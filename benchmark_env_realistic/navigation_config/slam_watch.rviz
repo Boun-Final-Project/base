@@ -1,0 +1,38 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+    - Class: rviz_default_plugins/Map
+      Name: SLAM Map
+      Topic:
+        Value: /PioneerP3DX/map
+      Enabled: true
+      Alpha: 1
+      Color Scheme: map
+    - Class: rviz_default_plugins/LaserScan
+      Name: LaserScan
+      Topic:
+        Value: /PioneerP3DX/laser_scanner
+      Enabled: true
+      Size (m): 0.05
+      Color: 255; 0; 0
+  Global Options:
+    Fixed Frame: map
+    Background Color: 48; 48; 48
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 40
+      X: 0
+      Y: 0

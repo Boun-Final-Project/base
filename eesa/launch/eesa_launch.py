@@ -21,6 +21,9 @@ def generate_launch_description():
         DeclareLaunchArgument('find_source_th', default_value='0.5'),
         DeclareLaunchArgument('iter_rate', default_value='1'),
         DeclareLaunchArgument('max_iter', default_value='200'),
+        # Oracle-derived travel-distance cap (10x an honest straight-shot Nav2
+        # drive to the source). 0.0 = disabled, matches the flat max_iter default.
+        DeclareLaunchArgument('distance_budget', default_value='0.0'),
         DeclareLaunchArgument('max_stuck_time', default_value='60.0'),
         DeclareLaunchArgument('data_path', default_value='/tmp/eesa_results'),
         DeclareLaunchArgument('visual', default_value='true'),
@@ -70,6 +73,8 @@ def generate_launch_description():
                 'find_source_th': LaunchConfiguration('find_source_th'),
                 'iter_rate': LaunchConfiguration('iter_rate'),
                 'max_iter': ParameterValue(LaunchConfiguration('max_iter'), value_type=int),
+                'distance_budget': ParameterValue(
+                    LaunchConfiguration('distance_budget'), value_type=float),
                 'max_stuck_time': LaunchConfiguration('max_stuck_time'),
                 'data_path': LaunchConfiguration('data_path'),
                 'visual': True,

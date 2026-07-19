@@ -1,0 +1,13 @@
+# Fairness knobs live here, not in the agent: every method in a suite runs under
+# identical conditions, and the full block is recorded in every result.json.
+max_steps: 600
+step_delay: 0.5
+success_radius: 0.5
+nav_goal_tolerance: 0.10
+drive_timeout: 30.0
+wall_timeout_s: 1800
+escape: false
+max_hop: 1.0
+robot_radius: 0.25
+lidar: {rays: 72, fov_deg: 360, max_range_m: 3.0}
+motion: nav2          # physical Nav2 drive; never teleport between steps

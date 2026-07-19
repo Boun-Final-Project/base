@@ -1,0 +1,553 @@
+{
+  "10x6_u_left_1_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      1.45,
+      3.0
+    ],
+    "start": [
+      9.0,
+      3.0
+    ],
+    "travel_distance_m": 8.59,
+    "sim_time_s": 38.46,
+    "wall_time_s": 38.5,
+    "final_distance_m": 0.5,
+    "timestamp": "2026-07-18T19:36:41",
+    "scenario": "10x6_u_left_1",
+    "sim": "sim1"
+  },
+  "10x6_u_left_2_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      2.0,
+      5.0
+    ],
+    "start": [
+      9.0,
+      3.0
+    ],
+    "travel_distance_m": 7.497,
+    "sim_time_s": 33.24,
+    "wall_time_s": 33.2,
+    "final_distance_m": 0.492,
+    "timestamp": "2026-07-18T19:37:38",
+    "scenario": "10x6_u_left_2",
+    "sim": "sim1"
+  },
+  "10x6_u_left_3_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      5.5,
+      3.0
+    ],
+    "start": [
+      9.0,
+      3.0
+    ],
+    "travel_distance_m": 7.596,
+    "sim_time_s": 34.16,
+    "wall_time_s": 34.2,
+    "final_distance_m": 0.486,
+    "timestamp": "2026-07-18T19:38:34",
+    "scenario": "10x6_u_left_3",
+    "sim": "sim1"
+  },
+  "10x6_u_left_4_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      9.0,
+      3.0
+    ],
+    "start": [
+      1.45,
+      3.0
+    ],
+    "travel_distance_m": 8.546,
+    "sim_time_s": 35.63,
+    "wall_time_s": 35.6,
+    "final_distance_m": 0.495,
+    "timestamp": "2026-07-18T19:41:40",
+    "scenario": "10x6_u_left_4",
+    "sim": "sim1"
+  },
+  "10x6_u_right_1_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      1.45,
+      3.0
+    ],
+    "start": [
+      9.0,
+      3.0
+    ],
+    "travel_distance_m": 9.039,
+    "sim_time_s": 39.89,
+    "wall_time_s": 39.9,
+    "final_distance_m": 0.498,
+    "timestamp": "2026-07-18T19:42:42",
+    "scenario": "10x6_u_right_1",
+    "sim": "sim1"
+  },
+  "10x6_u_right_2_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      2.0,
+      5.0
+    ],
+    "start": [
+      9.0,
+      3.0
+    ],
+    "travel_distance_m": 7.891,
+    "sim_time_s": 34.18,
+    "wall_time_s": 34.2,
+    "final_distance_m": 0.493,
+    "timestamp": "2026-07-18T19:43:50",
+    "scenario": "10x6_u_right_2",
+    "sim": "sim1"
+  },
+  "10x6_u_right_3_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      5.0,
+      3.0
+    ],
+    "start": [
+      9.0,
+      3.0
+    ],
+    "travel_distance_m": 6.318,
+    "sim_time_s": 28.84,
+    "wall_time_s": 28.8,
+    "final_distance_m": 0.492,
+    "timestamp": "2026-07-18T19:44:38",
+    "scenario": "10x6_u_right_3",
+    "sim": "sim1"
+  },
+  "10x6_u_right_4_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      7.0,
+      3.0
+    ],
+    "start": [
+      1.35,
+      3.0
+    ],
+    "travel_distance_m": 9.374,
+    "sim_time_s": 39.9,
+    "wall_time_s": 39.9,
+    "final_distance_m": 0.486,
+    "timestamp": "2026-07-18T19:45:36",
+    "scenario": "10x6_u_right_4",
+    "sim": "sim1"
+  },
+  "4_rooms_start_a_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      2.5,
+      3.0
+    ],
+    "start": [
+      11.0,
+      2.0
+    ],
+    "travel_distance_m": 8.316,
+    "sim_time_s": 37.3,
+    "wall_time_s": 37.3,
+    "final_distance_m": 0.485,
+    "timestamp": "2026-07-18T19:46:33",
+    "scenario": "4_rooms_start_a",
+    "sim": "sim1"
+  },
+  "4_rooms_start_b_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      1.5,
+      6.5
+    ],
+    "start": [
+      11.0,
+      2.0
+    ],
+    "travel_distance_m": 11.007,
+    "sim_time_s": 48.55,
+    "wall_time_s": 48.6,
+    "final_distance_m": 0.488,
+    "timestamp": "2026-07-18T19:47:40",
+    "scenario": "4_rooms_start_b",
+    "sim": "sim1"
+  },
+  "4_rooms_start_c_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      10.8,
+      10.8
+    ],
+    "start": [
+      11.0,
+      2.0
+    ],
+    "travel_distance_m": 14.659,
+    "sim_time_s": 79.09,
+    "wall_time_s": 79.1,
+    "final_distance_m": 0.494,
+    "timestamp": "2026-07-18T19:49:18",
+    "scenario": "4_rooms_start_c",
+    "sim": "sim1"
+  },
+  "4_rooms_start_d_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      11.5,
+      6.5
+    ],
+    "start": [
+      2.5,
+      3.0
+    ],
+    "travel_distance_m": 10.372,
+    "sim_time_s": 44.05,
+    "wall_time_s": 44.1,
+    "final_distance_m": 0.489,
+    "timestamp": "2026-07-18T19:50:22",
+    "scenario": "4_rooms_start_d",
+    "sim": "sim1"
+  },
+  "4_rooms_start_e_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      10.8,
+      10.8
+    ],
+    "start": [
+      2.5,
+      3.0
+    ],
+    "travel_distance_m": 14.169,
+    "sim_time_s": 60.2,
+    "wall_time_s": 60.2,
+    "final_distance_m": 0.492,
+    "timestamp": "2026-07-18T19:52:56",
+    "scenario": "4_rooms_start_e",
+    "sim": "sim1"
+  },
+  "curved_labrinth_left_1_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      0.5,
+      3.0
+    ],
+    "start": [
+      9.0,
+      1.5
+    ],
+    "travel_distance_m": 15.614,
+    "sim_time_s": 83.67,
+    "wall_time_s": 83.7,
+    "final_distance_m": 0.49,
+    "timestamp": "2026-07-18T19:54:57",
+    "scenario": "curved_labrinth_left_1",
+    "sim": "sim1"
+  },
+  "curved_labrinth_left_2_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      9.0,
+      1.5
+    ],
+    "start": [
+      0.5,
+      3.0
+    ],
+    "travel_distance_m": 15.566,
+    "sim_time_s": 84.14,
+    "wall_time_s": 84.1,
+    "final_distance_m": 0.488,
+    "timestamp": "2026-07-18T19:56:41",
+    "scenario": "curved_labrinth_left_2",
+    "sim": "sim1"
+  },
+  "curved_labrinth_left_3_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      5.0,
+      2.0
+    ],
+    "start": [
+      9.0,
+      1.5
+    ],
+    "travel_distance_m": 13.478,
+    "sim_time_s": 74.33,
+    "wall_time_s": 74.3,
+    "final_distance_m": 0.485,
+    "timestamp": "2026-07-18T19:58:15",
+    "scenario": "curved_labrinth_left_3",
+    "sim": "sim1"
+  },
+  "curved_labrinth_right_1_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      0.5,
+      3.0
+    ],
+    "start": [
+      9.0,
+      1.5
+    ],
+    "travel_distance_m": 15.735,
+    "sim_time_s": 84.38,
+    "wall_time_s": 84.4,
+    "final_distance_m": 0.496,
+    "timestamp": "2026-07-18T19:59:54",
+    "scenario": "curved_labrinth_right_1",
+    "sim": "sim1"
+  },
+  "curved_labrinth_right_2_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      9.0,
+      1.5
+    ],
+    "start": [
+      0.5,
+      3.0
+    ],
+    "travel_distance_m": 15.719,
+    "sim_time_s": 84.24,
+    "wall_time_s": 84.2,
+    "final_distance_m": 0.491,
+    "timestamp": "2026-07-18T20:01:38",
+    "scenario": "curved_labrinth_right_2",
+    "sim": "sim1"
+  },
+  "curved_labrinth_right_3_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      5.0,
+      2.0
+    ],
+    "start": [
+      9.0,
+      1.5
+    ],
+    "travel_distance_m": 10.897,
+    "sim_time_s": 63.83,
+    "wall_time_s": 63.8,
+    "final_distance_m": 0.495,
+    "timestamp": "2026-07-18T20:03:01",
+    "scenario": "curved_labrinth_right_3",
+    "sim": "sim1"
+  },
+  "many_rooms_1_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      2.8,
+      4.2
+    ],
+    "start": [
+      15.0,
+      7.0
+    ],
+    "travel_distance_m": 13.627,
+    "sim_time_s": 59.32,
+    "wall_time_s": 59.3,
+    "final_distance_m": 0.487,
+    "timestamp": "2026-07-18T20:04:20",
+    "scenario": "many_rooms_1",
+    "sim": "sim1"
+  },
+  "many_rooms_2_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      2.0,
+      9.0
+    ],
+    "start": [
+      15.0,
+      7.0
+    ],
+    "travel_distance_m": 13.563,
+    "sim_time_s": 59.21,
+    "wall_time_s": 59.2,
+    "final_distance_m": 0.486,
+    "timestamp": "2026-07-18T20:05:39",
+    "scenario": "many_rooms_2",
+    "sim": "sim1"
+  },
+  "many_rooms_3_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      15.0,
+      6.0
+    ],
+    "start": [
+      2.0,
+      2.0
+    ],
+    "travel_distance_m": 14.784,
+    "sim_time_s": 64.0,
+    "wall_time_s": 64.0,
+    "final_distance_m": 0.495,
+    "timestamp": "2026-07-18T20:07:05",
+    "scenario": "many_rooms_3",
+    "sim": "sim1"
+  },
+  "many_rooms_4_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      15.0,
+      3.0
+    ],
+    "start": [
+      2.0,
+      2.0
+    ],
+    "travel_distance_m": 13.751,
+    "sim_time_s": 58.11,
+    "wall_time_s": 58.1,
+    "final_distance_m": 0.49,
+    "timestamp": "2026-07-18T20:08:25",
+    "scenario": "many_rooms_4",
+    "sim": "sim1"
+  },
+  "ultimate_1_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      1.45,
+      3.0
+    ],
+    "start": [
+      18.0,
+      10.0
+    ],
+    "travel_distance_m": 19.87,
+    "sim_time_s": 88.91,
+    "wall_time_s": 88.9,
+    "final_distance_m": 0.497,
+    "timestamp": "2026-07-18T20:10:11",
+    "scenario": "ultimate_1",
+    "sim": "sim1"
+  },
+  "ultimate_2_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      2.0,
+      11.0
+    ],
+    "start": [
+      18.0,
+      10.0
+    ],
+    "travel_distance_m": 19.556,
+    "sim_time_s": 87.69,
+    "wall_time_s": 87.7,
+    "final_distance_m": 0.492,
+    "timestamp": "2026-07-18T20:11:55",
+    "scenario": "ultimate_2",
+    "sim": "sim1"
+  },
+  "ultimate_3_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      2.0,
+      4.5
+    ],
+    "start": [
+      18.0,
+      10.0
+    ],
+    "travel_distance_m": 18.296,
+    "sim_time_s": 81.38,
+    "wall_time_s": 81.4,
+    "final_distance_m": 0.495,
+    "timestamp": "2026-07-18T20:13:32",
+    "scenario": "ultimate_3",
+    "sim": "sim1"
+  },
+  "ultimate_4_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      18.0,
+      4.5
+    ],
+    "start": [
+      3.0,
+      11.0
+    ],
+    "travel_distance_m": 18.271,
+    "sim_time_s": 78.46,
+    "wall_time_s": 78.5,
+    "final_distance_m": 0.488,
+    "timestamp": "2026-07-18T20:15:06",
+    "scenario": "ultimate_4",
+    "sim": "sim1"
+  },
+  "ultimate_5_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      18.0,
+      2.0
+    ],
+    "start": [
+      3.0,
+      11.0
+    ],
+    "travel_distance_m": 21.407,
+    "sim_time_s": 92.83,
+    "wall_time_s": 92.8,
+    "final_distance_m": 0.5,
+    "timestamp": "2026-07-18T20:16:57",
+    "scenario": "ultimate_5",
+    "sim": "sim1"
+  },
+  "ultimate_6_sim1": {
+    "schema": 1,
+    "status": "success",
+    "source": [
+      18.0,
+      7.0
+    ],
+    "start": [
+      3.0,
+      11.0
+    ],
+    "travel_distance_m": 17.445,
+    "sim_time_s": 74.74,
+    "wall_time_s": 74.7,
+    "final_distance_m": 0.49,
+    "timestamp": "2026-07-18T20:18:31",
+    "scenario": "ultimate_6",
+    "sim": "sim1"
+  }
+}

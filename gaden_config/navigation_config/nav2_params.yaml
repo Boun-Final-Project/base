@@ -1,6 +1,7 @@
 $(var namespace):
   amcl:
     ros__parameters:
+      use_sim_time: True
       alpha1: 0.2
       alpha2: 0.2
       alpha3: 0.2
@@ -46,8 +47,11 @@ $(var namespace):
       odom_topic: $(var namespace)/odom
       bt_loop_duration: 10
       default_server_timeout: 20
-      # Examples in /opt/ros/humble/share/nav2_bt_navigator/behavior_trees
-      #default_nav_to_pose_bt_xml: /home/robotics/tfg_ros_simulation_ws/src/missions_pkg/behavior_trees/follow_point.xml
+      # Stock navigate_to_pose_w_replanning_and_recovery.xml + GoalUpdater —
+      # see adsm_goal_update_bt.xml's own header for the "fresh goal -> BT
+      # rebuild + rotate-to-heading, ~3 cm/s" problem this fixes. Strict
+      # superset of the stock tree when nothing publishes to goal_update.
+      default_nav_to_pose_bt_xml: /home/efe/ros2_ws/src/base/gaden_config/navigation_config/adsm_goal_update_bt.xml
       #default_nav_through_poses_bt_xml: /home/robotics/tfg_ros_simulation_ws/src/missions_pkg/behavior_trees/follow_point.xml
       navigators: ["navigate_to_pose", "navigate_through_poses"]
       navigate_to_pose:
@@ -98,6 +102,7 @@ $(var namespace):
 
   controller_server:
     ros__parameters:
+      use_sim_time: True
       controller_frequency: 20.0
       min_x_velocity_threshold: 0.001
       min_y_velocity_threshold: 0.5
@@ -166,6 +171,7 @@ $(var namespace):
   local_costmap:
     local_costmap:
       ros__parameters:
+        use_sim_time: True
         update_frequency: 5.0
         publish_frequency: 2.0
         global_frame: $(var namespace)_odom
@@ -208,6 +214,7 @@ $(var namespace):
   global_costmap:
     global_costmap:
       ros__parameters:
+        use_sim_time: True
         update_frequency: 1.0
         publish_frequency: 1.0
         global_frame: map
@@ -242,6 +249,7 @@ $(var namespace):
 
   planner_server:
     ros__parameters:
+      use_sim_time: True
       expected_planner_frequency: 20.0
       planner_plugins: ["GridBased"]
       GridBased:
@@ -252,6 +260,7 @@ $(var namespace):
 
   smoother_server:
     ros__parameters:
+      use_sim_time: True
       smoother_plugins: ["simple_smoother"]
       simple_smoother:
         plugin: "nav2_smoother::SimpleSmoother"
@@ -261,6 +270,7 @@ $(var namespace):
 
   behavior_server:
     ros__parameters:
+      use_sim_time: True
       local_costmap_topic: $(var namespace)/local_costmap/costmap_raw
       global_costmap_topic: $(var namespace)/global_costmap/costmap_raw
       local_footprint_topic: $(var namespace)/local_costmap/published_footprint
@@ -288,6 +298,7 @@ $(var namespace):
 
   waypoint_follower:
     ros__parameters:
+      use_sim_time: True
       loop_rate: 20
       stop_on_failure: false
       waypoint_task_executor_plugin: "wait_at_waypoint"
@@ -298,6 +309,7 @@ $(var namespace):
 
   velocity_smoother:
     ros__parameters:
+      use_sim_time: True
       smoothing_frequency: 20.0
       scale_velocities: False
       feedback: "OPEN_LOOP"

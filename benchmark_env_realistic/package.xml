@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+
+  <name>benchmark_env_realistic</name>
+  <version>0.0.0</version>
+  <description>Realistic variant of benchmark_env: Cartographer for mapping, AMCL for noisy pose. No ground-truth map or pose.</description>
+  <maintainer email="efemantaroglu@gmail.com">Efe</maintainer>
+
+  <license>GPLv3</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>ros2launch</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>benchmark_env</exec_depend>
+  <exec_depend>gaden_config</exec_depend>
+  <exec_depend>cartographer_ros</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>nav2_bt_navigator</exec_depend>
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_behaviors</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -3,6 +3,7 @@ from matplotlib.colors import ListedColormap
 import matplotlib.pyplot as plt
 from scipy.ndimage import binary_fill_holes, label, generate_binary_structure, binary_dilation
 import rclpy
+import time
 from rclpy.node import Node
 from gaden_msgs.srv import Occupancy
 
@@ -36,28 +37,54 @@ def load_3d_occupancy_grid_from_service(node: Node, service_name='/gaden_environ
     params : dict
         Dictionary with env_min, env_max, num_cells, cell_size
     """
-    # Create service client
-    client = node.create_client(Occupancy, service_name)
+    # Use a STEADY/WALL deadline and retry the complete request. On loaded cluster
+    # nodes Fast-DDS can occasionally drop the first response while GADEN reports
+    # "failed to send response ... client will not receive response". The former
+    # spin_until_future_complete timeout followed the node's simulation clock and
+    # could then wait forever during startup. A fresh client/request is required;
+    # waiting longer on the lost future can never recover.
+    deadline = time.monotonic() + timeout_sec
+    response = None
+    last_error = None
+    for attempt in range(1, 4):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
+        client = node.create_client(Occupancy, service_name)
+        try:
+            node.get_logger().info(
+                f'Waiting for service {service_name} (attempt {attempt}/3)...')
+            if not client.wait_for_service(timeout_sec=remaining):
+                last_error = f'service unavailable on attempt {attempt}'
+                continue
 
-    # Wait for service to be available
-    node.get_logger().info(f'Waiting for service {service_name}...')
-    if not client.wait_for_service(timeout_sec=timeout_sec):
-        raise RuntimeError(f'Service {service_name} not available after {timeout_sec} seconds')
+            node.get_logger().info(
+                f'Calling service {service_name} (attempt {attempt}/3)...')
+            future = client.call_async(Occupancy.Request())
+            attempt_deadline = min(deadline, time.monotonic() + 10.0)
+            while (rclpy.ok() and not future.done()
+                   and time.monotonic() < attempt_deadline):
+                rclpy.spin_once(node, timeout_sec=0.1)
 
-    # Create request (empty for this service)
-    request = Occupancy.Request()
+            if future.done():
+                try:
+                    response = future.result()
+                except Exception as exc:
+                    last_error = f'attempt {attempt} failed: {exc}'
+                if response is not None:
+                    break
+            else:
+                last_error = f'attempt {attempt} timed out waiting for response'
+        finally:
+            node.destroy_client(client)
 
-    # Call service
-    node.get_logger().info(f'Calling service {service_name}...')
-    future = client.call_async(request)
-    rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
+        if time.monotonic() < deadline:
+            node.get_logger().warn(
+                f'Occupancy service {last_error}; retrying with a fresh client.')
 
-    if not future.done():
-        raise RuntimeError(f'Service call to {service_name} timed out')
-
-    response = future.result()
     if response is None:
-        raise RuntimeError(f'Service call to {service_name} failed')
+        raise RuntimeError(
+            f'Service call to {service_name} failed after 3 attempts: {last_error}')
 
     # Extract response data
     origin = response.origin
@@ -228,6 +255,36 @@ class OccupancyGridMap:
                 # Check grid bounds and occupancy
                 if 0 <= check_gx < self.grid_width and 0 <= check_gy < self.grid_height:
                     if self.grid[check_gy, check_gx] != 0:
+                        return False
+        return True
+
+    def is_valid_traversable(self, position: tuple[float, float], radius: float = 0.2) -> bool:
+        """
+        Check if position is traversable (within bounds, not intersecting occupied cells).
+
+        Unlike is_valid, this treats CELL_UNKNOWN (-1) as passable — intended for
+        online SLAM mode where the map is incomplete and the robot must drive into
+        unknown territory to expand it. Only cells with value > 0 (occupied, outlet)
+        are considered obstacles.
+        """
+        gx, gy = self.world_to_grid(*position)
+
+        if gx < 0 or gx >= self.grid_width or gy < 0 or gy >= self.grid_height:
+            return False
+
+        radius_cells = int(np.ceil(radius / self.resolution))
+        radius_sq_cells = radius_cells ** 2
+
+        for dx in range(-radius_cells, radius_cells + 1):
+            for dy in range(-radius_cells, radius_cells + 1):
+                if dx * dx + dy * dy > radius_sq_cells:
+                    continue
+
+                check_gx = gx + dx
+                check_gy = gy + dy
+
+                if 0 <= check_gx < self.grid_width and 0 <= check_gy < self.grid_height:
+                    if self.grid[check_gy, check_gx] > 0:
                         return False
         return True
 

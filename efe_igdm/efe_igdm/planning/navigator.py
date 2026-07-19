@@ -148,26 +148,44 @@ class Navigator:
     # --- Internal Logic / Callbacks ---
 
     def _nav_feedback_callback(self, feedback_msg):
-        if self.goal_position is None or self.goal_handle is None: return
-        
+        # Snapshot both under one read: _nav_result_callback clears goal_handle from
+        # another executor thread, so re-reading self.goal_handle after the guard can
+        # see None and blow up on cancel_goal_async().
+        goal_handle = self.goal_handle
+        goal_position = self.goal_position
+        if goal_position is None or goal_handle is None: return
+
         current_pose = feedback_msg.feedback.current_pose.pose.position
-        dx = current_pose.x - self.goal_position[0]
-        dy = current_pose.y - self.goal_position[1]
-        
+        dx = current_pose.x - goal_position[0]
+        dy = current_pose.y - goal_position[1]
+
         # Manual distance check for smooth stopping
         if np.hypot(dx, dy) <= self.xy_goal_tolerance:
             self.node.get_logger().debug('XY goal reached via feedback, canceling for smooth stop.')
-            self.goal_handle.cancel_goal_async().add_done_callback(self._goal_cancel_callback)
+            try:
+                goal_handle.cancel_goal_async().add_done_callback(self._goal_cancel_callback)
+            except Exception as e:
+                self.node.get_logger().warn(f'feedback cancel failed: {e}')
 
     def _nav_goal_response_callback(self, future):
-        self.goal_handle = future.result()
-        if not self.goal_handle.accepted:
+        # future.result() is None if the goal request itself failed (e.g. the action
+        # server went away mid-request). Treat that exactly like a rejection rather
+        # than dereferencing None — otherwise is_moving stays True and the node hangs.
+        try:
+            goal_handle = future.result()
+        except Exception as e:
+            self.node.get_logger().warn(f'Goal request failed: {e}')
+            goal_handle = None
+        self.goal_handle = goal_handle
+
+        if goal_handle is None or not goal_handle.accepted:
             self.node.get_logger().warn('Goal rejected!')
+            self.goal_handle = None
             self.is_moving = False
             if self.on_complete_callback:
                 self.on_complete_callback()
             return
-        self.goal_handle.get_result_async().add_done_callback(self._nav_result_callback)
+        goal_handle.get_result_async().add_done_callback(self._nav_result_callback)
 
     def _nav_result_callback(self, future):
         status = future.result().status
@@ -208,13 +226,16 @@ class Navigator:
         """Cancel the active navigate_to_pose goal (used by the node's per-step
         drive timeout). The cancel result arrives via _nav_result_callback, which
         clears is_moving and fires on_complete_callback so the node re-predicts."""
-        if self.goal_handle is not None:
+        goal_handle = self.goal_handle  # snapshot; cleared by _nav_result_callback
+        cancelled = False
+        if goal_handle is not None:
             try:
-                self.goal_handle.cancel_goal_async().add_done_callback(
+                goal_handle.cancel_goal_async().add_done_callback(
                     self._goal_cancel_callback)
+                cancelled = True
             except Exception as e:
                 self.node.get_logger().warn(f'cancel_current_goal failed: {e}')
-        else:
+        if not cancelled:
             # Goal request not yet accepted (rare at multi-second timeouts): force
             # completion so the node re-predicts; any stale goal that lands later is
             # preempted by the next send_goal anyway.

@@ -1,0 +1,70 @@
+<!--
+  ADSM navigation tree — restores move_base's sendGoal() semantics on Nav2.
+
+  WHY THIS EXISTS
+  ADSM re-decides its goal every iteration (iter_rate_ = 1 Hz) and calls
+  navigate() unconditionally; the ROS1 original did the same. move_base
+  absorbed that: a new goal retargeted the drive already in progress and the
+  local planner never stopped emitting velocities. Nav2 treats each new
+  NavigateToPose goal as a fresh mission instead - it halts FollowPath
+  (zeroing cmd_vel), rebuilds the tree from the root, and DWB restarts with a
+  rotate-to-heading. Measured on House09: 318 "Begin navigating" + 308 goal
+  preemptions in a 328 s run, one every 1.00 s, robot advancing ~3 cm/s. It
+  then trips ADSM's own 0.15 m / 60 s stuck watchdog. The algorithm is
+  bit-exact with the paper's; only the goal *transport* differs.
+
+  WHAT CHANGED
+  This is nav2_bt_navigator's stock navigate_to_pose_w_replanning_and_recovery.xml
+  with exactly one edit: ComputePathToPose's goal is wrapped in GoalUpdater, so
+  the goal arrives on the `goal_update` topic and is swapped inside the running
+  tree rather than preempting it. Every stock recovery is kept as-is.
+
+  Pair with the adsm node's `use_goal_update:=true`, which sends ONE action goal
+  and thereafter publishes PoseStamped to `goal_update`.
+
+  Reaching a goal still ends the tree normally (FollowPath -> SUCCESS), and the
+  node then sends a fresh action goal - that is ~1 restart per goal actually
+  reached, not one per iteration.
+
+  GOTCHA: GoalUpdater only accepts a topic goal whose header.stamp POST-DATES
+  the current goal's. Publish with a zero/stale stamp and it silently keeps
+  driving to the original goal forever.
+
+  Do NOT model this on follow_point.xml: its KeepRunningUntilFailure around
+  FollowPath kills the whole tree the moment the controller fails, and its
+  TruncatePath clips to a 1 m lookahead. Both are right for chasing a person,
+  wrong for ADSM (measured: tree died 2-3x per run, robot travelled 7-12 m vs
+  15-33 m at baseline).
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <GoalUpdater input_goal="{goal}" output_goal="{updated_goal}">
+              <ComputePathToPose goal="{updated_goal}" path="{path}" planner_id="GridBased"/>
+            </GoalUpdater>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5"/>
+          <BackUp backup_dist="0.30" backup_speed="0.05"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

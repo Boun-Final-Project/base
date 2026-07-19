@@ -15,6 +15,9 @@ def generate_launch_description():
         DeclareLaunchArgument('source_th', default_value='0.5'),
         DeclareLaunchArgument('iter_rate', default_value='1.0'),
         DeclareLaunchArgument('max_iter', default_value='200'),
+        # Oracle-derived travel-distance cap (10x an honest straight-shot Nav2
+        # drive to the source). 0.0 = disabled, matches the flat max_iter default.
+        DeclareLaunchArgument('distance_budget', default_value='0.0'),
         DeclareLaunchArgument('data_path', default_value='/tmp/adsm_results'),
         DeclareLaunchArgument('visual', default_value='true'),
         DeclareLaunchArgument('k1', default_value='0.2'),
@@ -27,6 +30,17 @@ def generate_launch_description():
         DeclareLaunchArgument('gas_sensor_topic', default_value='/fake_pid/Sensor_reading'),
         DeclareLaunchArgument('anemometer_topic', default_value='/fake_anemometer/WindSensor_reading'),
         DeclareLaunchArgument('nav_action', default_value='/PioneerP3DX/navigate_to_pose'),
+        # Retarget the running drive via Nav2's GoalUpdater instead of re-sending
+        # the action goal (which preempts + rebuilds the BT every iteration).
+        # Requires a bt_navigator tree containing GoalUpdater. Opt-in because
+        # a standard Nav2 tree has no consumer for the update topic.
+        DeclareLaunchArgument('use_goal_update', default_value='false'),
+        DeclareLaunchArgument('goal_update_topic', default_value='/PioneerP3DX/goal_update'),
+        # 0.0 = original ROS1 behaviour (re-roll the stuck-recovery random
+        # goal every tick). A positive value is a port-only deviation that
+        # A/B-tested worse on House09 (2026-07-16) -- exposed for future
+        # experiments only, not recommended.
+        DeclareLaunchArgument('random_goal_hold_th', default_value='0.0'),
 
         # Python SLAM node (from efe_igdm) — publishes the SLAM OccupancyGrid
         Node(
@@ -54,6 +68,8 @@ def generate_launch_description():
                 'source_th': LaunchConfiguration('source_th'),
                 'iter_rate': LaunchConfiguration('iter_rate'),
                 'max_iter': ParameterValue(LaunchConfiguration('max_iter'), value_type=int),
+                'distance_budget': ParameterValue(
+                    LaunchConfiguration('distance_budget'), value_type=float),
                 'stuck_duration_th': 60.0,
                 'visual': True,
                 'data_path': LaunchConfiguration('data_path'),
@@ -67,6 +83,9 @@ def generate_launch_description():
                 'gas_sensor_topic': LaunchConfiguration('gas_sensor_topic'),
                 'anemometer_topic': LaunchConfiguration('anemometer_topic'),
                 'nav_action': LaunchConfiguration('nav_action'),
+                'use_goal_update': ParameterValue(
+                    LaunchConfiguration('use_goal_update'), value_type=bool),
+                'goal_update_topic': LaunchConfiguration('goal_update_topic'),
 
                 # External SLAM map from Python node
                 'external_slam_map_topic': slam_map_topic,
@@ -88,6 +107,9 @@ def generate_launch_description():
                 'gas_high_th': 0.3,
                 'gas_low_th': 0.1,
                 'sensor_window_length': 6.0,
+
+                'random_goal_hold_th': ParameterValue(
+                    LaunchConfiguration('random_goal_hold_th'), value_type=float),
             }],
         ),
     ])
